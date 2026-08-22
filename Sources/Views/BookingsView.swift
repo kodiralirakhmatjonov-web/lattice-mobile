@@ -1,0 +1,27 @@
+import SwiftUI
+
+struct BookingsView: View {
+    @State private var bookings: [BookingSummary] = []
+    @State private var loading = true
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            if let error { Text(error).foregroundStyle(.red) }
+            ForEach(bookings) { booking in
+                BookingRow(booking: booking).listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.plain).scrollContentBackground(.hidden).background(BusinessDesign.background)
+        .navigationTitle("Бронирования")
+        .overlay { if loading { ProgressView() } }
+        .task { await load() }
+        .refreshable { await load() }
+    }
+
+    func load() async {
+        loading = true; error = nil
+        do { bookings = try await APIClient.shared.bookings() } catch { self.error = error.localizedDescription }
+        loading = false
+    }
+}
