@@ -66,7 +66,6 @@ jobs:
           done
 
           test -f Signing/distribution-private-key.enc || { echo "Missing Signing/distribution-private-key.enc"; exit 1; }
-          test -f Signing/AppleDistribution.cer || { echo "Missing Signing/AppleDistribution.cer"; exit 1; }
           test -f Signing/iumrah-business.mobileprovision || { echo "Missing Signing/iumrah-business.mobileprovision"; exit 1; }
 
       - name: Install signing assets
@@ -93,8 +92,35 @@ jobs:
             -out "$PRIVATE_KEY" \
             -pass env:IOS_SIGNING_KEY_PASSWORD
 
-          if ! openssl x509 -inform DER -in "$GITHUB_WORKSPACE/Signing/AppleDistribution.cer" -out "$CERT_PEM" 2>/dev/null; then
-            openssl x509 -inform PEM -in "$GITHUB_WORKSPACE/Signing/AppleDistribution.cer" -out "$CERT_PEM"
+          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
+
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist" \
+          CERT_DER="$RUNNER_TEMP/distribution-certificate.der" \
+          python3 - <<'PYCODE'
+          import os
+          import plistlib
+          from pathlib import Path
+          profile = Path(os.environ["PROFILE_PLIST"])
+          out = Path(os.environ["CERT_DER"])
+          with profile.open("rb") as f:
+              data = plistlib.load(f)
+          certs = data.get("DeveloperCertificates") or []
+          if not certs:
+              raise SystemExit("Provisioning profile does not contain DeveloperCertificates")
+          out.write_bytes(certs[0])
+          print(f"Extracted signing certificate from provisioning profile: {len(certs[0])} bytes")
+          PYCODE
+
+          openssl x509 \
+            -inform DER \
+            -in "$RUNNER_TEMP/distribution-certificate.der" \
+            -out "$CERT_PEM"
+
+          KEY_FP=$(openssl pkey -in "$PRIVATE_KEY" -pubout 2>/dev/null | openssl sha256)
+          CERT_FP=$(openssl x509 -in "$CERT_PEM" -pubkey -noout 2>/dev/null | openssl sha256)
+          if [ "$KEY_FP" != "$CERT_FP" ]; then
+            echo "The provisioning profile certificate does not match the generated private signing key."
+            exit 1
           fi
 
           openssl pkcs12 \
@@ -112,7 +138,6 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
           PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")
           PROFILE_APP_IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/profile.plist")
