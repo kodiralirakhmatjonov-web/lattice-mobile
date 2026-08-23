@@ -11,21 +11,29 @@ settings:
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "10"
+    CURRENT_PROJECT_VERSION: "11"
 
 targets:
   iumrahBusiness:
     type: application
     platform: iOS
+
+    # XcodeGen target resources must be declared as target sources.
+    # Asset catalogs are then routed to the Resources build phase.
     sources:
       - path: Sources
-    resources:
       - path: Resources/Assets.xcassets
+        buildPhase: resources
+
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.iumrah.business
         PRODUCT_NAME: iumrah Business
+
         TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
 
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: "iumrah Business"
@@ -38,10 +46,6 @@ targets:
 
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
-
-        SUPPORTS_MACCATALYST: NO
-        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
-        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
 
     scheme:
       testTargets: []
