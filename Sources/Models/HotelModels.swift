@@ -92,3 +92,10 @@ struct HotelListItem: Codable, Identifiable {
 
 struct HotelsResponse: Codable { let hotels: [HotelListItem] }
 struct HotelSaveResponse: Codable { let ok: Bool; let hotel: HotelListItem? }
+
+struct HotelCloudHealthResponse: Codable {
+    let ok: Bool
+    let database: String
+    let storage: String
+    let hotels: Int
+}

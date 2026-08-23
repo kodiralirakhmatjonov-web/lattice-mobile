@@ -5,6 +5,8 @@ struct HotelsView: View {
     @State private var loading = false
     @State private var showAdd = false
     @State private var backendUnavailable = false
+    @State private var cloudHealth: HotelCloudHealthResponse?
+    @State private var backendMessage: String?
 
     var body: some View {
         ScrollView {
@@ -13,10 +15,27 @@ struct HotelsView: View {
                     HotelCountCard(title: "Makkah", count: hotels.filter { $0.city.lowercased().contains("makk") }.count)
                     HotelCountCard(title: "Madinah", count: hotels.filter { $0.city.lowercased().contains("mad") }.count)
                 }
-                if backendUnavailable {
-                    Text("Hotel API ещё не установлен на iumrah.app. Сначала примените backend patch из второго ZIP.")
-                        .font(.footnote).foregroundStyle(.orange).padding(14).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+                HStack(spacing: 9) {
+                    Image(systemName: backendUnavailable ? "exclamationmark.icloud.fill" : "checkmark.icloud.fill")
+                        .foregroundStyle(backendUnavailable ? .orange : .green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(backendUnavailable ? "Hotels Cloud недоступен" : "iumrah Hotels Cloud")
+                            .font(.caption.bold())
+                        if let cloudHealth, !backendUnavailable {
+                            Text("D1: \(cloudHealth.database) · R2: \(cloudHealth.storage)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        } else if let backendMessage {
+                            Text(backendMessage).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                    Spacer()
+                    if let cloudHealth, !backendUnavailable {
+                        Text("\(cloudHealth.hotels)")
+                            .font(.caption.bold()).foregroundStyle(.secondary)
+                    }
                 }
+                .padding(13)
+                .background((backendUnavailable ? Color.orange : Color.green).opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 VStack(alignment: .leading, spacing: 10) {
                     HStack { Text("База отелей").font(.title2.bold()); Spacer(); if loading { ProgressView() } }
                     if hotels.isEmpty && !loading {
@@ -58,9 +77,19 @@ struct HotelsView: View {
     }
 
     func load() async {
-        loading = true; backendUnavailable = false
-        do { hotels = try await APIClient.shared.hotels() }
-        catch { backendUnavailable = true }
+        loading = true
+        backendUnavailable = false
+        backendMessage = nil
+        do {
+            async let healthRequest = APIClient.shared.hotelCloudHealth()
+            async let hotelsRequest = APIClient.shared.hotels()
+            cloudHealth = try await healthRequest
+            hotels = try await hotelsRequest
+        } catch {
+            backendUnavailable = true
+            backendMessage = error.localizedDescription
+            cloudHealth = nil
+        }
         loading = false
     }
 }

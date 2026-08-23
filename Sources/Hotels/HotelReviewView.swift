@@ -120,25 +120,33 @@ struct HotelReviewView: View {
                 publishing = true; publishStatus = "Сохраняем карточку…"
                 Task {
                     do {
-                        var publishDraft = draft
-                        publishDraft.status = "published"
-                        _ = try await APIClient.shared.saveHotel(publishDraft)
-                        let selected = publishDraft.selectedImages
+                        var cloudDraft = draft
+                        cloudDraft.status = "draft"
+                        publishStatus = "D1: сохраняем карточку…"
+                        _ = try await APIClient.shared.saveHotel(cloudDraft)
+
+                        let selected = cloudDraft.selectedImages
                         var uploaded = 0
                         var failed = 0
                         for (index, image) in selected.enumerated() {
-                            publishStatus = "Фотографии: \(index + 1) / \(selected.count)"
+                            publishStatus = "R2: фотография \(index + 1) / \(selected.count)"
                             do {
-                                try await APIClient.shared.uploadHotelImage(hotelID: draft.id, candidate: image, position: index)
+                                try await APIClient.shared.uploadHotelImage(hotelID: cloudDraft.id, candidate: image, position: index)
                                 uploaded += 1
                             } catch {
                                 failed += 1
                             }
                         }
-                        publishStatus = failed == 0
-                            ? "Готово. Отель и \(uploaded) фото сохранены в базе iumrah."
-                            : "Карточка сохранена. R2: \(uploaded) фото загружено, \(failed) осталось на временных ссылках."
-                    } catch { publishStatus = "Ошибка: \(error.localizedDescription)" }
+
+                        if failed == 0 {
+                            cloudDraft.status = "published"
+                            publishStatus = "D1: публикуем отель…"
+                            _ = try await APIClient.shared.saveHotel(cloudDraft)
+                            publishStatus = "Готово. Отель полностью сохранён: D1 + R2 (\(uploaded) фото)."
+                        } else {
+                            publishStatus = "Отель сохранён в D1 как черновик. R2: \(uploaded) фото загружено, \(failed) не удалось. Публичная база его пока не показывает."
+                        }
+                    } catch { publishStatus = "Ошибка Hotels Cloud: \(error.localizedDescription)" }
                     publishing = false
                 }
             } label: {

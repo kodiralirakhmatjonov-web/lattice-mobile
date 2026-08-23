@@ -6,3 +6,6 @@ xcuserdata/
 *.ipa
 *.xcarchive
 iumrahBusiness.xcodeproj
+Backend/HotelsWorker/node_modules/
+Backend/HotelsWorker/wrangler.generated.jsonc
+Backend/HotelsWorker/.wrangler/

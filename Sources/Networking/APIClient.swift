@@ -64,6 +64,12 @@ actor APIClient {
         return try decoder.decode(HotelsResponse.self, from: data).hotels
     }
 
+    func hotelCloudHealth() async throws -> HotelCloudHealthResponse {
+        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/health"))
+        try validate(response, data: data)
+        return try decoder.decode(HotelCloudHealthResponse.self, from: data)
+    }
+
     func saveHotel(_ hotel: HotelDraft) async throws -> HotelListItem? {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels"))
         request.httpMethod = "POST"

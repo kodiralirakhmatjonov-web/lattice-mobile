@@ -2,15 +2,27 @@
 
 Native SwiftUI admin application for iumrah operations and the on-device Hotel Importer.
 
-## Current v0.1 scope
+## Hotels Cloud architecture
 
-- Uses the existing `https://iumrah.app` staff login/session.
-- Reads existing D1 booking and chat APIs.
-- Adds a Hotels module.
-- On-device `WKWebView` importer checks Booking, Expedia and Agoda serially.
-- Extracts structured metadata, hotel images, common amenities and room-name candidates.
-- Human Review step selects photos / cover before publishing.
-- Publishes hotel metadata and selected images to the companion Hotel API in `iumrah-web`.
+The hotel catalog is centralized and is **not stored only on the iPhone**.
+
+- D1 master database: `iumrah-hotels`
+- R2 master media bucket: `iumrah-hotels-media`
+- Cloudflare Worker: `iumrah-hotels-api`
+- Admin API: `https://iumrah.app/api/admin/hotels`
+- Public catalog API: `https://iumrah.app/api/catalog/hotels`
+
+The iPhone importer extracts and reviews hotel data locally, then saves approved metadata to D1 and approved images to R2. The future iumrah consumer app / package generator reads published hotels from the public catalog API and performs live rate/availability checks separately.
+
+Existing iumrah staff authentication remains the source of truth. The hotel Worker validates the existing `iumrah.app` staff session before allowing admin writes.
+
+## Current scope
+
+- Existing `https://iumrah.app` staff login/session.
+- Existing booking and chat APIs.
+- Native Hotel Importer using Booking, Expedia and Agoda in `WKWebView`.
+- Human review for hotel metadata and images.
+- Central D1/R2 hotel persistence through the dedicated Hotels Cloud Worker.
 
 ## Generate Xcode project
 
@@ -24,8 +36,8 @@ open iumrahBusiness.xcodeproj
 
 `com.iumrah.business`
 
-Change it in `project.yml` before creating the App Store Connect record if another identifier is required.
+## Deploy Hotels Cloud
 
-## GitHub Actions
+See `Backend/HotelsWorker/README.md`.
 
-Use `.github/workflows/testflight.yml` from the manual first-upload package. It validates the app on a GitHub macOS runner and can upload a signed archive to TestFlight when Apple secrets are configured.
+The deployment workflow creates the D1 database and R2 bucket if they do not already exist, applies migrations, deploys the Worker routes, and verifies the public health endpoint.
