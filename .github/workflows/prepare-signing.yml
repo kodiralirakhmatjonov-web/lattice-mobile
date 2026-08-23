@@ -1,0 +1,70 @@
+name: Prepare iOS Signing CSR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required secrets
+        env:
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          IOS_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_ID_EMAIL" || { echo "Missing secret: APPLE_ID_EMAIL"; exit 1; }
+          test -n "$IOS_SIGNING_KEY_PASSWORD" || { echo "Missing secret: IOS_SIGNING_KEY_PASSWORD"; exit 1; }
+
+      - name: Generate private key and CSR
+        env:
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          IOS_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p signing-output
+
+          openssl genrsa -out signing-output/distribution-private-key.pem 2048
+
+          openssl req \
+            -new \
+            -sha256 \
+            -key signing-output/distribution-private-key.pem \
+            -out signing-output/iumrah-business.certSigningRequest \
+            -subj "/emailAddress=${APPLE_ID_EMAIL}/CN=iumrah Business Distribution/C=UZ"
+
+          openssl enc \
+            -aes-256-cbc \
+            -salt \
+            -pbkdf2 \
+            -iter 200000 \
+            -in signing-output/distribution-private-key.pem \
+            -out signing-output/distribution-private-key.enc \
+            -pass env:IOS_SIGNING_KEY_PASSWORD
+
+          rm -f signing-output/distribution-private-key.pem
+
+          cat > signing-output/NEXT-STEPS.txt <<'TXT'
+          1. Keep distribution-private-key.enc. Do not lose it.
+          2. On developer.apple.com open Certificates > + > Apple Distribution.
+          3. Upload iumrah-business.certSigningRequest when Apple asks for a CSR.
+          4. Download the generated Apple Distribution certificate (.cer).
+          5. Create an App Store Connect provisioning profile for com.iumrah.business using that certificate.
+          6. Download the .mobileprovision profile.
+          7. In the PRIVATE lattice-mobile repository upload these three files into Signing/:
+             - distribution-private-key.enc
+             - AppleDistribution.cer
+             - iumrah-business.mobileprovision
+          TXT
+
+          ls -lah signing-output
+
+      - name: Upload CSR package
+        uses: actions/upload-artifact@v4
+        with:
+          name: iumrah-business-signing-csr
+          path: signing-output/
+          retention-days: 90
