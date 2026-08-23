@@ -10,11 +10,33 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         static func detect(from url: URL) -> Provider? {
             let host = (url.host ?? "").lowercased()
             if host == "booking.com" || host.hasSuffix(".booking.com") { return .booking }
+            if host == "expe.onelink.me" || host.hasSuffix(".expe.onelink.me") { return .expedia }
             if host.contains("expedia.") || host == "expedia.com" || host.hasSuffix(".expedia.com") { return .expedia }
             return nil
         }
 
+        func isShareRedirectURL(_ url: URL) -> Bool {
+            let host = (url.host ?? "").lowercased()
+            switch self {
+            case .booking:
+                return false
+            case .expedia:
+                return host == "expe.onelink.me" || host.hasSuffix(".expe.onelink.me")
+            }
+        }
+
+        func isProviderContentURL(_ url: URL) -> Bool {
+            let host = (url.host ?? "").lowercased()
+            switch self {
+            case .booking:
+                return host == "booking.com" || host.hasSuffix(".booking.com")
+            case .expedia:
+                return host.contains("expedia.") || host == "expedia.com" || host.hasSuffix(".expedia.com")
+            }
+        }
+
         func isLikelyHotelDetailURL(_ url: URL) -> Bool {
+            if isShareRedirectURL(url) { return true }
             let value = url.absoluteString.lowercased()
             switch self {
             case .booking:
@@ -87,7 +109,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         requiresUserAction = false
         showSource = false
         progress = 0.08
-        status = "Открываем карточку \(provider.rawValue)…"
+        status = provider.isShareRedirectURL(normalized)
+            ? "Открываем ссылку Expedia и переходим к карточке отеля…"
+            : "Открываем карточку \(provider.rawValue)…"
 
         var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
@@ -165,7 +189,18 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             return
         }
 
-        guard let currentURL = webView.url, Provider.detect(from: currentURL) == provider else { return }
+        guard let currentURL = webView.url else { return }
+        guard provider.isProviderContentURL(currentURL) else {
+            if provider.isShareRedirectURL(sourceURL ?? currentURL) {
+                status = "Переходим из ссылки Expedia к карточке отеля…"
+                progress = max(progress, 0.12)
+            }
+            return
+        }
+        guard provider.isLikelyHotelDetailURL(currentURL) else {
+            fail("Ссылка открылась в Expedia, но не на карточке конкретного отеля. Откройте нужный отель и скопируйте его ссылку ещё раз.")
+            return
+        }
         extractionStarted = true
         sourceURL = currentURL
         await warmAndExtract(provider: provider, currentURL: currentURL)
