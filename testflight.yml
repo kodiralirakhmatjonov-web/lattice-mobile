@@ -1,0 +1,195 @@
+name: Build iumrah Business / TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: 'Upload signed build to TestFlight'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      SCHEME: iumrahBusiness
+      PROJECT: iumrahBusiness.xcodeproj
+      BUNDLE_ID: com.iumrah.business
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Xcode environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Validate simulator build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Check TestFlight requirements
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          IOS_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_TEAM_ID APPLE_ID_EMAIL APPLE_APP_SPECIFIC_PASSWORD IOS_SIGNING_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing GitHub secret: $name"
+              exit 1
+            fi
+          done
+
+          test -f Signing/distribution-private-key.enc || { echo "Missing Signing/distribution-private-key.enc"; exit 1; }
+          test -f Signing/AppleDistribution.cer || { echo "Missing Signing/AppleDistribution.cer"; exit 1; }
+          test -f Signing/iumrah-business.mobileprovision || { echo "Missing Signing/iumrah-business.mobileprovision"; exit 1; }
+
+      - name: Install signing assets
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          IOS_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_SIGNING_KEY_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          PRIVATE_KEY="$RUNNER_TEMP/distribution-private-key.pem"
+          CERT_PEM="$RUNNER_TEMP/distribution-certificate.pem"
+          P12_PATH="$RUNNER_TEMP/distribution.p12"
+          PROFILE_PATH="$GITHUB_WORKSPACE/Signing/iumrah-business.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/iumrah-signing.keychain-db"
+          P12_PASSWORD="iumrah-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          openssl enc \
+            -d \
+            -aes-256-cbc \
+            -pbkdf2 \
+            -iter 200000 \
+            -in "$GITHUB_WORKSPACE/Signing/distribution-private-key.enc" \
+            -out "$PRIVATE_KEY" \
+            -pass env:IOS_SIGNING_KEY_PASSWORD
+
+          if ! openssl x509 -inform DER -in "$GITHUB_WORKSPACE/Signing/AppleDistribution.cer" -out "$CERT_PEM" 2>/dev/null; then
+            openssl x509 -inform PEM -in "$GITHUB_WORKSPACE/Signing/AppleDistribution.cer" -out "$CERT_PEM"
+          fi
+
+          openssl pkcs12 \
+            -export \
+            -inkey "$PRIVATE_KEY" \
+            -in "$CERT_PEM" \
+            -out "$P12_PATH" \
+            -name "Apple Distribution" \
+            -passout pass:"$P12_PASSWORD"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")
+          PROFILE_APP_IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/profile.plist")
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "Installed provisioning profile: $PROFILE_NAME"
+          echo "Profile application identifier: $PROFILE_APP_IDENTIFIER"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Archive signed app
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/iumrahBusiness.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY='Apple Distribution' \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            archive
+
+      - name: Export IPA
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
+            </dict>
+            <key>stripSwiftSymbols</key><true/>
+          </dict></plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$PWD/build/iumrahBusiness.xcarchive" \
+            -exportPath "$PWD/build/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+          ls -lah build/export
+
+      - name: Validate and upload to TestFlight without p8
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+          IPA=$(find "$PWD/build/export" -maxdepth 1 -name '*.ipa' -print -quit)
+          test -n "$IPA"
+
+          xcrun altool --validate-app \
+            --type ios \
+            -f "$IPA" \
+            -u "$APPLE_ID_EMAIL" \
+            -p "$APPLE_APP_SPECIFIC_PASSWORD"
+
+          xcrun altool --upload-app \
+            --type ios \
+            -f "$IPA" \
+            -u "$APPLE_ID_EMAIL" \
+            -p "$APPLE_APP_SPECIFIC_PASSWORD"
