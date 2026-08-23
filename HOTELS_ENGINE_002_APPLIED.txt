@@ -1,0 +1,15 @@
+iumrah Business — Hotels Engine 002
+Date: 2026-08-23
+
+Changes:
+- strict hotel identity matching across Booking / Expedia / Agoda
+- rejects mismatched properties instead of merging them
+- gallery-only media extraction with flag/avatar/icon/illustration filtering
+- hotel/room/lobby/restaurant/amenity image classification
+- clearer room-type extraction and review UI
+- uncertain images are never auto-selected
+- stable hotel IDs and clean media replacement on re-import
+- image compression targets ~650 KB before R2 upload
+- Cloudflare D1 image category migration
+- exact supplied iumrah Business logo used inside the app
+- clean white background; beige/orange page backgrounds removed

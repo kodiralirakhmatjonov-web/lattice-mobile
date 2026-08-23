@@ -14,6 +14,11 @@ struct BookingsView: View {
         }
         .listStyle(.plain).scrollContentBackground(.hidden).background(BusinessDesign.background)
         .navigationTitle("Бронирования")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Image("Logo").resizable().scaledToFit().frame(width: 116, height: 28)
+            }
+        }
         .overlay { if loading { ProgressView() } }
         .task { await load() }
         .refreshable { await load() }

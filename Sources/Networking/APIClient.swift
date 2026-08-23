@@ -80,6 +80,13 @@ actor APIClient {
         return try decoder.decode(HotelSaveResponse.self, from: data).hotel
     }
 
+    func clearHotelImages(hotelID: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(hotelID)/images"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+    }
+
     func uploadHotelImage(hotelID: String, candidate: HotelImageCandidate, position: Int) async throws {
         guard let sourceURL = URL(string: candidate.url) else { throw APIError.invalidURL }
         var sourceRequest = URLRequest(url: sourceURL)
@@ -96,6 +103,7 @@ actor APIClient {
         request.timeoutInterval = 60
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
         request.setValue(candidate.provider, forHTTPHeaderField: "X-Iumrah-Source")
+        request.setValue(candidate.kind.rawValue, forHTTPHeaderField: "X-Iumrah-Category")
         request.setValue(String(position), forHTTPHeaderField: "X-Iumrah-Position")
         request.setValue(candidate.isCover ? "1" : "0", forHTTPHeaderField: "X-Iumrah-Cover")
         request.httpBody = optimized

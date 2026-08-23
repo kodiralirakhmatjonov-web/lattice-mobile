@@ -1,5 +1,34 @@
 import Foundation
 
+enum HotelImageKind: String, Codable, CaseIterable, Hashable {
+    case exterior
+    case room
+    case lobby
+    case restaurant
+    case amenity
+    case other
+
+    var title: String {
+        switch self {
+        case .exterior: return "Отель"
+        case .room: return "Номера"
+        case .lobby: return "Лобби"
+        case .restaurant: return "Ресторан"
+        case .amenity: return "Удобства"
+        case .other: return "Проверить"
+        }
+    }
+
+    var trusted: Bool { self != .other }
+}
+
+struct ProviderImageMetadata: Codable, Hashable {
+    let url: String
+    let label: String?
+    let kind: HotelImageKind
+    let roomHint: String?
+}
+
 struct ProviderSnapshot: Codable, Identifiable, Hashable {
     let id: UUID
     let provider: String
@@ -12,17 +41,18 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
     let latitude: Double?
     let longitude: Double?
     let images: [String]
+    let imageMetadata: [ProviderImageMetadata]?
     let amenities: [String]
     let roomNames: [String]
 
     init(
         id: UUID = UUID(), provider: String, sourceURL: String, name: String?, address: String?,
         description: String?, stars: Int?, rating: Double?, latitude: Double?, longitude: Double?,
-        images: [String], amenities: [String], roomNames: [String]
+        images: [String], imageMetadata: [ProviderImageMetadata]? = nil, amenities: [String], roomNames: [String]
     ) {
         self.id = id; self.provider = provider; self.sourceURL = sourceURL; self.name = name
         self.address = address; self.description = description; self.stars = stars; self.rating = rating
-        self.latitude = latitude; self.longitude = longitude; self.images = images
+        self.latitude = latitude; self.longitude = longitude; self.images = images; self.imageMetadata = imageMetadata
         self.amenities = amenities; self.roomNames = roomNames
     }
 }
@@ -33,9 +63,16 @@ struct HotelImageCandidate: Codable, Identifiable, Hashable {
     let provider: String
     var selected: Bool
     var isCover: Bool
+    var kind: HotelImageKind
+    var label: String?
+    var roomName: String?
 
-    init(id: UUID = UUID(), url: String, provider: String, selected: Bool = true, isCover: Bool = false) {
-        self.id = id; self.url = url; self.provider = provider; self.selected = selected; self.isCover = isCover
+    init(
+        id: UUID = UUID(), url: String, provider: String, selected: Bool = true,
+        isCover: Bool = false, kind: HotelImageKind = .other, label: String? = nil, roomName: String? = nil
+    ) {
+        self.id = id; self.url = url; self.provider = provider; self.selected = selected
+        self.isCover = isCover; self.kind = kind; self.label = label; self.roomName = roomName
     }
 }
 
@@ -76,6 +113,9 @@ struct HotelDraft: Codable, Identifiable {
     }
 
     var selectedImages: [HotelImageCandidate] { images.filter(\.selected) }
+    var selectedRoomImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .room } }
+    var selectedTrustedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind.trusted } }
+    var suspiciousSelectedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .other } }
 }
 
 struct HotelListItem: Codable, Identifiable {

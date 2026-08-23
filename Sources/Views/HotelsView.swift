@@ -35,7 +35,7 @@ struct HotelsView: View {
                     }
                 }
                 .padding(13)
-                .background((backendUnavailable ? Color.orange : Color.green).opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 VStack(alignment: .leading, spacing: 10) {
                     HStack { Text("База отелей").font(.title2.bold()); Spacer(); if loading { ProgressView() } }
                     if hotels.isEmpty && !loading {
@@ -56,7 +56,7 @@ struct HotelsView: View {
                             .frame(width: 58, height: 58).clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(hotel.name).font(.subheadline.bold()).lineLimit(1)
-                                Text("\(hotel.city) · \(hotel.imageCount) фото · \(hotel.roomCount) комнат").font(.caption).foregroundStyle(.secondary)
+                                Text("\(hotel.city) · \(hotel.imageCount) фото · \(hotel.roomCount) типов номеров").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                             Text(hotel.status.uppercased()).font(.system(size: 8, weight: .black)).foregroundStyle(.secondary)
@@ -70,7 +70,14 @@ struct HotelsView: View {
         }
         .background(BusinessDesign.background)
         .navigationTitle("Отели")
-        .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { showAdd = true } label: { Image(systemName: "plus.circle.fill").font(.title3) } } }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Image("Logo").resizable().scaledToFit().frame(width: 116, height: 28)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showAdd = true } label: { Image(systemName: "plus.circle.fill").font(.title3) }
+            }
+        }
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) { AddHotelView() }
         .task { await load() }
         .refreshable { await load() }
@@ -119,7 +126,7 @@ private struct AddHotelView: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Новый отель").font(.system(size: 38, weight: .bold)).tracking(-1.8)
-                Text("Введите точное или привычное название. iumrah последовательно проверит Booking, Expedia и Agoda на устройстве.")
+                Text("Введите название отеля. Лучше полное официальное название с брендом — например, «voco Makkah by IHG». Importer отклонит результаты, если источник открыл другой отель.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 TextField("Например, voco Makkah", text: $hotelName)
                     .padding(.horizontal, 18).frame(height: 58).background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))

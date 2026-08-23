@@ -18,17 +18,11 @@ struct RootView: View {
 private struct LaunchView: View {
     @State private var pulse = false
     var body: some View {
-        VStack(spacing: 14) {
-            Text("i")
-                .font(.system(size: 42, weight: .black, design: .serif))
-                .foregroundStyle(.white)
-                .frame(width: 66, height: 66)
-                .background(BusinessDesign.ink, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            Text("IUMRAH BUSINESS")
-                .font(.system(size: 12, weight: .bold))
-                .tracking(1.4)
+        VStack(spacing: 18) {
+            BusinessBrandLogo(height: 62)
+                .frame(maxWidth: 300)
             Capsule()
-                .fill(BusinessDesign.accent)
+                .fill(BusinessDesign.ink.opacity(0.85))
                 .frame(width: pulse ? 72 : 28, height: 3)
                 .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
         }

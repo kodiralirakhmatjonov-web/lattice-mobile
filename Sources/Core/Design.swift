@@ -1,13 +1,16 @@
 import SwiftUI
 
 enum BusinessDesign {
-    static let background = Color(red: 0.957, green: 0.949, blue: 0.937)
-    static let ink = Color(red: 0.09, green: 0.09, blue: 0.10)
-    static let muted = Color(red: 0.48, green: 0.46, blue: 0.49)
+    // iumrah Business now uses a clean white system surface. Accent is reserved for
+    // status/attention details only — never as a page background.
+    static let background = Color.white
+    static let ink = Color(red: 0.06, green: 0.06, blue: 0.07)
+    static let muted = Color(red: 0.48, green: 0.48, blue: 0.50)
     static let accent = Color(red: 0.96, green: 0.49, blue: 0.19)
-    static let softOrange = Color(red: 1.0, green: 0.94, blue: 0.89)
-    static let line = Color.black.opacity(0.07)
+    static let softOrange = Color.black.opacity(0.045)
+    static let line = Color.black.opacity(0.065)
     static let card = Color.white
+    static let secondarySurface = Color.black.opacity(0.032)
 }
 
 struct BusinessCardModifier: ViewModifier {
@@ -17,7 +20,20 @@ struct BusinessCardModifier: ViewModifier {
             .background(BusinessDesign.card)
             .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).stroke(BusinessDesign.line, lineWidth: 1))
-            .shadow(color: .black.opacity(0.045), radius: 18, y: 8)
+            .shadow(color: .black.opacity(0.035), radius: 16, y: 7)
+    }
+}
+
+struct BusinessBrandLogo: View {
+    var height: CGFloat = 44
+
+    var body: some View {
+        Image("Logo")
+            .resizable()
+            .scaledToFit()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: height, alignment: .leading)
+            .accessibilityLabel("iumrah Business")
     }
 }
 

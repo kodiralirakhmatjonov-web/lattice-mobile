@@ -27,6 +27,10 @@ struct OverviewView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                BusinessBrandLogo(height: 54)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+
                 VStack(alignment: .leading, spacing: 14) {
                     Text("BOOKING OPERATIONS").font(.caption2.bold()).tracking(2.2).foregroundStyle(.white.opacity(0.52))
                     Text(checking == 0 ? "Очередь подтверждений чистая." : "\(checking) заявок ждут подтверждения.")
@@ -38,7 +42,7 @@ struct OverviewView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading).padding(26)
                 .background(
-                    LinearGradient(colors: [Color.black, Color(red: 0.34, green: 0.16, blue: 0.08)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                    LinearGradient(colors: [Color.black, Color(red: 0.11, green: 0.11, blue: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing),
                     in: RoundedRectangle(cornerRadius: 36, style: .continuous)
                 )
 
@@ -61,7 +65,7 @@ struct OverviewView: View {
             .padding(16)
         }
         .background(BusinessDesign.background)
-        .navigationTitle("iumrah Business")
+        .navigationTitle("")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {

@@ -66,6 +66,7 @@ async function handleAdmin(request, env, url, user) {
 
   if (parts.length === 2 && parts[1] === 'images') {
     if (request.method === 'POST') return uploadHotelImage(request, env, hotelID);
+    if (request.method === 'DELETE') return deleteAllHotelImages(env, hotelID);
     return methodNotAllowed();
   }
 
@@ -208,7 +209,7 @@ async function hotelDetail(env, hotelID, admin) {
   const [amenitiesResult, roomsResult, imagesResult, sourcesResult] = await Promise.all([
     env.HOTELS_DB.prepare('SELECT amenity FROM hotel_amenities WHERE hotel_id = ? ORDER BY position ASC, amenity ASC').bind(hotelID).all(),
     env.HOTELS_DB.prepare('SELECT id, name, max_guests, size_m2, beds, view FROM hotel_rooms WHERE hotel_id = ? ORDER BY position ASC, name ASC').bind(hotelID).all(),
-    env.HOTELS_DB.prepare('SELECT id, source_provider, position, is_cover FROM hotel_images WHERE hotel_id = ? ORDER BY is_cover DESC, position ASC, created_at ASC').bind(hotelID).all(),
+    env.HOTELS_DB.prepare('SELECT id, source_provider, category, position, is_cover FROM hotel_images WHERE hotel_id = ? ORDER BY is_cover DESC, position ASC, created_at ASC').bind(hotelID).all(),
     admin
       ? env.HOTELS_DB.prepare('SELECT * FROM hotel_sources WHERE hotel_id = ? ORDER BY provider ASC').bind(hotelID).all()
       : Promise.resolve({ results: [] })
@@ -217,6 +218,7 @@ async function hotelDetail(env, hotelID, admin) {
   const images = (imagesResult.results || []).map(row => ({
     id: row.id,
     provider: row.source_provider,
+    category: row.category || 'other',
     position: Number(row.position || 0),
     isCover: Number(row.is_cover || 0) === 1,
     url: publicImagePath(hotelID, row.id)
@@ -372,6 +374,23 @@ async function saveHotel(request, env, user) {
   return json({ ok: true, hotel: hotelSummary(row) }, 200);
 }
 
+async function deleteAllHotelImages(env, hotelID) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id = ?').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+
+  const rows = await env.HOTELS_DB.prepare(
+    'SELECT object_key FROM hotel_images WHERE hotel_id = ?'
+  ).bind(hotelID).all();
+
+  await Promise.allSettled((rows.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare('DELETE FROM hotel_images WHERE hotel_id = ?').bind(hotelID),
+    env.HOTELS_DB.prepare("UPDATE hotels SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?").bind(hotelID)
+  ]);
+
+  return json({ ok: true, deleted: (rows.results || []).length }, 200);
+}
+
 async function uploadHotelImage(request, env, hotelID) {
   const hotel = await env.HOTELS_DB.prepare('SELECT id, status FROM hotels WHERE id = ?').bind(hotelID).first();
   if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
@@ -389,6 +408,8 @@ async function uploadHotelImage(request, env, hotelID) {
   const extension = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
   const objectKey = `hotels/${hotelID}/${imageID}.${extension}`;
   const provider = cleanText(request.headers.get('x-iumrah-source'), 80);
+  const rawCategory = cleanText(request.headers.get('x-iumrah-category'), 30) || 'other';
+  const category = ['exterior', 'room', 'lobby', 'restaurant', 'amenity', 'other'].includes(rawCategory) ? rawCategory : 'other';
   const position = boundedInteger(request.headers.get('x-iumrah-position'), 0, 10000, 0);
   const isCover = request.headers.get('x-iumrah-cover') === '1' ? 1 : 0;
 
@@ -396,7 +417,8 @@ async function uploadHotelImage(request, env, hotelID) {
     httpMetadata: { contentType },
     customMetadata: {
       hotelID,
-      provider: provider || 'unknown'
+      provider: provider || 'unknown',
+      category
     }
   });
 
@@ -409,10 +431,10 @@ async function uploadHotelImage(request, env, hotelID) {
   statements.push(
     env.HOTELS_DB.prepare(`
       INSERT INTO hotel_images (
-        id, hotel_id, object_key, source_provider, content_type,
+        id, hotel_id, object_key, source_provider, category, content_type,
         byte_size, position, is_cover
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(imageID, hotelID, objectKey, provider, contentType, bytes.byteLength, position, isCover)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(imageID, hotelID, objectKey, provider, category, contentType, bytes.byteLength, position, isCover)
   );
   statements.push(
     env.HOTELS_DB.prepare("UPDATE hotels SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?").bind(hotelID)
@@ -431,7 +453,8 @@ async function uploadHotelImage(request, env, hotelID) {
       id: imageID,
       url: publicImagePath(hotelID, imageID),
       position,
-      isCover: isCover === 1
+      isCover: isCover === 1,
+      category
     }
   }, 201);
 }

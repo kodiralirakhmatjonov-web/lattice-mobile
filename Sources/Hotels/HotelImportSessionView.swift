@@ -18,8 +18,10 @@ struct HotelImportSessionView: View {
                     BusinessDesign.background.ignoresSafeArea()
                     VStack(spacing: 18) {
                         Spacer()
+                        BusinessBrandLogo(height: 48)
+                            .padding(.horizontal, 42)
                         Image(systemName: "building.2.crop.circle.fill")
-                            .font(.system(size: 64)).foregroundStyle(BusinessDesign.accent)
+                            .font(.system(size: 54)).foregroundStyle(BusinessDesign.ink)
                         Text(coordinator.currentProvider?.rawValue ?? "iumrah Importer")
                             .font(.caption.bold()).tracking(2).foregroundStyle(.secondary)
                         Text(coordinator.status)
