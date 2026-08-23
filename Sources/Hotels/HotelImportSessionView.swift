@@ -1,8 +1,7 @@
 import SwiftUI
 
 struct HotelImportSessionView: View {
-    let hotelName: String
-    let city: String
+    let sourceURL: String
     @StateObject private var coordinator = HotelImportCoordinator()
     @Environment(\.dismiss) private var dismiss
 
@@ -10,54 +9,80 @@ struct HotelImportSessionView: View {
         NavigationStack {
             ZStack {
                 ImportWebView(webView: coordinator.webView)
-                    .opacity(coordinator.showSource ? 1 : 0.015)
+                    .opacity(coordinator.showSource ? 1 : 0.001)
                     .allowsHitTesting(coordinator.showSource)
-                    .ignoresSafeArea(edges: .bottom)
 
                 if !coordinator.showSource {
-                    BusinessDesign.background.ignoresSafeArea()
-                    VStack(spacing: 18) {
+                    Color.white.ignoresSafeArea()
+                    VStack(spacing: 22) {
                         Spacer()
-                        BusinessBrandLogo(height: 48)
-                            .padding(.horizontal, 42)
-                        Image(systemName: "building.2.crop.circle.fill")
-                            .font(.system(size: 54)).foregroundStyle(BusinessDesign.ink)
-                        Text(coordinator.currentProvider?.rawValue ?? "iumrah Importer")
-                            .font(.caption.bold()).tracking(2).foregroundStyle(.secondary)
-                        Text(coordinator.status)
-                            .font(.system(size: 28, weight: .bold)).tracking(-1).multilineTextAlignment(.center)
-                            .padding(.horizontal, 22)
-                        ProgressView(value: coordinator.progress).tint(BusinessDesign.accent).padding(.horizontal, 38)
-                        HStack(spacing: 8) {
-                            ForEach(HotelImportCoordinator.Provider.allCases, id: \.rawValue) { p in
-                                Text(p.rawValue).font(.caption2.bold()).padding(.horizontal, 10).frame(height: 30)
-                                    .background(coordinator.snapshots.contains(where: { $0.provider == p.rawValue }) ? Color.green.opacity(0.13) : Color.black.opacity(0.04), in: Capsule())
-                            }
+
+                        ZStack {
+                            Circle()
+                                .fill(BusinessDesign.secondarySurface)
+                                .frame(width: 72, height: 72)
+                            Image(systemName: "link.badge.plus")
+                                .font(.system(size: 29, weight: .semibold))
+                                .foregroundStyle(BusinessDesign.ink)
                         }
+
+                        VStack(spacing: 8) {
+                            Text(coordinator.currentProvider?.rawValue ?? "Hotel Importer")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(coordinator.status)
+                                .font(.system(size: 27, weight: .bold, design: .rounded))
+                                .tracking(-0.8)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 28)
+                        }
+
+                        ProgressView(value: coordinator.progress)
+                            .tint(.black)
+                            .padding(.horizontal, 48)
+
+                        if let message = coordinator.failureMessage {
+                            Text(message)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 30)
+
+                            Button("Закрыть") { dismiss() }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.black)
+                        }
+
                         Spacer()
-                        if coordinator.requiresUserAction {
-                            Button("Открыть проверку") { coordinator.showSource = true }
-                                .font(.headline).frame(maxWidth: .infinity).frame(height: 54).foregroundStyle(.white).background(BusinessDesign.ink, in: Capsule()).padding(.horizontal, 18)
-                            Button("Пропустить источник") { coordinator.skipCurrentProvider() }.font(.subheadline.bold()).foregroundStyle(.secondary)
-                        }
                     }
+                    .safeAreaPadding(.horizontal, 16)
                 }
             }
-            .navigationTitle(coordinator.showSource ? (coordinator.currentProvider?.rawValue ?? "Источник") : "Импорт")
+            .background(Color.white)
+            .navigationTitle(coordinator.showSource ? (coordinator.currentProvider?.rawValue ?? "Источник") : "Импорт по ссылке")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: { Image(systemName: "xmark") }
+                }
                 if coordinator.showSource {
                     ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button { coordinator.webView.reload() } label: { Image(systemName: "arrow.clockwise") }
+                        Button { coordinator.reloadSource() } label: { Image(systemName: "arrow.clockwise") }
                         Button("Продолжить") { coordinator.continueAfterVerification() }
                     }
                 }
             }
-            .navigationDestination(isPresented: Binding(get: { coordinator.draft != nil }, set: { _ in })) {
+            .navigationDestination(isPresented: Binding(
+                get: { coordinator.draft != nil },
+                set: { value in if !value { coordinator.draft = nil } }
+            )) {
                 HotelReviewView(coordinator: coordinator)
             }
-            .onAppear { if coordinator.currentProvider == nil { coordinator.start(name: hotelName, city: city) } }
+            .onAppear {
+                if coordinator.sourceURL == nil && coordinator.failureMessage == nil {
+                    coordinator.start(sourceURL: sourceURL)
+                }
+            }
         }
     }
 }

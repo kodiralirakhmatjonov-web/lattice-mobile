@@ -175,6 +175,8 @@ async function listHotels(env, url, publishedOnly) {
       h.name,
       h.city,
       h.stars,
+      h.rating,
+      h.review_count,
       h.status,
       h.updated_at,
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
@@ -208,8 +210,8 @@ async function hotelDetail(env, hotelID, admin) {
 
   const [amenitiesResult, roomsResult, imagesResult, sourcesResult] = await Promise.all([
     env.HOTELS_DB.prepare('SELECT amenity FROM hotel_amenities WHERE hotel_id = ? ORDER BY position ASC, amenity ASC').bind(hotelID).all(),
-    env.HOTELS_DB.prepare('SELECT id, name, max_guests, size_m2, beds, view FROM hotel_rooms WHERE hotel_id = ? ORDER BY position ASC, name ASC').bind(hotelID).all(),
-    env.HOTELS_DB.prepare('SELECT id, source_provider, category, position, is_cover FROM hotel_images WHERE hotel_id = ? ORDER BY is_cover DESC, position ASC, created_at ASC').bind(hotelID).all(),
+    env.HOTELS_DB.prepare('SELECT id, name, max_guests, size_m2, beds, view, description, amenities_json FROM hotel_rooms WHERE hotel_id = ? ORDER BY position ASC, name ASC').bind(hotelID).all(),
+    env.HOTELS_DB.prepare('SELECT id, source_provider, category, label, room_name, position, is_cover FROM hotel_images WHERE hotel_id = ? ORDER BY is_cover DESC, position ASC, created_at ASC').bind(hotelID).all(),
     admin
       ? env.HOTELS_DB.prepare('SELECT * FROM hotel_sources WHERE hotel_id = ? ORDER BY provider ASC').bind(hotelID).all()
       : Promise.resolve({ results: [] })
@@ -218,7 +220,9 @@ async function hotelDetail(env, hotelID, admin) {
   const images = (imagesResult.results || []).map(row => ({
     id: row.id,
     provider: row.source_provider,
-    category: row.category || 'other',
+    category: row.category || 'gallery',
+    label: row.label || null,
+    roomName: row.room_name || null,
     position: Number(row.position || 0),
     isCover: Number(row.is_cover || 0) === 1,
     url: publicImagePath(hotelID, row.id)
@@ -229,11 +233,18 @@ async function hotelDetail(env, hotelID, admin) {
     name: hotel.name,
     city: hotel.city,
     country: hotel.country,
+    propertyType: hotel.property_type || null,
     stars: hotel.stars == null ? null : Number(hotel.stars),
+    rating: hotel.rating == null ? null : Number(hotel.rating),
+    ratingScale: hotel.rating_scale == null ? null : Number(hotel.rating_scale),
+    reviewCount: hotel.review_count == null ? null : Number(hotel.review_count),
     address: hotel.address || '',
     description: hotel.description || '',
     latitude: hotel.latitude == null ? null : Number(hotel.latitude),
     longitude: hotel.longitude == null ? null : Number(hotel.longitude),
+    checkIn: hotel.check_in || null,
+    checkOut: hotel.check_out || null,
+    policies: parseJSONArray(hotel.policies_json),
     status: hotel.status,
     amenities: (amenitiesResult.results || []).map(row => row.amenity),
     rooms: (roomsResult.results || []).map(row => ({
@@ -242,7 +253,9 @@ async function hotelDetail(env, hotelID, admin) {
       maxGuests: row.max_guests == null ? null : Number(row.max_guests),
       sizeM2: row.size_m2 == null ? null : Number(row.size_m2),
       beds: row.beds,
-      view: row.view
+      view: row.view,
+      description: row.description || null,
+      amenities: parseJSONArray(row.amenities_json)
     })),
     images,
     sources: admin ? (sourcesResult.results || []).map(sourceRow) : [],
@@ -254,7 +267,7 @@ async function hotelDetail(env, hotelID, admin) {
 }
 
 async function saveHotel(request, env, user) {
-  const payload = await readJSON(request, 2_000_000);
+  const payload = await readJSON(request, 3_000_000);
   if (!payload.ok) return payload.response;
 
   const draft = payload.value;
@@ -266,11 +279,19 @@ async function saveHotel(request, env, user) {
     return json({ ok: false, error: 'INVALID_HOTEL_PAYLOAD' }, 400);
   }
 
+  const country = cleanText(draft.country, 120) || 'Saudi Arabia';
+  const propertyType = cleanText(draft.propertyType, 120);
   const stars = nullableInteger(draft.stars, 1, 5);
-  const address = cleanText(draft.address, 600) || '';
-  const description = cleanText(draft.description, 12_000) || '';
+  const rating = nullableNumber(draft.rating, 0, 10);
+  const ratingScale = nullableNumber(draft.ratingScale, 1, 10);
+  const reviewCount = nullableInteger(draft.reviewCount, 0, 100000000);
+  const address = cleanText(draft.address, 900) || '';
+  const description = cleanText(draft.description, 20_000) || '';
   const latitude = nullableNumber(draft.latitude, -90, 90);
   const longitude = nullableNumber(draft.longitude, -180, 180);
+  const checkIn = cleanText(draft.checkIn, 120);
+  const checkOut = cleanText(draft.checkOut, 120);
+  const policies = uniqueStrings(draft.policies, 100, 600);
   const status = ['draft', 'published', 'archived'].includes(draft.status) ? draft.status : 'draft';
   const slug = await uniqueSlug(env, id, `${name}-${city}`);
   const now = new Date().toISOString();
@@ -278,26 +299,39 @@ async function saveHotel(request, env, user) {
   const statements = [
     env.HOTELS_DB.prepare(`
       INSERT INTO hotels (
-        id, slug, name, city, country, stars, address, description,
-        latitude, longitude, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'Saudi Arabia', ?, ?, ?, ?, ?, ?, ?, ?)
+        id, slug, name, city, country, property_type, stars, rating, rating_scale,
+        review_count, address, description, latitude, longitude, check_in, check_out,
+        policies_json, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         city = excluded.city,
+        country = excluded.country,
+        property_type = excluded.property_type,
         stars = excluded.stars,
+        rating = excluded.rating,
+        rating_scale = excluded.rating_scale,
+        review_count = excluded.review_count,
         address = excluded.address,
         description = excluded.description,
         latitude = excluded.latitude,
         longitude = excluded.longitude,
+        check_in = excluded.check_in,
+        check_out = excluded.check_out,
+        policies_json = excluded.policies_json,
         status = excluded.status,
         updated_at = excluded.updated_at
-    `).bind(id, slug, name, city, stars, address, description, latitude, longitude, status, now, now),
+    `).bind(
+      id, slug, name, city, country, propertyType, stars, rating, ratingScale, reviewCount,
+      address, description, latitude, longitude, checkIn, checkOut, JSON.stringify(policies),
+      status, now, now
+    ),
     env.HOTELS_DB.prepare('DELETE FROM hotel_amenities WHERE hotel_id = ?').bind(id),
     env.HOTELS_DB.prepare('DELETE FROM hotel_rooms WHERE hotel_id = ?').bind(id),
     env.HOTELS_DB.prepare('DELETE FROM hotel_sources WHERE hotel_id = ?').bind(id)
   ];
 
-  const amenities = uniqueStrings(draft.amenities, 80, 120);
+  const amenities = uniqueStrings(draft.amenities, 160, 180);
   amenities.forEach((amenity, index) => {
     statements.push(
       env.HOTELS_DB.prepare('INSERT INTO hotel_amenities (hotel_id, amenity, position) VALUES (?, ?, ?)')
@@ -305,29 +339,32 @@ async function saveHotel(request, env, user) {
     );
   });
 
-  const rooms = Array.isArray(draft.rooms) ? draft.rooms.slice(0, 100) : [];
+  const rooms = Array.isArray(draft.rooms) ? draft.rooms.slice(0, 120) : [];
   rooms.forEach((room, index) => {
     const roomID = safeID(room?.id) || crypto.randomUUID();
-    const roomName = cleanText(room?.name, 220);
+    const roomName = cleanText(room?.name, 240);
     if (!roomName) return;
     statements.push(
       env.HOTELS_DB.prepare(`
-        INSERT INTO hotel_rooms (id, hotel_id, name, max_guests, size_m2, beds, view, position)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO hotel_rooms (
+          id, hotel_id, name, max_guests, size_m2, beds, view, description, amenities_json, position
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         roomID,
         id,
         roomName,
         nullableInteger(room?.maxGuests, 1, 30),
-        nullableNumber(room?.sizeM2, 1, 2000),
-        cleanText(room?.beds, 250),
-        cleanText(room?.view, 250),
+        nullableNumber(room?.sizeM2, 1, 3000),
+        cleanText(room?.beds, 300),
+        cleanText(room?.view, 300),
+        cleanText(room?.description, 4000),
+        JSON.stringify(uniqueStrings(room?.amenities, 80, 180)),
         index
       )
     );
   });
 
-  const sources = Array.isArray(draft.sources) ? draft.sources.slice(0, 20) : [];
+  const sources = Array.isArray(draft.sources) ? draft.sources.slice(0, 10) : [];
   sources.forEach(source => {
     const sourceURL = cleanURL(source?.sourceURL);
     const provider = cleanText(source?.provider, 80);
@@ -335,25 +372,35 @@ async function saveHotel(request, env, user) {
     statements.push(
       env.HOTELS_DB.prepare(`
         INSERT INTO hotel_sources (
-          id, hotel_id, provider, source_url, source_name, address, description,
-          stars, rating, latitude, longitude, images_json, amenities_json,
-          room_names_json, checked_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, hotel_id, provider, source_url, source_name, city, country, property_type,
+          address, description, stars, rating, rating_scale, review_count, latitude, longitude,
+          check_in, check_out, images_json, amenities_json, room_names_json, room_details_json,
+          policies_json, checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         safeID(source?.id) || crypto.randomUUID(),
         id,
         provider,
         sourceURL,
         cleanText(source?.name, 300),
-        cleanText(source?.address, 600),
-        cleanText(source?.description, 12_000),
+        canonicalCity(source?.city) || cleanText(source?.city, 80),
+        cleanText(source?.country, 120),
+        cleanText(source?.propertyType, 120),
+        cleanText(source?.address, 900),
+        cleanText(source?.description, 20_000),
         nullableInteger(source?.stars, 1, 5),
         nullableNumber(source?.rating, 0, 10),
+        nullableNumber(source?.ratingScale, 1, 10),
+        nullableInteger(source?.reviewCount, 0, 100000000),
         nullableNumber(source?.latitude, -90, 90),
         nullableNumber(source?.longitude, -180, 180),
-        JSON.stringify(uniqueStrings(source?.images, 1000, 3000)),
-        JSON.stringify(uniqueStrings(source?.amenities, 200, 200)),
-        JSON.stringify(uniqueStrings(source?.roomNames, 200, 250)),
+        cleanText(source?.checkIn, 120),
+        cleanText(source?.checkOut, 120),
+        JSON.stringify(uniqueStrings(source?.images, 500, 3000)),
+        JSON.stringify(uniqueStrings(source?.amenities, 200, 220)),
+        JSON.stringify(uniqueStrings(source?.roomNames, 150, 260)),
+        JSON.stringify(Array.isArray(source?.rooms) ? source.rooms.slice(0, 120) : []),
+        JSON.stringify(uniqueStrings(source?.policies, 100, 600)),
         now
       )
     );
@@ -409,7 +456,10 @@ async function uploadHotelImage(request, env, hotelID) {
   const objectKey = `hotels/${hotelID}/${imageID}.${extension}`;
   const provider = cleanText(request.headers.get('x-iumrah-source'), 80);
   const rawCategory = cleanText(request.headers.get('x-iumrah-category'), 30) || 'other';
-  const category = ['exterior', 'room', 'lobby', 'restaurant', 'amenity', 'other'].includes(rawCategory) ? rawCategory : 'other';
+  const category = ['exterior', 'room', 'bathroom', 'lobby', 'restaurant', 'amenity', 'view', 'gallery', 'other'].includes(rawCategory) ? rawCategory : 'gallery';
+  const sourceURL = cleanURL(request.headers.get('x-iumrah-source-url'));
+  const label = cleanText(request.headers.get('x-iumrah-label'), 600);
+  const roomName = cleanText(request.headers.get('x-iumrah-room'), 260);
   const position = boundedInteger(request.headers.get('x-iumrah-position'), 0, 10000, 0);
   const isCover = request.headers.get('x-iumrah-cover') === '1' ? 1 : 0;
 
@@ -418,7 +468,8 @@ async function uploadHotelImage(request, env, hotelID) {
     customMetadata: {
       hotelID,
       provider: provider || 'unknown',
-      category
+      category,
+      roomName: roomName || ''
     }
   });
 
@@ -431,10 +482,10 @@ async function uploadHotelImage(request, env, hotelID) {
   statements.push(
     env.HOTELS_DB.prepare(`
       INSERT INTO hotel_images (
-        id, hotel_id, object_key, source_provider, category, content_type,
+        id, hotel_id, object_key, source_provider, source_url, category, label, room_name, content_type,
         byte_size, position, is_cover
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(imageID, hotelID, objectKey, provider, category, contentType, bytes.byteLength, position, isCover)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(imageID, hotelID, objectKey, provider, sourceURL, category, label, roomName, contentType, bytes.byteLength, position, isCover)
   );
   statements.push(
     env.HOTELS_DB.prepare("UPDATE hotels SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?").bind(hotelID)
@@ -454,7 +505,8 @@ async function uploadHotelImage(request, env, hotelID) {
       url: publicImagePath(hotelID, imageID),
       position,
       isCover: isCover === 1,
-      category
+      category,
+      roomName: roomName || ''
     }
   }, 201);
 }
@@ -498,6 +550,8 @@ async function summaryRow(env, hotelID) {
       h.name,
       h.city,
       h.stars,
+      h.rating,
+      h.review_count,
       h.status,
       h.updated_at,
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
@@ -520,6 +574,8 @@ function hotelSummary(row) {
     name: row.name,
     city: row.city,
     stars: row.stars == null ? null : Number(row.stars),
+    rating: row.rating == null ? null : Number(row.rating),
+    reviewCount: row.review_count == null ? null : Number(row.review_count),
     status: row.status,
     coverImageURL: row.cover_image_id ? publicImagePath(row.id, row.cover_image_id) : null,
     imageCount: Number(row.image_count || 0),
@@ -534,15 +590,24 @@ function sourceRow(row) {
     provider: row.provider,
     sourceURL: row.source_url,
     name: row.source_name,
+    city: row.city,
+    country: row.country,
+    propertyType: row.property_type,
     address: row.address,
     description: row.description,
     stars: row.stars == null ? null : Number(row.stars),
     rating: row.rating == null ? null : Number(row.rating),
+    ratingScale: row.rating_scale == null ? null : Number(row.rating_scale),
+    reviewCount: row.review_count == null ? null : Number(row.review_count),
     latitude: row.latitude == null ? null : Number(row.latitude),
     longitude: row.longitude == null ? null : Number(row.longitude),
+    checkIn: row.check_in,
+    checkOut: row.check_out,
     images: parseJSONArray(row.images_json),
     amenities: parseJSONArray(row.amenities_json),
     roomNames: parseJSONArray(row.room_names_json),
+    rooms: parseJSONArray(row.room_details_json),
+    policies: parseJSONArray(row.policies_json),
     checkedAt: row.checked_at
   };
 }

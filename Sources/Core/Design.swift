@@ -1,16 +1,15 @@
 import SwiftUI
 
 enum BusinessDesign {
-    // iumrah Business now uses a clean white system surface. Accent is reserved for
-    // status/attention details only — never as a page background.
     static let background = Color.white
-    static let ink = Color(red: 0.06, green: 0.06, blue: 0.07)
+    static let ink = Color(red: 0.055, green: 0.055, blue: 0.06)
     static let muted = Color(red: 0.48, green: 0.48, blue: 0.50)
-    static let accent = Color(red: 0.96, green: 0.49, blue: 0.19)
-    static let softOrange = Color.black.opacity(0.045)
-    static let line = Color.black.opacity(0.065)
+    static let accent = Color.black
+    static let softOrange = Color.black.opacity(0.04)
+    static let line = Color.black.opacity(0.07)
     static let card = Color.white
-    static let secondarySurface = Color.black.opacity(0.032)
+    static let secondarySurface = Color.black.opacity(0.035)
+    static let tertiarySurface = Color.black.opacity(0.022)
 }
 
 struct BusinessCardModifier: ViewModifier {
@@ -20,19 +19,29 @@ struct BusinessCardModifier: ViewModifier {
             .background(BusinessDesign.card)
             .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).stroke(BusinessDesign.line, lineWidth: 1))
-            .shadow(color: .black.opacity(0.035), radius: 16, y: 7)
+            .shadow(color: .black.opacity(0.025), radius: 14, y: 6)
     }
 }
 
 struct BusinessBrandLogo: View {
-    var height: CGFloat = 44
+    private var width: CGFloat?
+    private var height: CGFloat?
+
+    init(width: CGFloat = 154) {
+        self.width = width
+        self.height = nil
+    }
+
+    init(height: CGFloat) {
+        self.width = nil
+        self.height = height
+    }
 
     var body: some View {
         Image("Logo")
             .resizable()
             .scaledToFit()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: height, alignment: .leading)
+            .frame(width: width, height: height)
             .accessibilityLabel("iumrah Business")
     }
 }

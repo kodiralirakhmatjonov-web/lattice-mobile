@@ -1,87 +1,79 @@
 import Foundation
 
 enum HotelNormalizer {
-    static func makeDraft(query: String, city: String, snapshots: [ProviderSnapshot]) -> HotelDraft {
-        var draft = HotelDraft.empty(name: query, city: city)
-        draft.sources = snapshots
+    static func makeDraft(snapshot: ProviderSnapshot) -> HotelDraft {
+        let resolvedName = clean(snapshot.name) ?? "Hotel"
+        let resolvedCity = canonicalCity(snapshot.city, address: snapshot.address, sourceURL: snapshot.sourceURL)
+        var draft = HotelDraft.empty(name: resolvedName, city: resolvedCity)
 
-        let priority = ["Booking", "Expedia", "Agoda"]
-        let ordered = snapshots.sorted { (priority.firstIndex(of: $0.provider) ?? 99) < (priority.firstIndex(of: $1.provider) ?? 99) }
+        draft.id = stableHotelID(name: resolvedName, city: resolvedCity)
+        draft.country = clean(snapshot.country) ?? "Saudi Arabia"
+        draft.propertyType = clean(snapshot.propertyType)
+        draft.stars = snapshot.stars
+        draft.rating = snapshot.rating
+        draft.ratingScale = snapshot.ratingScale
+        draft.reviewCount = snapshot.reviewCount
+        draft.address = clean(snapshot.address) ?? ""
+        draft.description = cleanLong(snapshot.description) ?? ""
+        draft.latitude = snapshot.latitude
+        draft.longitude = snapshot.longitude
+        draft.checkIn = clean(snapshot.checkIn)
+        draft.checkOut = clean(snapshot.checkOut)
+        draft.amenities = unique(snapshot.amenities).prefix(120).map { $0 }
+        draft.policies = unique(snapshot.policies).prefix(80).map { $0 }
+        draft.sources = [snapshot]
 
-        let canonicalName = ordered.compactMap(\.name).first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) ?? query
-        draft.name = canonicalName
-        draft.id = stableHotelID(name: canonicalName, city: city)
-        draft.address = ordered.compactMap(\.address).first(where: { !$0.isEmpty }) ?? ""
-        draft.description = ordered.compactMap(\.description).first(where: { !$0.isEmpty }) ?? ""
-        draft.stars = ordered.compactMap(\.stars).first
-        draft.latitude = ordered.compactMap(\.latitude).first
-        draft.longitude = ordered.compactMap(\.longitude).first
-        draft.amenities = unique(ordered.flatMap(\.amenities)).sorted()
-        draft.rooms = roomDrafts(from: ordered.flatMap(\.roomNames))
+        if !snapshot.rooms.isEmpty {
+            draft.rooms = snapshot.rooms.prefix(80).map { room in
+                HotelRoomDraft(
+                    name: clean(room.name) ?? room.name,
+                    maxGuests: room.maxGuests,
+                    sizeM2: room.sizeM2,
+                    beds: clean(room.beds),
+                    view: clean(room.view),
+                    description: cleanLong(room.description),
+                    amenities: unique(room.amenities).prefix(60).map { $0 }
+                )
+            }
+        } else {
+            draft.rooms = unique(snapshot.roomNames).prefix(80).map { HotelRoomDraft(name: $0) }
+        }
 
         var seen = Set<String>()
         var images: [HotelImageCandidate] = []
+        let metadata = snapshot.imageMetadata ?? snapshot.images.map {
+            ProviderImageMetadata(url: $0, label: nil, kind: .gallery, roomHint: nil)
+        }
 
-        for snapshot in ordered {
-            let metadata = snapshot.imageMetadata ?? snapshot.images.map {
-                ProviderImageMetadata(url: $0, label: nil, kind: .other, roomHint: nil)
-            }
+        for item in metadata {
+            guard let url = normalizedURL(item.url) else { continue }
+            let key = dedupeKey(url)
+            guard seen.insert(key).inserted else { continue }
 
-            for item in metadata {
-                guard let url = normalizedURL(item.url) else { continue }
-                let key = dedupeKey(url)
-                guard seen.insert(key).inserted else { continue }
-
-                images.append(
-                    HotelImageCandidate(
-                        url: url,
-                        provider: snapshot.provider,
-                        selected: false,
-                        isCover: false,
-                        kind: item.kind,
-                        label: cleanOptional(item.label),
-                        roomName: cleanOptional(item.roomHint)
-                    )
+            images.append(
+                HotelImageCandidate(
+                    url: url,
+                    provider: snapshot.provider,
+                    sourcePageURL: snapshot.sourceURL,
+                    selected: item.kind.trusted,
+                    isCover: false,
+                    kind: item.kind,
+                    label: clean(item.label),
+                    roomName: clean(item.roomHint)
                 )
-                if images.count >= 72 { break }
-            }
-            if images.count >= 72 { break }
+            )
+            if images.count >= 240 { break }
         }
 
         images.sort { lhs, rhs in
             let lp = imagePriority(lhs.kind)
             let rp = imagePriority(rhs.kind)
             if lp != rp { return lp < rp }
-            let lProvider = priority.firstIndex(of: lhs.provider) ?? 99
-            let rProvider = priority.firstIndex(of: rhs.provider) ?? 99
-            return lProvider < rProvider
-        }
-
-        // Auto-select only images that look like actual hotel media. Generic/unknown images
-        // stay visible for manual review but are never selected automatically.
-        var selectedCount = 0
-        var perKind: [HotelImageKind: Int] = [:]
-        let caps: [HotelImageKind: Int] = [
-            .exterior: 6,
-            .room: 10,
-            .lobby: 3,
-            .restaurant: 3,
-            .amenity: 4,
-            .other: 0
-        ]
-
-        for index in images.indices {
-            let kind = images[index].kind
-            let used = perKind[kind, default: 0]
-            let cap = caps[kind, default: 0]
-            if kind.trusted && used < cap && selectedCount < 24 {
-                images[index].selected = true
-                perKind[kind] = used + 1
-                selectedCount += 1
-            }
+            return (lhs.label ?? "") < (rhs.label ?? "")
         }
 
         if let coverIndex = images.firstIndex(where: { $0.selected && $0.kind == .exterior })
+            ?? images.firstIndex(where: { $0.selected && $0.kind == .view })
             ?? images.firstIndex(where: { $0.selected && $0.kind == .lobby })
             ?? images.firstIndex(where: { $0.selected }) {
             images[coverIndex].isCover = true
@@ -91,64 +83,69 @@ enum HotelNormalizer {
         return draft
     }
 
-    private static func roomDrafts(from values: [String]) -> [HotelRoomDraft] {
-        let rooms = unique(values)
-            .filter { value in
-                let lower = value.lowercased()
-                guard value.count >= 4 && value.count <= 120 else { return false }
-                let blocked = ["room service", "meeting room", "prayer room", "laundry room", "locker room", "non-smoking rooms", "family rooms", "guest rooms"]
-                if ["room", "rooms", "suite", "suites", "accommodation", "номер", "номера"].contains(lower) { return false }
-                return !blocked.contains(where: { lower.contains($0) })
-            }
-            .prefix(32)
-        return rooms.map { HotelRoomDraft(name: $0) }
+    private static func canonicalCity(_ city: String?, address: String?, sourceURL: String) -> String {
+        let joined = [city, address, sourceURL].compactMap { $0 }.joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
+        if joined.contains("madinah") || joined.contains("medina") || joined.contains("al madinah") { return "Madinah" }
+        if joined.contains("makkah") || joined.contains("mecca") || joined.contains("makkah al mukarramah") { return "Makkah" }
+        return clean(city) ?? "Makkah"
     }
 
     private static func unique(_ values: [String]) -> [String] {
-        var seen = Set<String>(); var result: [String] = []
+        var seen = Set<String>()
+        var result: [String] = []
         for value in values {
-            let clean = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            let cleaned = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard clean.count >= 2 else { continue }
-            let key = clean.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
-            if seen.insert(key).inserted { result.append(clean) }
+            guard cleaned.count >= 2 else { continue }
+            let key = cleaned.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+            if seen.insert(key).inserted { result.append(cleaned) }
         }
         return result
     }
 
     private static func normalizedURL(_ value: String) -> String? {
-        guard value.hasPrefix("http"), let url = URL(string: value), let host = url.host, !host.isEmpty else { return nil }
-        let lower = value.lowercased()
-        let blocked = [
-            "logo", "sprite", "avatar", "favicon", "placeholder", "tracking", "pixel.",
-            "country-flag", "/flags/", "flag-icon", "payment", "googleusercontent.com/profile",
-            "mapstatic", "maps.googleapis", "qr-code", "social-icon"
-        ]
-        if blocked.contains(where: { lower.contains($0) }) { return nil }
-        return value
+        guard let url = URL(string: value), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else { return nil }
+        return url.absoluteString
     }
 
     private static func dedupeKey(_ value: String) -> String {
         guard let url = URL(string: value) else { return value.lowercased() }
         let host = url.host?.lowercased() ?? ""
-        return host + url.path.lowercased()
+        var path = url.path.lowercased()
+        path = path.replacingOccurrences(of: #"/(?:max|square|smart)[0-9x_-]+/"#, with: "/SIZE/", options: .regularExpression)
+        return host + path
     }
 
     private static func imagePriority(_ kind: HotelImageKind) -> Int {
         switch kind {
         case .exterior: return 0
-        case .room: return 1
-        case .lobby: return 2
-        case .restaurant: return 3
-        case .amenity: return 4
-        case .other: return 9
+        case .view: return 1
+        case .room: return 2
+        case .bathroom: return 3
+        case .lobby: return 4
+        case .restaurant: return 5
+        case .amenity: return 6
+        case .gallery: return 7
+        case .other: return 99
         }
     }
 
-    private static func cleanOptional(_ value: String?) -> String? {
+    private static func clean(_ value: String?) -> String? {
         guard let value else { return nil }
-        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return clean.isEmpty ? nil : String(clean.prefix(220))
+        let cleaned = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        return String(cleaned.prefix(600))
+    }
+
+    private static func cleanLong(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        return String(cleaned.prefix(12_000))
     }
 
     private static func stableHotelID(name: String, city: String) -> String {

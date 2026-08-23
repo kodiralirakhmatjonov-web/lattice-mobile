@@ -90,8 +90,12 @@ actor APIClient {
     func uploadHotelImage(hotelID: String, candidate: HotelImageCandidate, position: Int) async throws {
         guard let sourceURL = URL(string: candidate.url) else { throw APIError.invalidURL }
         var sourceRequest = URLRequest(url: sourceURL)
-        sourceRequest.timeoutInterval = 30
-        sourceRequest.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+        sourceRequest.timeoutInterval = 45
+        sourceRequest.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+        sourceRequest.setValue("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        sourceRequest.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        sourceRequest.setValue(candidate.sourcePageURL, forHTTPHeaderField: "Referer")
+
         let (imageData, sourceResponse) = try await session.data(for: sourceRequest)
         guard let http = sourceResponse as? HTTPURLResponse, (200..<300).contains(http.statusCode), !imageData.isEmpty else {
             throw APIError.server("IMAGE_DOWNLOAD_FAILED")
@@ -100,10 +104,13 @@ actor APIClient {
 
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(hotelID)/images"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 60
+        request.timeoutInterval = 75
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
         request.setValue(candidate.provider, forHTTPHeaderField: "X-Iumrah-Source")
         request.setValue(candidate.kind.rawValue, forHTTPHeaderField: "X-Iumrah-Category")
+        request.setValue(candidate.sourcePageURL, forHTTPHeaderField: "X-Iumrah-Source-URL")
+        if let label = candidate.label { request.setValue(String(label.prefix(480)), forHTTPHeaderField: "X-Iumrah-Label") }
+        if let room = candidate.roomName { request.setValue(String(room.prefix(220)), forHTTPHeaderField: "X-Iumrah-Room") }
         request.setValue(String(position), forHTTPHeaderField: "X-Iumrah-Position")
         request.setValue(candidate.isCover ? "1" : "0", forHTTPHeaderField: "X-Iumrah-Cover")
         request.httpBody = optimized

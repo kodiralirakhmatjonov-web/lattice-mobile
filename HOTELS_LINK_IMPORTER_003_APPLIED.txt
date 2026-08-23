@@ -1,0 +1,8 @@
+HOTELS_LINK_IMPORTER_003
+Direct Booking/Expedia hotel URL importer.
+- No hotel-name search and no cross-property matching.
+- Provider-owned hotel photo CDN allowlist + gallery capture while scrolling.
+- Rich hotel metadata: rating/review count, stars, rooms, amenities, policies, check-in/out.
+- D1 schema migration 0003 and richer R2 image metadata.
+- Native white SwiftUI layout with safe horizontal content margins.
+- iumrah Business logo used sparingly as a brand header.

@@ -1,30 +1,27 @@
 import UIKit
 
 enum ImageOptimizer {
-    /// Optimizes imported hotel media before it ever reaches Cloudflare R2.
-    /// The goal is a sharp full-screen iPhone image without storing multi-megabyte OTA originals.
+    /// Hotel media is normalized before R2 upload so hundreds of gallery photos remain
+    /// practical while still looking sharp on modern iPhone screens.
     static func jpegData(
         from data: Data,
-        maxDimension: CGFloat = 1600,
-        quality: CGFloat = 0.80,
-        targetBytes: Int = 650_000
+        maxDimension: CGFloat = 1440,
+        quality: CGFloat = 0.78,
+        targetBytes: Int = 450_000
     ) throws -> Data {
         guard let source = UIImage(data: data) else { throw APIError.server("IMAGE_DECODE_FAILED") }
 
         let normalized = resized(source, maxDimension: maxDimension)
-        let qualities: [CGFloat] = [quality, 0.76, 0.72, 0.68, 0.64, 0.60]
         var best: Data?
 
-        for value in qualities {
+        for value in [quality, 0.74, 0.70, 0.66, 0.62, 0.58] {
             guard let encoded = normalized.jpegData(compressionQuality: value) else { continue }
             best = encoded
             if encoded.count <= targetBytes { return encoded }
         }
 
-        // Very detailed photos can still be large. A second, slightly smaller pass keeps
-        // R2 usage predictable while preserving enough resolution for the app UI.
-        let compact = resized(normalized, maxDimension: 1280)
-        for value in [CGFloat(0.72), 0.66, 0.60, 0.56] {
+        let compact = resized(normalized, maxDimension: 1180)
+        for value in [CGFloat(0.70), 0.64, 0.58, 0.54] {
             guard let encoded = compact.jpegData(compressionQuality: value) else { continue }
             best = encoded
             if encoded.count <= targetBytes { return encoded }

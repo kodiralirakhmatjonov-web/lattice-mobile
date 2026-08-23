@@ -27,7 +27,7 @@ struct OverviewView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                BusinessBrandLogo(height: 54)
+                BusinessBrandLogo(width: 150)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 4)
 

@@ -6,152 +6,222 @@ struct HotelReviewView: View {
     @State private var publishing = false
     @State private var publishStatus: String?
 
-    private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+    private let columns = [
+        GridItem(.flexible(), spacing: 8),
+        GridItem(.flexible(), spacing: 8)
+    ]
 
     var body: some View {
         ScrollView {
             if let draft = coordinator.draft {
-                VStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     hotelHero(draft)
-                    importQuality(draft)
-                    sourceStatus(draft)
+                    sourceCard(draft)
+                    hotelFacts(draft)
                     gallery(draft)
                     rooms(draft)
                     amenities(draft)
+                    policies(draft)
                     publishBlock(draft)
                 }
-                .padding(16)
+                .padding(.vertical, 14)
             }
         }
-        .background(BusinessDesign.background)
+        .contentMargins(.horizontal, 18, for: .scrollContent)
+        .scrollIndicators(.hidden)
+        .background(Color.white)
         .navigationTitle("Проверка отеля")
         .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder private func hotelHero(_ draft: HotelDraft) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             if let cover = draft.images.first(where: { $0.isCover && $0.selected }), let url = URL(string: cover.url) {
                 AsyncImage(url: url) { phase in
-                    if let image = phase.image { image.resizable().scaledToFill() }
-                    else { ZStack { BusinessDesign.secondarySurface; ProgressView() } }
+                    if let image = phase.image {
+                        image.resizable().scaledToFill()
+                    } else {
+                        ZStack {
+                            BusinessDesign.secondarySurface
+                            ProgressView()
+                        }
+                    }
                 }
-                .frame(height: 235)
-                .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-            }
-            Text(draft.name).font(.system(size: 31, weight: .bold)).tracking(-1.2)
-            HStack(spacing: 9) {
-                if let stars = draft.stars { Text(String(repeating: "★", count: min(max(stars, 1), 5))).foregroundStyle(BusinessDesign.ink) }
-                Text(draft.city).foregroundStyle(.secondary)
-            }.font(.subheadline)
-            if !draft.address.isEmpty { Text(draft.address).font(.footnote).foregroundStyle(.secondary) }
-        }
-        .padding(16).businessCard(radius: 30)
-    }
-
-    @ViewBuilder private func importQuality(_ draft: HotelDraft) -> some View {
-        let verified = draft.sources.count
-        let rooms = draft.rooms.count
-        let roomPhotos = draft.images.filter { $0.kind == .room }.count
-        let reviewPhotos = draft.images.filter { $0.kind == .other }.count
-
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: verified > 0 ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(verified > 0 ? .green : .orange)
-                Text(verified > 0 ? "Отель подтверждён" : "Точный отель не подтверждён")
-                    .font(.headline)
-                Spacer()
-                Text("\(verified)/3").font(.caption.bold()).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 232)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             }
 
-            HStack(spacing: 8) {
-                qualityPill("\(rooms) типов номеров", systemImage: "bed.double.fill")
-                qualityPill("\(roomPhotos) фото номеров", systemImage: "photo.fill")
-            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(draft.name)
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .tracking(-1.1)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            if reviewPhotos > 0 {
-                Text("\(reviewPhotos) сомнительных изображений отделены в «Проверить» и не выбраны автоматически.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            if rooms == 0 || roomPhotos == 0 {
-                Text("Источник не дал достаточно структурированных данных по номерам. Сохранять можно, но карточка останется черновиком до ручной проверки.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-        .padding(16).businessCard(radius: 26)
-    }
+                HStack(spacing: 8) {
+                    if let stars = draft.stars {
+                        Label("\(stars)★", systemImage: "star.fill")
+                    }
+                    if let rating = draft.rating {
+                        let scale = draft.ratingScale ?? (rating > 5 ? 10 : 5)
+                        Label("\(rating.formatted(.number.precision(.fractionLength(1)))) / \(Int(scale))", systemImage: "hand.thumbsup.fill")
+                    }
+                    if let reviews = draft.reviewCount {
+                        Text("\(reviews.formatted()) отзывов")
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
 
-    private func qualityPill(_ title: String, systemImage: String) -> some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.bold())
-            .padding(.horizontal, 11)
-            .frame(height: 32)
-            .background(BusinessDesign.secondarySurface, in: Capsule())
-    }
+                Text([draft.city, draft.country].filter { !$0.isEmpty }.joined(separator: ", "))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
-    @ViewBuilder private func sourceStatus(_ draft: HotelDraft) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("ИСТОЧНИКИ").font(.caption2.bold()).tracking(1.8).foregroundStyle(.secondary)
-            ForEach(HotelImportCoordinator.Provider.allCases, id: \.rawValue) { provider in
-                let source = draft.sources.first(where: { $0.provider == provider.rawValue })
-                let accepted = source != nil
-                HStack(spacing: 10) {
-                    Image(systemName: accepted ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(accepted ? .green : .secondary)
-                    Text(provider.rawValue).font(.subheadline.bold())
-                    Spacer()
-                    Text(source?.name ?? coordinator.providerErrors[provider.rawValue] ?? "Нет данных")
-                        .font(.caption)
+                if !draft.address.isEmpty {
+                    Text(draft.address)
+                        .font(.footnote)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
-        .padding(16).businessCard(radius: 26)
+        .padding(14)
+        .businessCard(radius: 28)
+    }
+
+    @ViewBuilder private func sourceCard(_ draft: HotelDraft) -> some View {
+        if let source = draft.sources.first {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: coordinator.currentProvider?.sourceIcon ?? "link.circle.fill")
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(source.provider)
+                            .font(.headline)
+                        Text("Прямая карточка отеля")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                }
+
+                if let url = URL(string: source.sourceURL) {
+                    Link(destination: url) {
+                        HStack(spacing: 6) {
+                            Text(url.host ?? source.sourceURL)
+                            Spacer()
+                            Image(systemName: "arrow.up.right")
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("Importer использовал только эту страницу. Поиск похожих отелей и смешивание данных из других карточек отключены.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(16)
+            .businessCard(radius: 26)
+        }
+    }
+
+    @ViewBuilder private func hotelFacts(_ draft: HotelDraft) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Данные отеля")
+                .font(.title2.bold())
+
+            if let propertyType = draft.propertyType {
+                factRow("building.2", "Тип", propertyType)
+            }
+            if let stars = draft.stars {
+                factRow("star", "Категория", "\(stars) звёзд")
+            }
+            if let rating = draft.rating {
+                let scale = draft.ratingScale ?? (rating > 5 ? 10 : 5)
+                let reviews = draft.reviewCount.map { " · \($0.formatted()) отзывов" } ?? ""
+                factRow("hand.thumbsup", "Рейтинг", "\(rating.formatted(.number.precision(.fractionLength(1)))) / \(Int(scale))\(reviews)")
+            }
+            if let checkIn = draft.checkIn { factRow("arrow.right.circle", "Check-in", checkIn) }
+            if let checkOut = draft.checkOut { factRow("arrow.left.circle", "Check-out", checkOut) }
+
+            if !draft.description.isEmpty {
+                Divider()
+                Text(draft.description)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .businessCard(radius: 26)
+    }
+
+    private func factRow(_ symbol: String, _ label: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: symbol)
+                .frame(width: 24)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     @ViewBuilder private func gallery(_ draft: HotelDraft) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Фотографии").font(.title2.bold())
-                Spacer()
-                Text("\(draft.selectedImages.count) выбрано").font(.caption).foregroundStyle(.secondary)
-            }
-
-            Text("Importer отделяет фотографии отеля и номеров от служебных картинок сайта. Неясные изображения не выбираются автоматически.")
-                .font(.footnote).foregroundStyle(.secondary)
-
-            ForEach([HotelImageKind.exterior, .room, .lobby, .restaurant, .amenity], id: \.self) { kind in
-                let items = draft.images.filter { $0.kind == kind }
-                if !items.isEmpty { imageSection(kind.title, images: items) }
-            }
-
-            let uncertain = draft.images.filter { $0.kind == .other }
-            if !uncertain.isEmpty {
-                DisclosureGroup {
-                    imageGrid(uncertain)
-                        .padding(.top, 8)
-                } label: {
-                    HStack {
-                        Text("Проверить вручную").font(.headline)
-                        Spacer()
-                        Text("\(uncertain.count)").font(.caption.bold()).foregroundStyle(.secondary)
-                    }
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Фотографии")
+                        .font(.title2.bold())
+                    Text("\(draft.images.count) найдено · \(draft.selectedImages.count) выбрано")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Text("Флаги, аватары, иконки и мелкие элементы сайта отбрасываются ещё до этого списка. Здесь остаются только крупные изображения, которые Importer не смог уверенно классифицировать.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Menu {
+                    Button("Выбрать все") { coordinator.selectAllTrustedImages() }
+                    Button("Снять выбор") { coordinator.deselectAllImages() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                }
+            }
+
+            Text("Здесь только фотографии, которые принадлежат hotel-media CDN конкретной страницы Booking/Expedia. Логотипы сайта, флаги, аватары и рекомендации других отелей не импортируются.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            ForEach(photoKinds(for: draft), id: \.self) { kind in
+                let items = draft.images.filter { $0.kind == kind }
+                if !items.isEmpty {
+                    imageSection(kind.title, images: items)
+                }
             }
         }
-        .padding(16).businessCard(radius: 30)
+        .padding(14)
+        .businessCard(radius: 28)
     }
 
-    @ViewBuilder private func imageSection(_ title: String, images: [HotelImageCandidate]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func photoKinds(for draft: HotelDraft) -> [HotelImageKind] {
+        let order: [HotelImageKind] = [.exterior, .view, .room, .bathroom, .lobby, .restaurant, .amenity, .gallery, .other]
+        return order.filter { kind in draft.images.contains(where: { $0.kind == kind }) }
+    }
+
+    private func imageSection(_ title: String, images: [HotelImageCandidate]) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Text(title).font(.headline)
                 Spacer()
-                Text("\(images.count)").font(.caption.bold()).foregroundStyle(.secondary)
+                Text("\(images.count)").font(.caption).foregroundStyle(.secondary)
             }
             imageGrid(images)
         }
@@ -162,13 +232,20 @@ struct HotelReviewView: View {
             ForEach(images) { image in
                 ZStack(alignment: .topTrailing) {
                     AsyncImage(url: URL(string: image.url)) { phase in
-                        if let value = phase.image { value.resizable().scaledToFill() }
-                        else { BusinessDesign.secondarySurface.overlay(ProgressView()) }
+                        if let loaded = phase.image {
+                            loaded.resizable().scaledToFill()
+                        } else {
+                            ZStack {
+                                BusinessDesign.secondarySurface
+                                ProgressView().controlSize(.small)
+                            }
+                        }
                     }
-                    .frame(height: 128)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 132)
                     .clipped()
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .opacity(image.selected ? 1 : 0.32)
+                    .opacity(image.selected ? 1 : 0.28)
 
                     Button { coordinator.toggleImage(image.id) } label: {
                         Image(systemName: image.selected ? "checkmark.circle.fill" : "circle")
@@ -183,105 +260,156 @@ struct HotelReviewView: View {
                             .font(.system(size: 8, weight: .black))
                             .padding(.horizontal, 7)
                             .frame(height: 20)
-                            .background(.black.opacity(0.72), in: Capsule())
-                            .foregroundStyle(.white)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    } else if image.kind == .room, let room = image.roomName, !room.isEmpty {
-                        Text(room)
-                            .font(.system(size: 8, weight: .bold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 7)
-                            .frame(height: 20)
-                            .background(.black.opacity(0.72), in: Capsule())
+                            .background(.black.opacity(0.74), in: Capsule())
                             .foregroundStyle(.white)
                             .padding(8)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     }
                 }
-                .contextMenu { Button("Сделать обложкой") { coordinator.setCover(image.id) } }
+                .contextMenu {
+                    Button("Сделать обложкой") { coordinator.setCover(image.id) }
+                }
             }
         }
     }
 
     @ViewBuilder private func rooms(_ draft: HotelDraft) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack { Text("Номера").font(.title2.bold()); Spacer(); Text("\(draft.rooms.count)").foregroundStyle(.secondary) }
-            Text("Это типы номеров, которые Importer реально распознал на страницах подтверждённых источников.")
-                .font(.footnote).foregroundStyle(.secondary)
-
-            ForEach(draft.rooms.prefix(24)) { room in
-                let related = draft.images.filter { image in
-                    guard image.kind == .room else { return false }
-                    guard let hint = image.roomName?.lowercased() else { return false }
-                    return hint == room.name.lowercased()
-                }.count
-                HStack(spacing: 12) {
-                    Image(systemName: "bed.double.fill").foregroundStyle(BusinessDesign.ink)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(room.name).font(.subheadline.bold())
-                        if related > 0 { Text("\(related) фото связано").font(.caption2).foregroundStyle(.secondary) }
-                    }
-                    Spacer()
-                }
-                .padding(12)
-                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Номера").font(.title2.bold())
+                Spacer()
+                Text("\(draft.rooms.count)").foregroundStyle(.secondary)
             }
 
             if draft.rooms.isEmpty {
-                Text("Типы номеров не распознаны. Importer не будет придумывать их автоматически.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-        .padding(16).businessCard(radius: 30)
-    }
-
-    @ViewBuilder private func amenities(_ draft: HotelDraft) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Удобства").font(.title2.bold())
-            FlowLayout(spacing: 7) {
-                ForEach(draft.amenities, id: \.self) { item in
-                    Text(item).font(.caption.bold()).padding(.horizontal, 11).frame(height: 32)
-                        .background(BusinessDesign.secondarySurface, in: Capsule())
+                ContentUnavailableView(
+                    "Номера не найдены",
+                    systemImage: "bed.double",
+                    description: Text("Эта страница не показала структурированный список типов номеров. Данные не будут придуманы автоматически.")
+                )
+            } else {
+                ForEach(draft.rooms) { room in
+                    roomCard(room)
                 }
             }
         }
-        .padding(16).businessCard(radius: 30)
+        .padding(14)
+        .businessCard(radius: 28)
+    }
+
+    private func roomCard(_ room: HotelRoomDraft) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: "bed.double.fill")
+                    .font(.title3)
+                    .frame(width: 30, height: 30)
+                    .background(BusinessDesign.secondarySurface, in: Circle())
+                Text(room.name)
+                    .font(.subheadline.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+
+            let details = [
+                room.maxGuests.map { "до \($0) гостей" },
+                room.sizeM2.map { "\($0.formatted(.number.precision(.fractionLength(0...1)))) м²" },
+                room.beds,
+                room.view
+            ].compactMap { $0 }
+
+            if !details.isEmpty {
+                Text(details.joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !room.amenities.isEmpty {
+                Text(room.amenities.prefix(8).joined(separator: " · "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(13)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    @ViewBuilder private func amenities(_ draft: HotelDraft) -> some View {
+        if !draft.amenities.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Удобства").font(.title2.bold())
+                FlowLayout(spacing: 7) {
+                    ForEach(draft.amenities, id: \.self) { item in
+                        Text(item)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .background(BusinessDesign.secondarySurface, in: Capsule())
+                    }
+                }
+            }
+            .padding(14)
+            .businessCard(radius: 28)
+        }
+    }
+
+    @ViewBuilder private func policies(_ draft: HotelDraft) -> some View {
+        if !draft.policies.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Правила").font(.title2.bold())
+                ForEach(draft.policies, id: \.self) { policy in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "checkmark.circle")
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 1)
+                        Text(policy)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(14)
+            .businessCard(radius: 28)
+        }
     }
 
     @ViewBuilder private func publishBlock(_ draft: HotelDraft) -> some View {
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && draft.suspiciousSelectedImages.isEmpty
-        let hasRoomData = !draft.rooms.isEmpty && !draft.selectedRoomImages.isEmpty
+        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty
 
         VStack(spacing: 12) {
-            if let publishStatus { Text(publishStatus).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center) }
+            if let publishStatus {
+                Text(publishStatus)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
 
             if !canPublish {
-                Text("Для публикации нужен подтверждённый источник, минимум 4 нормальные фотографии и ни одной выбранной фотографии из «Проверить».")
-                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            } else if !hasRoomData {
-                Text("Карточка будет сохранена в D1/R2 как черновик: номера или фотографии номеров пока не подтверждены.")
-                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                Text("Карточка будет сохранена как черновик, пока у неё нет минимум 4 фотографий и распознанных типов номеров.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
 
             Button {
                 publishing = true
-                publishStatus = "Сохраняем карточку…"
+                publishStatus = "Сохраняем данные отеля…"
                 Task {
                     do {
                         var cloudDraft = draft
-                        let publishAfterUpload = canPublish && hasRoomData
                         cloudDraft.status = "draft"
-                        publishStatus = "D1: сохраняем карточку…"
                         _ = try await APIClient.shared.saveHotel(cloudDraft)
-                        publishStatus = "R2: обновляем медиатеку…"
+
+                        publishStatus = "Обновляем медиатеку в R2…"
                         try await APIClient.shared.clearHotelImages(hotelID: cloudDraft.id)
 
                         let selected = cloudDraft.selectedImages
                         var uploaded = 0
                         var failed = 0
                         for (index, image) in selected.enumerated() {
-                            publishStatus = "R2: фотография \(index + 1) / \(selected.count)"
+                            publishStatus = "Фото \(index + 1) из \(selected.count)"
                             do {
                                 try await APIClient.shared.uploadHotelImage(hotelID: cloudDraft.id, candidate: image, position: index)
                                 uploaded += 1
@@ -290,42 +418,53 @@ struct HotelReviewView: View {
                             }
                         }
 
-                        if failed == 0 && publishAfterUpload {
+                        if failed == 0 && canPublish {
                             cloudDraft.status = "published"
-                            publishStatus = "D1: публикуем отель…"
                             _ = try await APIClient.shared.saveHotel(cloudDraft)
-                            publishStatus = "Готово. Отель опубликован: D1 + R2 (\(uploaded) фото)."
+                            publishStatus = "Готово. Отель опубликован · \(uploaded) фото в R2."
                         } else if failed == 0 {
-                            publishStatus = "Готово. Отель сохранён как черновик: D1 + R2 (\(uploaded) фото). Проверьте номера перед публикацией."
+                            publishStatus = "Готово. Черновик сохранён · \(uploaded) фото в R2."
                         } else {
-                            publishStatus = "Отель сохранён в D1 как черновик. R2: \(uploaded) фото загружено, \(failed) не удалось."
+                            publishStatus = "Данные сохранены как черновик. Фото: \(uploaded) загружено, \(failed) не удалось."
                         }
-                    } catch { publishStatus = "Ошибка Hotels Cloud: \(error.localizedDescription)" }
+                    } catch {
+                        publishStatus = "Ошибка Hotels Cloud: \(error.localizedDescription)"
+                    }
                     publishing = false
                 }
             } label: {
                 HStack {
                     if publishing { ProgressView().tint(.white) }
-                    Text(publishing ? "Сохраняем…" : (canPublish && hasRoomData ? "Добавить отель" : "Сохранить черновик"))
+                    Text(publishing ? "Сохраняем…" : (canPublish ? "Добавить в iumrah Hotels" : "Сохранить черновик"))
                 }
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .frame(height: 56)
-                .foregroundStyle(.white)
-                .background(BusinessDesign.ink, in: Capsule())
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.black)
             .disabled(publishing || draft.sources.isEmpty || draft.selectedImages.isEmpty)
 
-            Button("Закрыть") { dismiss() }.font(.subheadline.bold()).foregroundStyle(.secondary)
+            Button("Закрыть") { dismiss() }
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
         }
-        .padding(16).businessCard(radius: 30)
+        .padding(14)
+        .businessCard(radius: 28)
     }
 }
 
 struct FlowLayout<Content: View>: View {
     var spacing: CGFloat = 8
     @ViewBuilder var content: () -> Content
+
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: spacing)], alignment: .leading, spacing: spacing) { content() }
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 110), spacing: spacing)],
+            alignment: .leading,
+            spacing: spacing
+        ) {
+            content()
+        }
     }
 }
