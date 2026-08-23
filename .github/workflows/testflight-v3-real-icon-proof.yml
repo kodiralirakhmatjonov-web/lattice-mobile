@@ -1,0 +1,546 @@
+name: Build iumrah Business / TestFlight V3 — REAL ICON PROOF
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: 'Upload signed build to TestFlight'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      SCHEME: iumrahBusiness
+      PROJECT: iumrahBusiness.xcodeproj
+      BUNDLE_ID: com.iumrah.business
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify update 010 is actually applied
+        run: |
+          set -euo pipefail
+          test -f UPDATE_010_APPLIED.txt || {
+            echo "STOP: update 010 is NOT present in this repository checkout."
+            echo "Do not continue with TestFlight until the ZIP patch has been applied."
+            exit 1
+          }
+          cat UPDATE_010_APPLIED.txt
+
+          grep -F 'GENERATE_INFOPLIST_FILE: YES' project.yml >/dev/null || {
+            echo "STOP: project.yml is still an old version (GENERATE_INFOPLIST_FILE is not YES)."
+            exit 1
+          }
+
+          grep -F 'ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon' project.yml >/dev/null || {
+            echo "STOP: project.yml does not configure AppIcon."
+            exit 1
+          }
+
+      - name: Xcode environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Verify source AppIcon set
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+
+          root = Path("Resources/Assets.xcassets/AppIcon.appiconset")
+          manifest = json.loads((root / "Contents.json").read_text())
+
+          expected = {
+              ("iphone", "20x20", "2x"): "AppIcon-20@2x.png",
+              ("iphone", "20x20", "3x"): "AppIcon-20@3x.png",
+              ("iphone", "29x29", "2x"): "AppIcon-29@2x.png",
+              ("iphone", "29x29", "3x"): "AppIcon-29@3x.png",
+              ("iphone", "40x40", "2x"): "AppIcon-40@2x.png",
+              ("iphone", "40x40", "3x"): "AppIcon-40@3x.png",
+              ("iphone", "60x60", "2x"): "AppIcon-60@2x.png",
+              ("iphone", "60x60", "3x"): "AppIcon-60@3x.png",
+              ("ios-marketing", "1024x1024", "1x"): "AppIcon-1024.png",
+          }
+
+          found = {}
+          for item in manifest.get("images", []):
+              key = (item.get("idiom"), item.get("size"), item.get("scale"))
+              if key in expected:
+                  found[key] = item.get("filename")
+
+          missing = [key for key in expected if key not in found]
+          if missing:
+              raise SystemExit(f"AppIcon Contents.json is missing slots: {missing}")
+
+          for key, filename in expected.items():
+              if found[key] != filename:
+                  raise SystemExit(f"{key}: expected {filename}, got {found[key]}")
+              if not (root / filename).exists():
+                  raise SystemExit(f"Missing icon file: {root / filename}")
+
+          print("Source AppIcon manifest is complete.")
+          PYCODE
+
+          check_size() {
+            local file="$1"
+            local expected_w="$2"
+            local expected_h="$3"
+            local w
+            local h
+            w=$(sips -g pixelWidth "$file" | awk '/pixelWidth/ {print $2}')
+            h=$(sips -g pixelHeight "$file" | awk '/pixelHeight/ {print $2}')
+            if [ "$w" != "$expected_w" ] || [ "$h" != "$expected_h" ]; then
+              echo "$file has ${w}x${h}; expected ${expected_w}x${expected_h}"
+              exit 1
+            fi
+          }
+
+          ICON_DIR="Resources/Assets.xcassets/AppIcon.appiconset"
+          check_size "$ICON_DIR/AppIcon-20@2x.png" 40 40
+          check_size "$ICON_DIR/AppIcon-20@3x.png" 60 60
+          check_size "$ICON_DIR/AppIcon-29@2x.png" 58 58
+          check_size "$ICON_DIR/AppIcon-29@3x.png" 87 87
+          check_size "$ICON_DIR/AppIcon-40@2x.png" 80 80
+          check_size "$ICON_DIR/AppIcon-40@3x.png" 120 120
+          check_size "$ICON_DIR/AppIcon-60@2x.png" 120 120
+          check_size "$ICON_DIR/AppIcon-60@3x.png" 180 180
+          check_size "$ICON_DIR/AppIcon-1024.png" 1024 1024
+
+          echo "Source AppIcon sizes are valid."
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Verify generated Xcode build settings
+        run: |
+          set -euo pipefail
+          mkdir -p build/icon-diagnostics
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -showBuildSettings > build/icon-diagnostics/build-settings.txt
+
+          cat build/icon-diagnostics/build-settings.txt
+
+          grep -Eq 'ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon$' build/icon-diagnostics/build-settings.txt || {
+            echo "Generated Xcode project does not point to AppIcon."
+            exit 1
+          }
+
+          grep -Eq 'GENERATE_INFOPLIST_FILE = YES$' build/icon-diagnostics/build-settings.txt || {
+            echo "Generated Xcode project is not using generated Info.plist."
+            exit 1
+          }
+
+          grep -Eq 'TARGETED_DEVICE_FAMILY = 1$' build/icon-diagnostics/build-settings.txt || {
+            echo "Generated target is not iPhone-only."
+            exit 1
+          }
+
+      - name: Validate simulator build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Check TestFlight requirements
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          IOS_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in APPLE_TEAM_ID APPLE_ID_EMAIL APPLE_APP_SPECIFIC_PASSWORD IOS_SIGNING_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing GitHub secret: $name"
+              exit 1
+            fi
+          done
+
+          test -f Signing/distribution-private-key.enc || {
+            echo "Missing Signing/distribution-private-key.enc"
+            exit 1
+          }
+
+          PROFILE_PATH=$(find Signing -maxdepth 1 -name '*.mobileprovision' -print -quit)
+          test -n "$PROFILE_PATH" || {
+            echo "No .mobileprovision file found in Signing/"
+            exit 1
+          }
+
+          echo "PROFILE_PATH=$PROFILE_PATH" >> "$GITHUB_ENV"
+
+      - name: Install signing assets
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          IOS_SIGNING_KEY_PASSWORD: ${{ secrets.IOS_SIGNING_KEY_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          PRIVATE_KEY="$RUNNER_TEMP/distribution-private-key.pem"
+          CERT_PEM="$RUNNER_TEMP/distribution-certificate.pem"
+          P12_PATH="$RUNNER_TEMP/distribution.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/iumrah-signing.keychain-db"
+          P12_PASSWORD="iumrah-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          openssl enc \
+            -d \
+            -aes-256-cbc \
+            -pbkdf2 \
+            -iter 200000 \
+            -in "$GITHUB_WORKSPACE/Signing/distribution-private-key.enc" \
+            -out "$PRIVATE_KEY" \
+            -pass env:IOS_SIGNING_KEY_PASSWORD
+
+          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
+
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist" \
+          CERT_DER="$RUNNER_TEMP/distribution-certificate.der" \
+          python3 - <<'PYCODE'
+          import os
+          import plistlib
+          from pathlib import Path
+
+          profile = Path(os.environ["PROFILE_PLIST"])
+          out = Path(os.environ["CERT_DER"])
+
+          with profile.open("rb") as f:
+              data = plistlib.load(f)
+
+          certs = data.get("DeveloperCertificates") or []
+          if not certs:
+              raise SystemExit("Provisioning profile does not contain DeveloperCertificates")
+
+          out.write_bytes(certs[0])
+          print(f"Extracted signing certificate: {len(certs[0])} bytes")
+          PYCODE
+
+          openssl x509 \
+            -inform DER \
+            -in "$RUNNER_TEMP/distribution-certificate.der" \
+            -out "$CERT_PEM"
+
+          KEY_FP=$(openssl pkey -in "$PRIVATE_KEY" -pubout 2>/dev/null | openssl sha256)
+          CERT_FP=$(openssl x509 -in "$CERT_PEM" -pubkey -noout 2>/dev/null | openssl sha256)
+
+          if [ "$KEY_FP" != "$CERT_FP" ]; then
+            echo "Provisioning profile certificate does not match signing private key."
+            exit 1
+          fi
+
+          openssl pkcs12 \
+            -export \
+            -inkey "$PRIVATE_KEY" \
+            -in "$CERT_PEM" \
+            -out "$P12_PATH" \
+            -name "Apple Distribution" \
+            -passout pass:"$P12_PASSWORD"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "Installed provisioning profile: $PROFILE_NAME"
+
+      - name: Archive signed app
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -o pipefail
+          mkdir -p build/icon-diagnostics
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/iumrahBusiness.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY='Apple Distribution' \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            archive
+
+      - name: Prove AppIcon exists in archived app
+        if: ${{ inputs.upload_to_testflight }}
+        run: |
+          set -euo pipefail
+
+          APP_PATH=$(find "$PWD/build/iumrahBusiness.xcarchive/Products/Applications" \
+            -maxdepth 1 -name '*.app' -print -quit)
+
+          test -n "$APP_PATH" || {
+            echo "Archived .app not found."
+            exit 1
+          }
+
+          INFO_PLIST="$APP_PATH/Info.plist"
+          ASSETS="$APP_PATH/Assets.car"
+          DIAG="$PWD/build/icon-diagnostics"
+          mkdir -p "$DIAG"
+
+          cp "$INFO_PLIST" "$DIAG/archive-Info.plist"
+          plutil -p "$INFO_PLIST" | tee "$DIAG/archive-Info.txt"
+
+          test -f "$ASSETS" || {
+            echo "ARCHIVE FAIL: Assets.car is missing. The asset catalog was not compiled into the app."
+            echo "This is the exact condition that caused the previous silent Repair-step failure."
+            exit 1
+          }
+
+          xcrun --sdk iphoneos assetutil --info "$ASSETS" > "$DIAG/archive-assets.json"
+
+          INFO_PLIST="$INFO_PLIST" \
+          ASSET_INFO="$DIAG/archive-assets.json" \
+          python3 - <<'PYCODE'
+          import json
+          import os
+          import plistlib
+          from pathlib import Path
+
+          plist_path = Path(os.environ["INFO_PLIST"])
+          asset_path = Path(os.environ["ASSET_INFO"])
+
+          with plist_path.open("rb") as f:
+              plist = plistlib.load(f)
+
+          primary = (
+              plist.get("CFBundleIcons", {})
+              .get("CFBundlePrimaryIcon", {})
+          )
+          top_level_icon_name = plist.get("CFBundleIconName")
+          nested_icon_name = primary.get("CFBundleIconName")
+          icon_name = top_level_icon_name or nested_icon_name
+
+          data = json.loads(asset_path.read_text())
+          icons = [
+              item for item in data
+              if isinstance(item, dict) and item.get("AssetType") == "Icon Image"
+          ]
+
+          if not icons:
+              raise SystemExit(
+                  "ARCHIVE FAIL: Assets.car contains no 'Icon Image' records. "
+                  "The AppIcon set was not compiled as an app icon."
+              )
+
+          blob = json.dumps(icons)
+          if "AppIcon" not in blob:
+              raise SystemExit(
+                  "ARCHIVE FAIL: Icon Image records exist, but none identify AppIcon."
+              )
+
+          if "1024x1024" not in blob and "1024" not in blob:
+              raise SystemExit(
+                  "ARCHIVE FAIL: compiled AppIcon has no 1024x1024 App Store rendition."
+              )
+
+          if icon_name != "AppIcon":
+              raise SystemExit(
+                  "ARCHIVE FAIL: AppIcon metadata is missing. "
+                  f"top-level CFBundleIconName={top_level_icon_name!r}; "
+                  f"nested CFBundleIcons/CFBundlePrimaryIcon/CFBundleIconName={nested_icon_name!r}"
+              )
+
+          print("ARCHIVE APPICON PROOF PASSED")
+          print(f"top-level CFBundleIconName: {top_level_icon_name!r}")
+          print(f"nested primary CFBundleIconName: {nested_icon_name!r}")
+          print(f"effective icon name: {icon_name!r}")
+          print(f"Compiled Icon Image records: {len(icons)}")
+          print(json.dumps(icons, indent=2)[:12000])
+          PYCODE
+
+      - name: Export IPA
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
+            </dict>
+            <key>stripSwiftSymbols</key><true/>
+          </dict></plist>
+          PLIST
+
+          rm -rf "$PWD/build/export"
+
+          xcodebuild -exportArchive \
+            -archivePath "$PWD/build/iumrahBusiness.xcarchive" \
+            -exportPath "$PWD/build/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+          ls -lah build/export
+
+      - name: Prove AppIcon exists in final IPA
+        if: ${{ inputs.upload_to_testflight }}
+        run: |
+          set -euo pipefail
+
+          IPA=$(find "$PWD/build/export" -maxdepth 1 -name '*.ipa' -print -quit)
+          test -n "$IPA" || {
+            echo "Exported IPA not found."
+            exit 1
+          }
+
+          CHECK_DIR="$RUNNER_TEMP/ipa-check"
+          rm -rf "$CHECK_DIR"
+          mkdir -p "$CHECK_DIR"
+          unzip -q "$IPA" -d "$CHECK_DIR"
+
+          APP_PATH=$(find "$CHECK_DIR/Payload" -maxdepth 1 -name '*.app' -print -quit)
+          INFO_PLIST="$APP_PATH/Info.plist"
+          ASSETS="$APP_PATH/Assets.car"
+          DIAG="$PWD/build/icon-diagnostics"
+
+          cp "$INFO_PLIST" "$DIAG/final-Info.plist"
+          plutil -p "$INFO_PLIST" | tee "$DIAG/final-Info.txt"
+
+          test -f "$ASSETS" || {
+            echo "FINAL IPA FAIL: Assets.car missing."
+            exit 1
+          }
+
+          xcrun --sdk iphoneos assetutil --info "$ASSETS" > "$DIAG/final-assets.json"
+
+          INFO_PLIST="$INFO_PLIST" \
+          ASSET_INFO="$DIAG/final-assets.json" \
+          python3 - <<'PYCODE'
+          import json
+          import os
+          import plistlib
+          from pathlib import Path
+
+          with Path(os.environ["INFO_PLIST"]).open("rb") as f:
+              plist = plistlib.load(f)
+
+          primary = (
+              plist.get("CFBundleIcons", {})
+              .get("CFBundlePrimaryIcon", {})
+          )
+          top_level_icon_name = plist.get("CFBundleIconName")
+          nested_icon_name = primary.get("CFBundleIconName")
+          icon_name = top_level_icon_name or nested_icon_name
+
+          data = json.loads(Path(os.environ["ASSET_INFO"]).read_text())
+          icons = [
+              item for item in data
+              if isinstance(item, dict) and item.get("AssetType") == "Icon Image"
+          ]
+
+          if not icons:
+              raise SystemExit(
+                  "FINAL IPA FAIL: Assets.car contains no compiled Icon Image records."
+              )
+
+          blob = json.dumps(icons)
+          if "AppIcon" not in blob:
+              raise SystemExit(
+                  "FINAL IPA FAIL: compiled Icon Image records do not identify AppIcon."
+              )
+
+          if "1024x1024" not in blob and "1024" not in blob:
+              raise SystemExit(
+                  "FINAL IPA FAIL: no 1024x1024 App Store icon rendition is compiled."
+              )
+
+          if icon_name != "AppIcon":
+              raise SystemExit(
+                  "FINAL IPA FAIL: AppIcon metadata is missing. "
+                  f"top-level CFBundleIconName={top_level_icon_name!r}; "
+                  f"nested CFBundleIcons/CFBundlePrimaryIcon/CFBundleIconName={nested_icon_name!r}"
+              )
+
+          print("FINAL IPA APPICON PROOF PASSED")
+          print(f"top-level CFBundleIconName: {top_level_icon_name!r}")
+          print(f"nested primary CFBundleIconName: {nested_icon_name!r}")
+          print(f"effective icon name: {icon_name!r}")
+          print("This exact IPA is the one that will be sent to Apple.")
+          print(json.dumps(icons, indent=2)[:12000])
+          PYCODE
+
+          echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
+
+      - name: Validate and upload to TestFlight without p8
+        if: ${{ inputs.upload_to_testflight }}
+        env:
+          APPLE_ID_EMAIL: ${{ secrets.APPLE_ID_EMAIL }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          test -n "${IPA_PATH:-}" || {
+            echo "IPA_PATH was not produced by final IPA proof step."
+            exit 1
+          }
+
+          xcrun altool --validate-app \
+            --type ios \
+            -f "$IPA_PATH" \
+            -u "$APPLE_ID_EMAIL" \
+            -p "$APPLE_APP_SPECIFIC_PASSWORD"
+
+          xcrun altool --upload-app \
+            --type ios \
+            -f "$IPA_PATH" \
+            -u "$APPLE_ID_EMAIL" \
+            -p "$APPLE_APP_SPECIFIC_PASSWORD"
+
+      - name: Upload icon diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: iumrah-icon-diagnostics-${{ github.run_number }}
+          path: build/icon-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
