@@ -25,13 +25,14 @@ struct HotelReviewView: View {
                     rooms(draft)
                     amenities(draft)
                     locationDetails(draft)
-                    additionalDetails(draft)
+                    compactSourceNotes(draft)
                     publishBlock(draft)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 18)
                 .padding(.vertical, 14)
             }
         }
-        .contentMargins(.horizontal, 18, for: .scrollContent)
         .scrollIndicators(.hidden)
         .background(Color.white)
         .navigationTitle("Проверка отеля")
@@ -53,19 +54,26 @@ struct HotelReviewView: View {
     @ViewBuilder private func hotelHero(_ draft: HotelDraft) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             if let cover = draft.images.first(where: { $0.isCover && $0.selected }), let url = URL(string: cover.url) {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFill()
-                    } else {
-                        ZStack {
-                            BusinessDesign.secondarySurface
-                            ProgressView()
+                GeometryReader { proxy in
+                    ZStack {
+                        BusinessDesign.secondarySurface
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: proxy.size.width, height: 232)
+                                    .clipped()
+                            } else {
+                                ProgressView()
+                            }
                         }
                     }
+                    .frame(width: proxy.size.width, height: 232)
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                 }
-                .frame(maxWidth: .infinity)
                 .frame(height: 232)
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .clipped()
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -192,6 +200,29 @@ struct HotelReviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private func compactSourceNotes(_ draft: HotelDraft) -> some View {
+        let sourceDetailCount = draft.policies.count + draft.facts.count + draft.fees.count + draft.importantInformation.count
+        if sourceDetailCount > 0 {
+            DisclosureGroup {
+                Text("Эти служебные детали доступны только для проверки источника и не записываются в основной catalog core. В D1 сохраняются ключевые данные выбора: отель, адрес/гео, рейтинг, удобства, nearby, номера и оптимизированные фотографии.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+            } label: {
+                HStack {
+                    Label("Служебные данные источника", systemImage: "doc.text.magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("\(sourceDetailCount)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(16)
+            .businessCard(radius: 24)
         }
     }
 
@@ -627,6 +658,13 @@ struct HotelReviewView: View {
                     .multilineTextAlignment(.center)
             }
 
+            if draft.selectedImages.count > 48 {
+                Text("В R2 будет сохранено до 48 наиболее полезных фотографий: обложка, номера и основные зоны отеля. Они сжимаются сервером перед сохранением.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
             Button {
                 if coordinator.duplicateCandidate?.isPossible == true {
                     showPossibleDuplicateAlert = true
@@ -666,6 +704,8 @@ struct HotelReviewView: View {
         case "completed_with_warnings": stage = "завершено с предупреждением"
         case "completed": stage = "завершено"
         case "integrity_failed": stage = "проверка целостности не пройдена"
+        case "stale_recovered": stage = "зависший импорт остановлен автоматически"
+        case "cancelled": stage = "остановлено администратором"
         default: stage = job.stage.replacingOccurrences(of: "_", with: " ")
         }
         var value = "Фото: \(job.storedImages)/\(job.totalImages) · \(stage)"

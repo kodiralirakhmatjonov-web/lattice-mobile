@@ -475,9 +475,66 @@ struct HotelImportJob: Codable, Identifiable {
     let currentImageLabel: String?
     let warning: String?
     let compressionMode: String?
+    let heartbeatAt: String?
+    let lastErrorCode: String?
+    let cancelRequestedAt: String?
 
     var isActive: Bool { status == "queued" || status == "running" }
     var isCompleted: Bool { status == "completed" }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, hotelID, hotelName, sourceProvider, sourceURL, status, stage, progress
+        case totalImages, storedImages, failedImages, publishWhenComplete, error, createdAt
+        case startedAt, completedAt, updatedAt, retryCount, snapshotHash, possibleDuplicate
+        case currentImage, currentImageLabel, warning, compressionMode, heartbeatAt
+        case lastErrorCode, cancelRequestedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        hotelID = try container.decodeIfPresent(String.self, forKey: .hotelID) ?? ""
+        hotelName = try container.decodeIfPresent(String.self, forKey: .hotelName) ?? "Hotel"
+        sourceProvider = try container.decodeIfPresent(String.self, forKey: .sourceProvider)
+        sourceURL = try container.decodeIfPresent(String.self, forKey: .sourceURL)
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "failed"
+        stage = try container.decodeIfPresent(String.self, forKey: .stage) ?? status
+        progress = try container.decodeIfPresent(Int.self, forKey: .progress) ?? 0
+        totalImages = try container.decodeIfPresent(Int.self, forKey: .totalImages) ?? 0
+        storedImages = try container.decodeIfPresent(Int.self, forKey: .storedImages) ?? 0
+        failedImages = try container.decodeIfPresent(Int.self, forKey: .failedImages) ?? 0
+        publishWhenComplete = try container.decodeIfPresent(Bool.self, forKey: .publishWhenComplete) ?? false
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        startedAt = try container.decodeIfPresent(String.self, forKey: .startedAt)
+        completedAt = try container.decodeIfPresent(String.self, forKey: .completedAt)
+        updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt) ?? createdAt
+        retryCount = try container.decodeIfPresent(Int.self, forKey: .retryCount)
+        snapshotHash = try container.decodeIfPresent(String.self, forKey: .snapshotHash)
+        possibleDuplicate = try container.decodeIfPresent(HotelDuplicate.self, forKey: .possibleDuplicate)
+        currentImage = try container.decodeIfPresent(Int.self, forKey: .currentImage)
+        currentImageLabel = try container.decodeIfPresent(String.self, forKey: .currentImageLabel)
+        warning = try container.decodeIfPresent(String.self, forKey: .warning)
+        compressionMode = try container.decodeIfPresent(String.self, forKey: .compressionMode)
+        heartbeatAt = try container.decodeIfPresent(String.self, forKey: .heartbeatAt)
+        lastErrorCode = try container.decodeIfPresent(String.self, forKey: .lastErrorCode)
+        cancelRequestedAt = try container.decodeIfPresent(String.self, forKey: .cancelRequestedAt)
+    }
+}
+
+
+
+struct SourceRoomRecoveryResponse: Codable {
+    let ok: Bool
+    let provider: String
+    let sourceURL: String
+    let roomCount: Int
+    let rooms: [HotelRoomDraft]
+    let method: String
+}
+
+struct SourceRoomRecoveryPayload: Encodable {
+    let sourceURL: String
 }
 
 struct HotelImportJobResponse: Codable { let ok: Bool; let job: HotelImportJob }

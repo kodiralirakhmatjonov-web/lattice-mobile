@@ -10,162 +10,44 @@ struct HotelsView: View {
     @State private var backendMessage: String?
     @State private var importJobs: [HotelImportJob] = []
     @State private var importJobsError: String?
+    @State private var hotelPendingDeletion: HotelListItem?
+    @State private var deletingHotelID: String?
+    @State private var jobActionID: String?
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .center) {
-                    BusinessBrandLogo(width: 142)
-                    Spacer()
-                    Button { showAdd = true } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 18, weight: .bold))
-                            .frame(width: 42, height: 42)
-                            .background(.black, in: Circle())
-                            .foregroundStyle(.white)
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Hotels")
-                        .font(.system(size: 38, weight: .bold, design: .rounded))
-                        .tracking(-1.5)
-                    Text("Собственная база iumrah для Makkah и Madinah")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 10) {
-                    HotelCountCard(title: "Makkah", count: hotels.filter { $0.city.lowercased().contains("makk") }.count)
-                    HotelCountCard(title: "Madinah", count: hotels.filter { $0.city.lowercased().contains("mad") }.count)
-                }
-
-                HStack(spacing: 10) {
-                    Image(systemName: backendUnavailable ? "exclamationmark.icloud.fill" : "checkmark.icloud.fill")
-                        .foregroundStyle(backendUnavailable ? .red : .green)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(backendUnavailable ? "Hotels Cloud недоступен" : "Hotels Cloud подключён")
-                            .font(.caption.weight(.semibold))
-                        if let cloudHealth, !backendUnavailable {
-                            Text("D1 · R2 · \(cloudHealth.hotels) отелей")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        } else if let backendMessage {
-                            Text(backendMessage)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
-                    }
-                    Spacer()
-                    if loading { ProgressView().controlSize(.small) }
-                }
-                .padding(14)
-                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                if !importJobs.isEmpty || importJobsError != nil {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Импорты").font(.title2.bold())
-                            Spacer()
-                            let activeCount = importJobs.filter(\.isActive).count
-                            if activeCount > 0 {
-                                Text("\(activeCount) активных")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        if let importJobsError {
-                            Label(importJobsError, systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(Array(importJobs.prefix(10))) { job in
-                            importJobCard(job)
-                        }
-                    }
-                    .padding(16)
-                    .businessCard(radius: 28)
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("База отелей").font(.title2.bold())
-                        Spacer()
-                        Text("\(hotels.count)").foregroundStyle(.secondary)
-                    }
-
-                    if hotels.isEmpty && !loading {
-                        ContentUnavailableView(
-                            "Отелей пока нет",
-                            systemImage: "building.2",
-                            description: Text("Добавьте отель по прямой ссылке Booking или Expedia.")
-                        )
-                    }
-
-                    ForEach(hotels) { hotel in
-                        HStack(spacing: 13) {
-                            Group {
-                                if let imageURL = AppConfig.absoluteURL(hotel.coverImageURL) {
-                                    AsyncImage(url: imageURL) { phase in
-                                        if let image = phase.image {
-                                            image.resizable().scaledToFill()
-                                        } else {
-                                            placeholder
-                                        }
-                                    }
-                                } else {
-                                    placeholder
-                                }
-                            }
-                            .frame(width: 64, height: 64)
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(hotel.name)
-                                    .font(.subheadline.bold())
-                                    .lineLimit(1)
-                                HStack(spacing: 5) {
-                                    Text(hotel.city)
-                                    Text("·")
-                                    Text("\(hotel.imageCount) фото")
-                                    Text("·")
-                                    Text("\(hotel.roomCount) номеров")
-                                }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                                if let rating = hotel.rating {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "star.fill").font(.caption2)
-                                        Text(rating.formatted(.number.precision(.fractionLength(1))))
-                                        if let count = hotel.reviewCount { Text("· \(count) отзывов") }
-                                    }
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            Text(hotel.status == "published" ? "LIVE" : (hotel.lifecycleState?.uppercased() ?? "DRAFT"))
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(hotel.status == "published" ? .green : (hotel.lifecycleState == "failed" ? .red : .secondary))
-                        }
-                        .padding(12)
-                        .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    }
-                }
-                .padding(16)
-                .businessCard(radius: 28)
+            LazyVStack(alignment: .leading, spacing: 18) {
+                header
+                cityCounters
+                cloudStatus
+                importsSection
+                hotelCatalog
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 14)
         }
         .contentMargins(.horizontal, 18, for: .scrollContent)
+        .scrollIndicators(.hidden)
         .background(Color.white)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) {
             AddHotelView()
+        }
+        .alert("Удалить отель?", isPresented: Binding(
+            get: { hotelPendingDeletion != nil },
+            set: { if !$0 { hotelPendingDeletion = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { hotelPendingDeletion = nil }
+            Button("Удалить", role: .destructive) {
+                guard let hotel = hotelPendingDeletion else { return }
+                hotelPendingDeletion = nil
+                Task { await deleteHotel(hotel) }
+            }
+        } message: {
+            if let hotelPendingDeletion {
+                Text("\(hotelPendingDeletion.name) будет удалён из D1 вместе с его импортами. Его фотографии также будут удалены из R2. Активный Workflow сначала будет остановлен.")
+            }
         }
         .task {
             await BusinessNotifications.prepare()
@@ -175,92 +57,235 @@ struct HotelsView: View {
         .refreshable { await load() }
     }
 
+    private var header: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Hotels")
+                    .font(.system(size: 38, weight: .bold, design: .rounded))
+                    .tracking(-1.5)
+                Text("Каталог iumrah · Makkah и Madinah")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            Button { showAdd = true } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(.white)
+                    .background(.black, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Импортировать отель")
+        }
+    }
+
+    private var cityCounters: some View {
+        HStack(spacing: 10) {
+            HotelCountCard(title: "Makkah", count: hotels.filter { $0.city.lowercased().contains("makk") }.count)
+            HotelCountCard(title: "Madinah", count: hotels.filter { $0.city.lowercased().contains("mad") }.count)
+        }
+    }
+
+    private var cloudStatus: some View {
+        HStack(spacing: 11) {
+            Image(systemName: backendUnavailable ? "exclamationmark.icloud.fill" : "checkmark.icloud.fill")
+                .font(.title3)
+                .foregroundStyle(backendUnavailable ? .red : .green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(backendUnavailable ? "Hotels Cloud недоступен" : "Hotels Cloud подключён")
+                    .font(.subheadline.weight(.semibold))
+                if let cloudHealth, !backendUnavailable {
+                    Text("D1 · R2 · \(cloudHealth.hotels) отелей")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let backendMessage {
+                    Text(backendMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer()
+            if loading { ProgressView().controlSize(.small) }
+        }
+        .padding(15)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    @ViewBuilder private var importsSection: some View {
+        if !importJobs.isEmpty || importJobsError != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Импорты").font(.title2.bold())
+                    Spacer()
+                    let activeCount = importJobs.filter(\.isActive).count
+                    if activeCount > 0 {
+                        Label("\(activeCount)", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let importJobsError {
+                    Label(importJobsError, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                ForEach(Array(importJobs.prefix(8))) { job in
+                    importJobCard(job)
+                }
+            }
+            .padding(16)
+            .businessCard(radius: 28)
+        }
+    }
+
+    private var hotelCatalog: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("База отелей").font(.title2.bold())
+                Spacer()
+                Text("\(hotels.count)").foregroundStyle(.secondary)
+            }
+
+            if hotels.isEmpty && !loading {
+                ContentUnavailableView(
+                    "Отелей пока нет",
+                    systemImage: "building.2",
+                    description: Text("Добавьте отель по прямой ссылке Booking или Expedia.")
+                )
+            }
+
+            ForEach(hotels) { hotel in
+                hotelRow(hotel)
+            }
+        }
+        .padding(16)
+        .businessCard(radius: 28)
+    }
+
+    private func hotelRow(_ hotel: HotelListItem) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Group {
+                if let imageURL = AppConfig.absoluteURL(hotel.coverImageURL) {
+                    AsyncImage(url: imageURL) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            placeholder
+                        }
+                    }
+                } else {
+                    placeholder
+                }
+            }
+            .frame(width: 72, height: 72)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(hotel.name)
+                    .font(.subheadline.bold())
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+
+                HStack(spacing: 6) {
+                    Text(hotel.city)
+                    Text("·")
+                    Label("\(hotel.imageCount)", systemImage: "photo")
+                    Text("·")
+                    Label("\(hotel.roomCount)", systemImage: "bed.double")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+
+                HStack(spacing: 7) {
+                    if let rating = hotel.rating {
+                        Label(rating.formatted(.number.precision(.fractionLength(1))), systemImage: "star.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    statusPill(hotel)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+
+            Menu {
+                Button(role: .destructive) { hotelPendingDeletion = hotel } label: {
+                    Label("Удалить отель", systemImage: "trash")
+                }
+            } label: {
+                if deletingHotelID == hotel.id {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "ellipsis")
+                        .font(.headline)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private func statusPill(_ hotel: HotelListItem) -> some View {
+        let live = hotel.status == "published"
+        let failed = hotel.lifecycleState == "failed"
+        let text = live ? "LIVE" : (hotel.lifecycleState?.uppercased() ?? "DRAFT")
+        return Text(text)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(live ? .green : (failed ? .red : .secondary))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background((live ? Color.green : (failed ? Color.red : Color.gray)).opacity(0.08), in: Capsule())
+    }
+
     @ViewBuilder private var placeholder: some View {
         BusinessDesign.secondarySurface
             .overlay(Image(systemName: "building.2.fill").foregroundStyle(.secondary))
     }
 
-    func load() async {
-        loading = true
-        backendUnavailable = false
-        backendMessage = nil
-        do {
-            async let healthRequest = APIClient.shared.hotelCloudHealth()
-            async let hotelsRequest = APIClient.shared.hotels()
-            async let jobsRequest = APIClient.shared.hotelImportJobs()
-            cloudHealth = try await healthRequest
-            hotels = try await hotelsRequest
-            do {
-                importJobs = try await jobsRequest
-                importJobsError = nil
-            } catch {
-                importJobsError = "Не удалось получить прогресс импортов: \(error.localizedDescription)"
-            }
-        } catch {
-            backendUnavailable = true
-            backendMessage = error.localizedDescription
-            cloudHealth = nil
-        }
-        loading = false
-    }
-
-    @MainActor
-    private func monitorImports() async {
-        while !Task.isCancelled {
-            do {
-                let jobs = try await APIClient.shared.hotelImportJobs()
-                importJobs = jobs
-                importJobsError = nil
-                await BusinessNotifications.trackActiveHotelImports(jobs)
-                await BusinessNotifications.notifyUnseenTerminalJobs(jobs)
-            } catch {
-                importJobsError = "Прогресс временно недоступен: \(error.localizedDescription)"
-            }
-            let hasActive = importJobs.contains(where: \.isActive)
-            try? await Task.sleep(nanoseconds: UInt64(hasActive ? 2_000_000_000 : 8_000_000_000))
-        }
-    }
-
     @ViewBuilder
     private func importJobCard(_ job: HotelImportJob) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(job.hotelName).font(.subheadline.bold()).lineLimit(1)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(job.hotelName)
+                        .font(.subheadline.bold())
+                        .lineLimit(2)
                     Text(importStatusText(job))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(job.status == "failed" ? .red : .secondary)
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
                 if job.isActive {
                     Text("\(job.progress)%")
-                        .font(.caption.monospacedDigit())
+                        .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(.secondary)
-                } else if job.status == "failed" {
-                    Button("Повторить") {
-                        Task {
-                            if let retried = try? await APIClient.shared.retryHotelImportJob(id: job.id) {
-                                await BusinessNotifications.hotelImportStarted(retried)
-                                if let jobs = try? await APIClient.shared.hotelImportJobs() { importJobs = jobs }
-                            }
-                        }
-                    }
-                    .font(.caption.bold())
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                } else {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
+                } else if job.status == "completed" {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 }
             }
 
             if job.isActive {
-                ProgressView(value: Double(job.progress), total: 100).tint(.black)
+                ProgressView(value: Double(job.progress), total: 100)
+                    .tint(.black)
             }
+
             Text(importStageDetail(job))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+
             if let warning = job.warning, !warning.isEmpty {
                 Label(warning, systemImage: "exclamationmark.triangle")
                     .font(.caption2)
@@ -271,7 +296,38 @@ struct HotelsView: View {
                 Text(error)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(4)
+            }
+
+            HStack(spacing: 8) {
+                if job.isActive {
+                    Button(role: .destructive) { Task { await cancelJob(job) } } label: {
+                        Label("Остановить", systemImage: "stop.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(jobActionID == job.id)
+                } else if job.status == "failed" {
+                    Button { Task { await retryJob(job) } } label: {
+                        Label("Повторить", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.black)
+                    .controlSize(.small)
+                    .disabled(jobActionID == job.id)
+                }
+
+                if !job.isActive {
+                    Button(role: .destructive) { Task { await deleteJob(job) } } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(jobActionID == job.id)
+                }
+
+                Spacer()
+                if jobActionID == job.id { ProgressView().controlSize(.small) }
             }
         }
         .padding(12)
@@ -279,11 +335,16 @@ struct HotelsView: View {
     }
 
     private func importStatusText(_ job: HotelImportJob) -> String {
+        switch job.stage {
+        case "cancelled": return "Остановлен"
+        case "stale_recovered": return "Зависший импорт остановлен автоматически"
+        default: break
+        }
         switch job.status {
         case "queued": return "В очереди"
         case "running": return "Фоновая загрузка"
         case "completed": return job.stage == "completed_with_warnings" ? "Готово · с предупреждением" : (job.publishWhenComplete ? "Готово · опубликован" : "Готово · черновик")
-        case "failed": return "Ошибка · можно повторить"
+        case "failed": return "Ошибка · можно повторить или удалить"
         default: return job.status
         }
     }
@@ -296,24 +357,139 @@ struct HotelsView: View {
         case "downloading_image": stage = "скачиваем исходную фотографию"
         case "optimizing_image": stage = "сжимаем фотографию"
         case "saving_to_r2": stage = "сохраняем в R2"
-        case "media_progress": stage = "обрабатываем следующие фотографии"
+        case "media_progress": stage = "обрабатываем фотографии"
         case "image_retry_exhausted": stage = "одна фотография недоступна, продолжаем"
         case "completed": stage = "импорт завершён"
         case "completed_with_warnings": stage = "импорт завершён с предупреждением"
         case "integrity_failed": stage = "проверка целостности не пройдена"
+        case "stale_recovered": stage = "сервер обнаружил отсутствие heartbeat и остановил зависший Workflow"
+        case "cancelled": stage = "остановлено администратором"
         case "start_failed": stage = "не удалось запустить Cloudflare Workflow"
         default: stage = job.stage.replacingOccurrences(of: "_", with: " ")
         }
         var parts = ["\(job.storedImages)/\(job.totalImages) фото", stage]
-        if let current = job.currentImage, current > 0, job.isActive {
-            parts.append("№\(current) из \(job.totalImages)")
-        }
+        if let current = job.currentImage, current > 0, job.isActive { parts.append("№\(current) из \(job.totalImages)") }
         if let label = job.currentImageLabel, !label.isEmpty, job.isActive { parts.append(label) }
         if let mode = job.compressionMode, !mode.isEmpty {
             parts.append(mode == "provider-sized-fallback-v1" ? "provider-compressed" : "WebP")
         }
         if (job.retryCount ?? 0) > 0 { parts.append("retry \(job.retryCount ?? 0)") }
         return parts.joined(separator: " · ")
+    }
+
+    func load() async {
+        guard !Task.isCancelled else { return }
+        await MainActor.run {
+            loading = true
+            backendUnavailable = false
+            backendMessage = nil
+        }
+
+        do {
+            async let healthRequest = APIClient.shared.hotelCloudHealth()
+            async let hotelsRequest = APIClient.shared.hotels()
+            let resolvedHealth = try await healthRequest
+            let resolvedHotels = try await hotelsRequest
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                cloudHealth = resolvedHealth
+                hotels = resolvedHotels
+                backendUnavailable = false
+            }
+
+            do {
+                let jobs = try await APIClient.shared.hotelImportJobs()
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    importJobs = jobs
+                    importJobsError = nil
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                await MainActor.run { importJobsError = "Не удалось получить прогресс импортов: \(error.localizedDescription)" }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                backendUnavailable = true
+                backendMessage = error.localizedDescription
+                cloudHealth = nil
+            }
+        }
+        await MainActor.run { loading = false }
+    }
+
+    @MainActor
+    private func monitorImports() async {
+        var previousActive = Set(importJobs.filter(\.isActive).map(\.id))
+        while !Task.isCancelled {
+            do {
+                let jobs = try await APIClient.shared.hotelImportJobs()
+                guard !Task.isCancelled else { return }
+                let currentActive = Set(jobs.filter(\.isActive).map(\.id))
+                let finishedSomething = !previousActive.subtracting(currentActive).isEmpty
+                previousActive = currentActive
+                importJobs = jobs
+                importJobsError = nil
+                await BusinessNotifications.trackActiveHotelImports(jobs)
+                await BusinessNotifications.notifyUnseenTerminalJobs(jobs)
+                if finishedSomething, let refreshed = try? await APIClient.shared.hotels() { hotels = refreshed }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                importJobsError = "Прогресс временно недоступен: \(error.localizedDescription)"
+            }
+            let hasActive = importJobs.contains(where: \.isActive)
+            try? await Task.sleep(nanoseconds: UInt64(hasActive ? 2_000_000_000 : 8_000_000_000))
+        }
+    }
+
+    @MainActor private func retryJob(_ job: HotelImportJob) async {
+        jobActionID = job.id
+        defer { jobActionID = nil }
+        do {
+            let retried = try await APIClient.shared.retryHotelImportJob(id: job.id)
+            await BusinessNotifications.hotelImportStarted(retried)
+            importJobs = try await APIClient.shared.hotelImportJobs()
+            hotels = try await APIClient.shared.hotels()
+        } catch { importJobsError = error.localizedDescription }
+    }
+
+    @MainActor private func cancelJob(_ job: HotelImportJob) async {
+        jobActionID = job.id
+        defer { jobActionID = nil }
+        do {
+            _ = try await APIClient.shared.cancelHotelImportJob(id: job.id)
+            importJobs = try await APIClient.shared.hotelImportJobs()
+            hotels = try await APIClient.shared.hotels()
+        } catch { importJobsError = error.localizedDescription }
+    }
+
+    @MainActor private func deleteJob(_ job: HotelImportJob) async {
+        jobActionID = job.id
+        defer { jobActionID = nil }
+        do {
+            try await APIClient.shared.deleteHotelImportJob(id: job.id)
+            importJobs.removeAll { $0.id == job.id }
+        } catch { importJobsError = error.localizedDescription }
+    }
+
+    @MainActor private func deleteHotel(_ hotel: HotelListItem) async {
+        deletingHotelID = hotel.id
+        defer { deletingHotelID = nil }
+        do {
+            try await APIClient.shared.deleteHotel(id: hotel.id)
+            hotels.removeAll { $0.id == hotel.id }
+            importJobs.removeAll { $0.hotelID == hotel.id }
+            cloudHealth = try? await APIClient.shared.hotelCloudHealth()
+        } catch {
+            backendMessage = "Не удалось удалить отель: \(error.localizedDescription)"
+        }
     }
 }
 

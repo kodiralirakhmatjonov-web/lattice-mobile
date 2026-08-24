@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import WebKit
 
@@ -85,6 +86,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.defaultWebpagePreferences.preferredContentMode = .desktop
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.userContentController.addUserScript(
             WKUserScript(
@@ -98,7 +100,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         super.init()
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = true
-        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     }
 
     func start(sourceURL rawValue: String) {
@@ -298,7 +300,25 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 throw APIError.server("Не удалось прочитать название отеля с этой страницы.")
             }
 
-            let candidate = HotelNormalizer.makeDraft(snapshot: snapshot)
+            var candidate = HotelNormalizer.makeDraft(snapshot: snapshot)
+
+            // Rooms are a first-class catalog requirement. Expedia/Booking frequently
+            // keep room cards outside the initially rendered mobile DOM, so use a second
+            // independent server-side read of the exact same property URL before we ever
+            // show a misleading “0 номеров” review card.
+            if candidate.rooms.count < 2 {
+                status = "Получаем типы номеров из карточки отеля…"
+                progress = 0.90
+                if let recovered = try? await APIClient.shared.recoverSourceRooms(sourceURL: currentURL.absoluteString),
+                   !recovered.rooms.isEmpty {
+                    candidate.rooms = Self.mergeRooms(candidate.rooms, recovered.rooms)
+                }
+            }
+
+            guard !candidate.rooms.isEmpty else {
+                throw APIError.server("ROOM_TYPES_NOT_FOUND: источник содержит карточку отеля, но типы номеров не удалось подтвердить. Отель не будет сохранён с 0 номеров.")
+            }
+
             status = "Проверяем отель по всей базе iumrah…"
             progress = 0.94
             if let duplicate = try await APIClient.shared.checkHotelDuplicate(candidate) {
@@ -326,6 +346,26 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
     private func captureVisibleMedia(provider: Provider) async {
         _ = try? await webView.evaluateJavaScript(Self.captureVisibleMediaScript(provider: provider))
+    }
+
+    private static func mergeRooms(_ primary: [HotelRoomDraft], _ recovered: [HotelRoomDraft]) -> [HotelRoomDraft] {
+        var output: [HotelRoomDraft] = []
+        var keys = Set<String>()
+        for room in primary + recovered {
+            let name = room.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            let key = [
+                name.lowercased(),
+                room.beds?.lowercased() ?? "",
+                room.maxGuests.map(String.init) ?? "",
+                room.sizeM2.map { String(format: "%.1f", $0) } ?? "",
+                room.view?.lowercased() ?? ""
+            ].joined(separator: "|")
+            guard keys.insert(key).inserted else { continue }
+            output.append(room)
+            if output.count >= 140 { break }
+        }
+        return output
     }
 
     private func detectVerification() async -> Bool {

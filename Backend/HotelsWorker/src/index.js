@@ -62,13 +62,20 @@ async function handleAdmin(request, env, url, user) {
     return checkDuplicateRequest(request, env);
   }
 
+  if (parts[0] === 'source-rooms') {
+    if (parts.length !== 1 || request.method !== 'POST') return methodNotAllowed();
+    return recoverSourceRooms(request, env);
+  }
+
   if (parts[0] === 'import-jobs') {
     if (parts.length === 1 && request.method === 'GET') return listImportJobs(env, url);
     if (parts.length === 1 && request.method === 'POST') return createImportJob(request, env, user);
     const jobID = safeID(parts[1]);
     if (!jobID) return json({ ok: false, error: 'INVALID_JOB_ID' }, 400);
     if (parts.length === 2 && request.method === 'GET') return importJobDetail(env, jobID);
+    if (parts.length === 2 && request.method === 'DELETE') return deleteImportJob(env, jobID);
     if (parts.length === 3 && parts[2] === 'retry' && request.method === 'POST') return retryImportJob(env, jobID);
+    if (parts.length === 3 && parts[2] === 'cancel' && request.method === 'POST') return cancelImportJob(env, jobID);
     return methodNotAllowed();
   }
 
@@ -596,24 +603,24 @@ async function persistHotelDraft(draft, env, user, options = {}) {
   const ratingScale = nullableNumber(draft.ratingScale, 1, 10);
   const reviewCount = nullableInteger(draft.reviewCount, 0, 100000000);
   const address = safeHumanText(draft.address, 900) || '';
-  const description = safeHumanText(draft.description, 20_000) || '';
+  const description = safeHumanText(draft.description, 3_500) || '';
   const latitude = nullableNumber(draft.latitude, -90, 90);
   const longitude = nullableNumber(draft.longitude, -180, 180);
   const checkIn = safeHumanText(draft.checkIn, 120);
   const checkOut = safeHumanText(draft.checkOut, 120);
-  const policies = uniqueStrings(draft.policies, 260, 900);
-  const nearby = safeObjectArray(draft.nearby, 220, 64_000);
-  const facts = safeObjectArray(draft.facts, 420, 160_000);
-  const fees = safeObjectArray(draft.fees, 220, 80_000);
-  const services = uniqueStrings(draft.services, 300, 240);
+  const policies = []; // provider policies are intentionally not part of the core catalog
+  const nearby = safeObjectArray(draft.nearby, 24, 24_000);
+  const facts = []; // noisy provider facts are omitted from the canonical selection object
+  const fees = [];
+  const services = []; // canonical amenities are stored in hotel_amenities
   const brand = safeHumanText(draft.brand, 180);
   const chainName = safeHumanText(draft.chain, 180) || safeHumanText(draft.chainName, 180);
   const postalCode = safeHumanText(draft.postalCode, 40);
-  const highlights = uniqueStrings(draft.highlights, 180, 600);
-  const importantInformation = uniqueStrings(draft.importantInformation, 240, 1200);
-  const food = safeObjectArray(draft.food, 220, 120_000);
-  const parkingTransport = safeObjectArray(draft.parkingTransport, 220, 120_000);
-  const accessibility = uniqueStrings(draft.accessibility, 180, 500);
+  const highlights = uniqueStrings(draft.highlights, 16, 420);
+  const importantInformation = [];
+  const food = safeObjectArray(draft.food, 16, 24_000);
+  const parkingTransport = safeObjectArray(draft.parkingTransport, 16, 24_000);
+  const accessibility = uniqueStrings(draft.accessibility, 16, 360);
   const dataQuality = sanitizeObject(draft.dataQuality, 24_000);
   const googleMaps = cleanURL(draft.googleMapsURL) || googleMapsURL(latitude, longitude, address);
   const canonicalKey = canonicalHotelKey(name, city, address, latitude, longitude);
@@ -668,7 +675,7 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     env.HOTELS_DB.prepare('DELETE FROM hotel_translations WHERE hotel_id = ?').bind(id)
   ];
 
-  const amenities = canonicalAmenities(draft.amenities, 320);
+  const amenities = canonicalAmenities(draft.amenities, 120);
   amenities.forEach((amenity, index) => {
     statements.push(
       env.HOTELS_DB.prepare('INSERT INTO hotel_amenities (hotel_id, amenity, position) VALUES (?, ?, ?)')
@@ -695,12 +702,12 @@ async function persistHotelDraft(draft, env, user, options = {}) {
         nullableNumber(room?.sizeM2, 1, 3000),
         safeHumanText(room?.beds, 300),
         safeHumanText(room?.view, 300),
-        safeHumanText(room?.description, 5000),
-        JSON.stringify(uniqueStrings(room?.amenities, 100, 220)),
+        safeHumanText(room?.description, 1200),
+        JSON.stringify(uniqueStrings(room?.amenities, 60, 180)),
         safeHumanText(room?.smoking, 160),
-        JSON.stringify(uniqueStrings(room?.accessibility, 80, 320)),
+        JSON.stringify(uniqueStrings(room?.accessibility, 24, 220)),
         safeHumanText(room?.category, 160),
-        JSON.stringify(uniqueStrings(room?.bathroom, 100, 320)),
+        JSON.stringify(uniqueStrings(room?.bathroom, 24, 220)),
         index
       )
     );
@@ -734,7 +741,7 @@ async function persistHotelDraft(draft, env, user, options = {}) {
         safeHumanText(source?.country, 120),
         safeHumanText(source?.propertyType, 120),
         safeHumanText(source?.address, 900),
-        safeHumanText(source?.description, 20_000),
+        null,
         nullableInteger(source?.stars, 1, 5),
         nullableNumber(source?.rating, 0, 10),
         nullableNumber(source?.ratingScale, 1, 10),
@@ -743,18 +750,18 @@ async function persistHotelDraft(draft, env, user, options = {}) {
         nullableNumber(source?.longitude, -180, 180),
         safeHumanText(source?.checkIn, 120),
         safeHumanText(source?.checkOut, 120),
-        JSON.stringify(uniqueStrings(source?.images, 600, 3000)),
-        JSON.stringify(canonicalAmenities(source?.amenities, 240)),
-        JSON.stringify(uniqueStrings(source?.roomNames, 180, 280)),
-        JSON.stringify(Array.isArray(source?.rooms) ? source.rooms.filter(r => isPlausibleRoomName(r?.name)).slice(0, 200) : []),
-        JSON.stringify(uniqueStrings(source?.policies, 260, 900)),
+        '[]',
+        '[]',
+        '[]',
+        '[]',
+        '[]',
         cleanText(source?.providerHotelID, 220),
         cleanURL(source?.canonicalURL),
         cleanURL(source?.googleMapsURL) || googleMapsURL(source?.latitude, source?.longitude, source?.address),
-        JSON.stringify(sourceNearby),
-        JSON.stringify(sourceFacts),
-        JSON.stringify(sourceFees),
-        JSON.stringify(sourceServices),
+        '[]',
+        '[]',
+        '[]',
+        '[]',
         now
       )
     );
@@ -766,7 +773,7 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     UPDATE hotels
     SET brand=?, chain_name=?, postal_code=?, highlights_json=?, important_information_json=?,
         food_json=?, parking_transport_json=?, accessibility_json=?, lifecycle_state=?,
-        data_quality_json=?, last_verified_at=?, updated_at=?
+        data_quality_json=?, last_verified_at=?, catalog_profile='core-v1', source_room_count=?, updated_at=?
     WHERE id=?
   `).bind(
     brand,
@@ -780,6 +787,7 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     lifecycleState,
     JSON.stringify(dataQuality),
     now,
+    rooms.filter(room => isPlausibleRoomName(room?.name)).length,
     now,
     id
   ).run();
@@ -797,12 +805,12 @@ async function persistHotelDraft(draft, env, user, options = {}) {
       safeHumanText(source?.brand, 180),
       safeHumanText(source?.chain, 180) || safeHumanText(source?.chainName, 180),
       safeHumanText(source?.postalCode, 40),
-      JSON.stringify(uniqueStrings(source?.highlights, 180, 600)),
-      JSON.stringify(uniqueStrings(source?.importantInformation, 240, 1200)),
-      JSON.stringify(safeObjectArray(source?.food, 220, 120_000)),
-      JSON.stringify(safeObjectArray(source?.parkingTransport, 220, 120_000)),
-      JSON.stringify(uniqueStrings(source?.accessibility, 180, 500)),
-      JSON.stringify(sanitizeObject(source?.rawIdentity, 24_000)),
+      '[]',
+      '[]',
+      '[]',
+      '[]',
+      '[]',
+      '{}',
       id,
       provider,
       sourceURL
@@ -963,6 +971,337 @@ function isRepairableDuplicate(duplicate) {
   return ['draft','failed','ready','archived'].includes(status) || ['draft','failed','ready','archived'].includes(lifecycle);
 }
 
+
+async function recoverSourceRooms(request, env) {
+  const payload = await readJSON(request, 100_000);
+  if (!payload.ok) return payload.response;
+  const sourceURL = cleanURL(payload.value?.sourceURL);
+  if (!sourceURL) return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400);
+
+  let parsed;
+  try { parsed = new URL(sourceURL); } catch (_) { return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400); }
+  const host = parsed.hostname.toLowerCase();
+  const provider = host === 'booking.com' || host.endsWith('.booking.com')
+    ? 'Booking'
+    : (host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.')) ? 'Expedia' : null;
+  if (!provider) return json({ ok: false, error: 'UNSUPPORTED_SOURCE_PROVIDER' }, 400);
+
+  const headers = new Headers({
+    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'accept-language': 'en-US,en;q=0.9',
+    'cache-control': 'no-cache'
+  });
+
+  let response;
+  try {
+    response = await fetch(sourceURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
+  } catch (error) {
+    return json({ ok: false, error: 'SOURCE_ROOM_FETCH_FAILED', detail: String(error?.message || error).slice(0, 500) }, 502);
+  }
+  if (!response.ok) return json({ ok: false, error: `SOURCE_ROOM_HTTP_${response.status}` }, 502);
+  const finalURL = response.url || sourceURL;
+  try {
+    const finalHost = new URL(finalURL).hostname.toLowerCase();
+    const allowed = provider === 'Booking'
+      ? finalHost === 'booking.com' || finalHost.endsWith('.booking.com')
+      : finalHost === 'expedia.com' || finalHost.endsWith('.expedia.com') || finalHost.includes('expedia.');
+    if (!allowed) return json({ ok: false, error: 'SOURCE_REDIRECT_OUTSIDE_PROVIDER' }, 400);
+  } catch (_) {}
+
+  const html = await response.text();
+  if (!html || html.length < 500) return json({ ok: false, error: 'SOURCE_ROOM_EMPTY_PAGE' }, 502);
+  if (html.length > 8_000_000) return json({ ok: false, error: 'SOURCE_ROOM_PAGE_TOO_LARGE' }, 502);
+
+  let rooms = extractProviderRoomsFromHTML(html, provider);
+  let recoveryURL = finalURL;
+  let method = rooms.length ? 'server-property-page-v1' : 'server-property-page-no-room-match';
+
+  // Expedia regional/mobile shells are not consistent about SSR room cards. The
+  // .h<propertyID> path is the property identity, so these are alternate renders of
+  // the exact same hotel URL (never a hotel-name search and never another property).
+  if (!rooms.length && provider === 'Expedia') {
+    const candidates = [];
+    const exactPath = parsed.pathname;
+    const originalSearch = parsed.search || '';
+    candidates.push(`https://www.expedia.com${exactPath}${originalSearch}`);
+    const query = new URLSearchParams(parsed.searchParams);
+    query.set('rfrr', 'HOT.HIS.question.link.click');
+    candidates.push(`https://www.expedia.com${exactPath}?${query.toString()}`);
+
+    for (const fallbackURL of [...new Set(candidates)]) {
+      try {
+        const fallbackResponse = await fetch(fallbackURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
+        if (!fallbackResponse.ok) continue;
+        const fallbackFinal = new URL(fallbackResponse.url || fallbackURL);
+        if (!(fallbackFinal.hostname === 'expedia.com' || fallbackFinal.hostname.endsWith('.expedia.com'))) continue;
+        const fallbackHTML = await fallbackResponse.text();
+        if (!fallbackHTML || fallbackHTML.length > 8_000_000) continue;
+        const recovered = extractProviderRoomsFromHTML(fallbackHTML, provider);
+        if (!recovered.length) continue;
+        rooms = recovered;
+        recoveryURL = fallbackResponse.url || fallbackURL;
+        method = 'server-property-page-expedia-exact-fallback-v2';
+        break;
+      } catch (_) {}
+    }
+  }
+
+  return json({
+    ok: true,
+    provider,
+    sourceURL: recoveryURL,
+    roomCount: rooms.length,
+    rooms,
+    method
+  });
+}
+
+function extractProviderRoomsFromHTML(html, provider) {
+  const visible = htmlToReadableText(html);
+  const roomStart = visible.search(/\b(?:room options|rooms and rates|available rooms|choose your room|room types)\b/i);
+  let roomText = roomStart >= 0 ? visible.slice(roomStart, roomStart + 180_000) : visible;
+  const end = roomText.slice(800).search(/\b(?:about this property|property amenities|location|policies|reviews|getting around)\b/i);
+  if (end >= 0) roomText = roomText.slice(0, Math.max(2_500, end + 800));
+
+  const anchors = [];
+  const patterns = provider === 'Expedia' ? [
+    { source: 'photo', regex: /View all photos for\s+([^\n]{3,220})/gi },
+    { source: 'detail', regex: /More details(?:\s+More details)? for\s+([^\n]{3,220})/gi },
+    { source: 'price', regex: /View prices(?: for your dates)?(?: for)?\s+([^\n]{3,220})/gi }
+  ] : [
+    { source: 'room', regex: /(?:Room type|Room name)\s*[:\-]?\s*([^\n]{3,220})/gi }
+  ];
+  for (const entry of patterns) {
+    let match;
+    while ((match = entry.regex.exec(roomText)) !== null && anchors.length < 500) {
+      anchors.push({ name: cleanRoomAnchor(match[1]), index: match.index, source: entry.source });
+    }
+  }
+  anchors.sort((a, b) => a.index - b.index);
+
+  // Expedia repeats the room name in “More details …” / “View prices …”. When a
+  // photo anchor exists for that name, use the photo anchor because the sellable
+  // details live between it and the action footer. This prevents details from the
+  // next room card leaking into the previous room.
+  const photoNames = new Set(anchors.filter(a => a.source === 'photo').map(a => normalizeRoomIdentity(a.name)));
+  const visibleAnchors = anchors.filter(a => !['detail','price'].includes(a.source) || !photoNames.has(normalizeRoomIdentity(a.name)));
+
+  // Explicit room-name keys from application state are useful only as a fallback
+  // for names not already represented by visible room cards.
+  const rawJSONAnchors = [];
+  const rawJSONPatterns = [
+    /["']roomTypeName["']\s*:\s*["']([^"']{3,220})["']/gi,
+    /["']roomName["']\s*:\s*["']([^"']{3,220})["']/gi,
+    /["']unitName["']\s*:\s*["']([^"']{3,220})["']/gi
+  ];
+  for (const pattern of rawJSONPatterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null && rawJSONAnchors.length < 300) {
+      rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'json' });
+    }
+  }
+
+  const processAnchors = [...visibleAnchors];
+  const visibleNames = new Set(processAnchors.map(a => normalizeRoomIdentity(a.name)));
+  for (const anchor of rawJSONAnchors) {
+    if (!visibleNames.has(normalizeRoomIdentity(anchor.name))) processAnchors.push(anchor);
+  }
+
+  const result = [];
+  const seen = new Set();
+  for (let i = 0; i < processAnchors.length; i += 1) {
+    const anchor = processAnchors[i];
+    const name = safeHumanText(anchor.name, 240);
+    if (!name || !isPlausibleRoomName(name)) continue;
+
+    let context = name;
+    if (anchor.index >= 0) {
+      const nextVisible = anchors.find(other => other.index > anchor.index);
+      const endIndex = nextVisible ? Math.min(nextVisible.index, anchor.index + 2_200) : Math.min(roomText.length, anchor.index + 2_200);
+      context = roomText.slice(Math.max(0, anchor.index), endIndex);
+    }
+    const room = roomFromTextContext(name, context);
+    const key = [normalizeRoomIdentity(room.name), room.beds || '', room.maxGuests || '', room.sizeM2 || '', room.view || '']
+      .join('|').toLowerCase().replace(/\s+/g, ' ');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(room);
+    if (result.length >= 140) break;
+  }
+  return result;
+}
+
+function normalizeRoomIdentity(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0400-\u04ff\u0600-\u06ff]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function roomFromTextContext(name, context) {
+  const compact = String(context || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
+  const guest = compact.match(/\bSleeps?\s*(\d{1,2})\b/i) || compact.match(/\b(?:up to|max(?:imum)?)\s*(\d{1,2})\s*(?:guests?|people)\b/i);
+  const metricSize = compact.match(/\b(\d{1,4}(?:\.\d+)?)\s*(?:sq\s*m|m²|square meters?)\b/i);
+  const imperialSize = compact.match(/\b(\d{2,5}(?:\.\d+)?)\s*(?:sq\s*ft|ft²|square feet)\b/i);
+  const sizeM2 = metricSize ? Number(metricSize[1]) : imperialSize ? Math.round(Number(imperialSize[1]) * 0.092903 * 10) / 10 : null;
+  const bed = compact.match(/\b(?:\d+\s+)?(?:King|Queen|Twin|Double|Single|Large Twin|Sofa)\s+Beds?(?:\s+(?:and|or)\s+(?:\d+\s+)?(?:King|Queen|Twin|Double|Single|Large Twin|Sofa)\s+Beds?)*/i);
+  const view = compact.match(/\b(?:city|kaaba|kabba|haram|landmark|mountain|courtyard|garden|sea)\s+view\b/i);
+  const category = name.match(/\b(standard|superior|deluxe|executive|premier|classic|family|studio|junior suite|suite|presidential|royal)\b/i);
+  return {
+    id: crypto.randomUUID(),
+    name,
+    maxGuests: guest ? Number(guest[1]) : null,
+    sizeM2: Number.isFinite(sizeM2) ? sizeM2 : null,
+    beds: bed ? cleanText(bed[0], 260) : null,
+    view: view ? cleanText(view[0], 180) : null,
+    description: null,
+    amenities: /free wi[- ]?fi/i.test(compact) ? ['Free WiFi'] : [],
+    smoking: /non[- ]smoking|smoke[- ]free/i.test(compact) ? 'Non-smoking' : null,
+    accessibility: [],
+    category: category ? category[1] : null,
+    bathroom: []
+  };
+}
+
+function cleanRoomAnchor(value) {
+  return String(value || '')
+    .replace(/\\u002F/gi, '/')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\"/g, '"')
+    .replace(/\s+(?:image|photo)\s*:\s*.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+function htmlToReadableText(html) {
+  return decodeHTMLEntities(String(html || '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '\n')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '\n')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '\n')
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/(?:p|div|section|article|li|h1|h2|h3|h4|button|a)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' '))
+    .replace(/\r/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function decodeHTMLEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, num) => String.fromCodePoint(parseInt(num, 10)));
+}
+
+
+
+function prioritizeImportImages(images, limit = 48) {
+  const input = Array.isArray(images) ? images : [];
+  const output = [];
+  const seenURL = new Set();
+  const take = image => {
+    if (!image?.url || output.length >= limit) return;
+    const key = canonicalImageSourceKey(image.url) || image.url;
+    if (seenURL.has(key)) return;
+    seenURL.add(key);
+    output.push({ ...image, position: output.length });
+  };
+
+  input.filter(image => image.isCover).forEach(take);
+
+  // First preserve room diversity: one photo per named room, then a second pass.
+  const namedRooms = new Map();
+  for (const image of input) {
+    const room = cleanText(image?.roomName, 260);
+    if (!room) continue;
+    if (!namedRooms.has(room)) namedRooms.set(room, []);
+    namedRooms.get(room).push(image);
+  }
+  for (let pass = 0; pass < 2 && output.length < limit; pass += 1) {
+    for (const roomImages of namedRooms.values()) {
+      if (roomImages[pass]) take(roomImages[pass]);
+      if (output.length >= limit) break;
+    }
+  }
+
+  const categoryOrder = ['exterior','lobby','room','bathroom','restaurant','breakfast','view','pool','gym','spa','lounge','facility','gallery'];
+  for (const category of categoryOrder) {
+    const candidate = input.find(image => image.category === category);
+    if (candidate) take(candidate);
+  }
+
+  for (const image of input) take(image);
+  if (output.length && !output.some(image => image.isCover)) output[0].isCover = true;
+  return output;
+}
+
+function compactHotelImportSnapshot(draft, images) {
+  const source = Array.isArray(draft?.sources) ? draft.sources[0] : null;
+  const rooms = Array.isArray(draft?.rooms)
+    ? draft.rooms.filter(room => isPlausibleRoomName(room?.name)).slice(0, 140).map(room => ({
+        id: safeID(room?.id) || crypto.randomUUID(),
+        name: safeHumanText(room?.name, 240),
+        maxGuests: nullableInteger(room?.maxGuests, 1, 30),
+        sizeM2: nullableNumber(room?.sizeM2, 1, 3000),
+        beds: safeHumanText(room?.beds, 260),
+        view: safeHumanText(room?.view, 220),
+        category: safeHumanText(room?.category, 160),
+        amenities: uniqueStrings(room?.amenities, 40, 180)
+      }))
+    : [];
+  return {
+    version: 'core-v1',
+    id: safeID(draft?.id),
+    name: safeHumanText(draft?.name, 180),
+    city: canonicalCity(draft?.city),
+    country: safeHumanText(draft?.country, 120),
+    propertyType: safeHumanText(draft?.propertyType, 120),
+    brand: safeHumanText(draft?.brand, 180),
+    chain: safeHumanText(draft?.chain, 180),
+    postalCode: safeHumanText(draft?.postalCode, 40),
+    stars: nullableInteger(draft?.stars, 1, 5),
+    rating: nullableNumber(draft?.rating, 0, 10),
+    ratingScale: nullableNumber(draft?.ratingScale, 1, 10),
+    reviewCount: nullableInteger(draft?.reviewCount, 0, 100000000),
+    address: safeHumanText(draft?.address, 900),
+    latitude: nullableNumber(draft?.latitude, -90, 90),
+    longitude: nullableNumber(draft?.longitude, -180, 180),
+    checkIn: safeHumanText(draft?.checkIn, 120),
+    checkOut: safeHumanText(draft?.checkOut, 120),
+    amenities: canonicalAmenities(draft?.amenities, 120),
+    nearby: safeObjectArray(draft?.nearby, 24, 24_000),
+    food: safeObjectArray(draft?.food, 16, 24_000),
+    parkingTransport: safeObjectArray(draft?.parkingTransport, 16, 24_000),
+    rooms,
+    images: (Array.isArray(images) ? images : []).slice(0, 240).map(image => ({
+      url: cleanURL(image?.url),
+      provider: cleanText(image?.provider, 80),
+      sourcePageURL: cleanURL(image?.sourcePageURL),
+      category: validImageCategory(image?.category) || validImageCategory(image?.kind) || 'gallery',
+      roomName: safeHumanText(image?.roomName, 260),
+      isCover: image?.isCover === true,
+      position: boundedInteger(image?.position, 0, 10000, 0)
+    })).filter(image => image.url),
+    source: source ? {
+      provider: cleanText(source?.provider, 80),
+      sourceURL: cleanURL(source?.sourceURL),
+      canonicalURL: cleanURL(source?.canonicalURL),
+      providerHotelID: cleanText(source?.providerHotelID, 220),
+      checkedAt: new Date().toISOString()
+    } : null
+  };
+}
+
 async function createImportJob(request, env, user) {
   const payload = await readJSON(request, 4_000_000);
   if (!payload.ok) return payload.response;
@@ -987,7 +1326,7 @@ async function createImportJob(request, env, user) {
     return json({ ok: false, error: 'POSSIBLE_DUPLICATE', duplicate }, 409);
   }
 
-  const images = selectedImages.slice(0, 240).map((image, index) => ({
+  const cleanedImages = selectedImages.slice(0, 240).map((image, index) => ({
     url: cleanURL(image?.url),
     provider: cleanText(image?.provider, 80) || 'unknown',
     sourcePageURL: cleanURL(image?.sourcePageURL),
@@ -997,10 +1336,14 @@ async function createImportJob(request, env, user) {
     isCover: image?.isCover === true,
     position: index
   })).filter(image => image.url && image.category !== 'other');
+  const images = prioritizeImportImages(cleanedImages, 48);
 
   if (!images.length) return json({ ok: false, error: 'NO_IMAGES_SELECTED' }, 400);
 
   const plausibleRooms = Array.isArray(draft?.rooms) ? draft.rooms.filter(room => isPlausibleRoomName(room?.name)) : [];
+  if (payload.value?.publishWhenComplete === true && plausibleRooms.length === 0) {
+    return json({ ok: false, error: 'ROOM_TYPES_REQUIRED', detail: 'Published hotel requires at least one confirmed room type.' }, 422);
+  }
   const trustedImageCount = images.filter(image => image.category !== 'other').length;
   const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= 4 && plausibleRooms.length > 0;
   const safeDraft = { ...draft, id: repairDuplicate?.id || draft?.id, status: 'draft', lifecycleState: 'importing' };
@@ -1014,11 +1357,7 @@ async function createImportJob(request, env, user) {
     await deleteAllHotelImagesInternal(env, hotelID);
   }
   const jobID = `hotel-import-${crypto.randomUUID()}`;
-  const snapshotJSON = JSON.stringify({
-    ...safeDraft,
-    images: Array.isArray(safeDraft.images) ? safeDraft.images : [],
-    sources: Array.isArray(safeDraft.sources) ? safeDraft.sources : []
-  });
+  const snapshotJSON = JSON.stringify(compactHotelImportSnapshot(safeDraft, images));
   const snapshotHash = await sha256Hex(snapshotJSON);
   const now = new Date().toISOString();
 
@@ -1061,15 +1400,15 @@ async function createImportJob(request, env, user) {
       params: { jobID, hotelID, images, publishWhenComplete: canPublish, snapshotHash }
     });
     await env.HOTELS_DB.prepare(`
-      UPDATE hotel_import_jobs SET workflow_instance_id = ?, updated_at = ? WHERE id = ?
-    `).bind(instance.id, new Date().toISOString(), jobID).run();
+      UPDATE hotel_import_jobs SET workflow_instance_id = ?, updated_at = ?, heartbeat_at = ? WHERE id = ?
+    `).bind(instance.id, new Date().toISOString(), new Date().toISOString(), jobID).run();
   } catch (error) {
     console.error('HOTEL_WORKFLOW_START_FAILED', error);
     const failedAt = new Date().toISOString();
     await env.HOTELS_DB.batch([
       env.HOTELS_DB.prepare(`
-        UPDATE hotel_import_jobs SET status = 'failed', stage = 'start_failed', error = ?, completed_at = ?, updated_at = ? WHERE id = ?
-      `).bind(String(error?.message || error).slice(0, 1200), failedAt, failedAt, jobID),
+        UPDATE hotel_import_jobs SET status = 'failed', stage = 'start_failed', error = ?, last_error_code='WORKFLOW_START_FAILED', completed_at = ?, updated_at = ?, heartbeat_at = ? WHERE id = ?
+      `).bind(String(error?.message || error).slice(0, 1200), failedAt, failedAt, failedAt, jobID),
       env.HOTELS_DB.prepare("UPDATE hotels SET lifecycle_state='failed', status='draft', updated_at=? WHERE id=?").bind(failedAt, hotelID)
     ]);
     return json({ ok: false, error: 'IMPORT_WORKFLOW_START_FAILED', jobID }, 503);
@@ -1078,7 +1417,100 @@ async function createImportJob(request, env, user) {
   return importJobDetail(env, jobID, 202);
 }
 
+
+async function reconcileStaleImportJobs(env) {
+  const cutoffMs = Date.now() - 15 * 60 * 1000;
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT id, hotel_id, workflow_instance_id, status, stage, updated_at, heartbeat_at
+    FROM hotel_import_jobs
+    WHERE status IN ('queued','running')
+    ORDER BY updated_at ASC
+    LIMIT 40
+  `).all();
+
+  for (const row of result.results || []) {
+    const heartbeat = Date.parse(row.heartbeat_at || row.updated_at || '');
+    if (Number.isFinite(heartbeat) && heartbeat >= cutoffMs) continue;
+
+    let workflowStatus = 'unknown';
+    let workflowError = null;
+    if (row.workflow_instance_id) {
+      try {
+        const instance = await env.HOTEL_IMPORT_WORKFLOW.get(row.workflow_instance_id);
+        const details = await instance.status();
+        workflowStatus = details?.status || 'unknown';
+        workflowError = details?.error?.message || null;
+        if (['running','queued','waiting','waitingForPause','paused'].includes(workflowStatus)) {
+          await instance.terminate().catch(() => {});
+          workflowStatus = 'terminated';
+        }
+      } catch (error) {
+        workflowError = String(error?.message || error).slice(0, 500);
+      }
+    }
+
+    const now = new Date().toISOString();
+    const reason = workflowError
+      ? `STALE_IMPORT_RECOVERED: ${workflowError}`
+      : `STALE_IMPORT_RECOVERED: workflow=${workflowStatus}`;
+    await env.HOTELS_DB.batch([
+      env.HOTELS_DB.prepare(`
+        UPDATE hotel_import_jobs
+        SET status='failed', stage='stale_recovered', progress=MIN(progress, 99), error=?, last_error_code='STALE_IMPORT',
+            completed_at=COALESCE(completed_at, ?), updated_at=?, heartbeat_at=?
+        WHERE id=? AND status IN ('queued','running')
+      `).bind(reason.slice(0, 1200), now, now, now, row.id),
+      env.HOTELS_DB.prepare(`
+        UPDATE hotels SET status='draft', lifecycle_state='failed', updated_at=?
+        WHERE id=? AND status!='published'
+      `).bind(now, row.hotel_id)
+    ]);
+  }
+}
+
+async function terminateWorkflowForJob(env, row) {
+  if (!row?.workflow_instance_id) return;
+  try {
+    const instance = await env.HOTEL_IMPORT_WORKFLOW.get(row.workflow_instance_id);
+    const status = await instance.status().catch(() => null);
+    if (!status || !['complete','errored','terminated'].includes(status.status)) {
+      await instance.terminate().catch(() => {});
+    }
+  } catch (_) {}
+}
+
+async function cancelImportJob(env, jobID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM hotel_import_jobs WHERE id=?').bind(jobID).first();
+  if (!row) return json({ ok: false, error: 'IMPORT_JOB_NOT_FOUND' }, 404);
+  if (!['queued','running'].includes(row.status)) return importJobDetail(env, jobID, 200);
+
+  await terminateWorkflowForJob(env, row);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`
+      UPDATE hotel_import_jobs
+      SET status='failed', stage='cancelled', error='Импорт остановлен пользователем.', last_error_code='CANCELLED',
+          cancel_requested_at=?, completed_at=?, updated_at=?, heartbeat_at=?
+      WHERE id=?
+    `).bind(now, now, now, now, jobID),
+    env.HOTELS_DB.prepare(`
+      UPDATE hotels SET status='draft', lifecycle_state='failed', updated_at=?
+      WHERE id=? AND status!='published'
+    `).bind(now, row.hotel_id)
+  ]);
+  return importJobDetail(env, jobID, 200);
+}
+
+async function deleteImportJob(env, jobID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM hotel_import_jobs WHERE id=?').bind(jobID).first();
+  if (!row) return json({ ok: false, error: 'IMPORT_JOB_NOT_FOUND' }, 404);
+  await terminateWorkflowForJob(env, row);
+  await env.HOTELS_DB.prepare('DELETE FROM hotel_import_jobs WHERE id=?').bind(jobID).run();
+  return json({ ok: true, deletedJobID: jobID, hotelID: row.hotel_id });
+}
+
 async function listImportJobs(env, url) {
+  await reconcileStaleImportJobs(env);
   const activeOnly = url.searchParams.get('active') === '1';
   const sql = `
     SELECT * FROM hotel_import_jobs
@@ -1091,6 +1523,7 @@ async function listImportJobs(env, url) {
 }
 
 async function importJobDetail(env, jobID, status = 200) {
+  await reconcileStaleImportJobs(env);
   const row = await env.HOTELS_DB.prepare('SELECT * FROM hotel_import_jobs WHERE id = ?').bind(jobID).first();
   if (!row) return json({ ok: false, error: 'IMPORT_JOB_NOT_FOUND' }, 404);
   return json({ ok: true, job: importJobRow(row) }, status);
@@ -1101,15 +1534,15 @@ async function retryImportJob(env, jobID) {
   if (!row) return json({ ok: false, error: 'IMPORT_JOB_NOT_FOUND' }, 404);
   if (!['failed'].includes(row.status)) return json({ ok: false, error: 'IMPORT_JOB_NOT_RETRYABLE' }, 409);
 
-  const images = parseJSONArray(row.images_json);
+  const images = prioritizeImportImages(parseJSONArray(row.images_json), 48);
   const retryAt = new Date().toISOString();
   await env.HOTELS_DB.batch([
     env.HOTELS_DB.prepare(`
       UPDATE hotel_import_jobs
       SET status='queued', stage='retry_queued', progress=0, stored_images=0, failed_images=0, error=NULL, warning=NULL,
-          current_image=0, current_image_label=NULL, compression_mode=NULL,
-          retry_count=retry_count+1, started_at=NULL, completed_at=NULL, updated_at=? WHERE id=?
-    `).bind(retryAt, jobID),
+          current_image=0, current_image_label=NULL, compression_mode=NULL, last_error_code=NULL, cancel_requested_at=NULL,
+          retry_count=retry_count+1, started_at=NULL, completed_at=NULL, updated_at=?, heartbeat_at=? WHERE id=?
+    `).bind(retryAt, retryAt, jobID),
     env.HOTELS_DB.prepare("UPDATE hotels SET status='draft', lifecycle_state='importing', updated_at=? WHERE id=?")
       .bind(retryAt, row.hotel_id)
   ]);
@@ -1120,13 +1553,13 @@ async function retryImportJob(env, jobID) {
       id: `${jobID}-retry-${crypto.randomUUID().slice(0, 8)}`,
       params: { jobID, hotelID: row.hotel_id, images, publishWhenComplete: Number(row.publish_when_complete) === 1, snapshotHash: row.snapshot_hash || null }
     });
-    await env.HOTELS_DB.prepare('UPDATE hotel_import_jobs SET workflow_instance_id=?, updated_at=? WHERE id=?')
-      .bind(instance.id, new Date().toISOString(), jobID).run();
+    await env.HOTELS_DB.prepare('UPDATE hotel_import_jobs SET workflow_instance_id=?, updated_at=?, heartbeat_at=? WHERE id=?')
+      .bind(instance.id, new Date().toISOString(), new Date().toISOString(), jobID).run();
   } catch (error) {
     const failedAt = new Date().toISOString();
     await env.HOTELS_DB.batch([
-      env.HOTELS_DB.prepare("UPDATE hotel_import_jobs SET status='failed', stage='start_failed', error=?, updated_at=? WHERE id=?")
-        .bind(String(error?.message || error).slice(0, 1200), failedAt, jobID),
+      env.HOTELS_DB.prepare("UPDATE hotel_import_jobs SET status='failed', stage='start_failed', error=?, last_error_code='WORKFLOW_START_FAILED', updated_at=?, heartbeat_at=? WHERE id=?")
+        .bind(String(error?.message || error).slice(0, 1200), failedAt, failedAt, jobID),
       env.HOTELS_DB.prepare("UPDATE hotels SET lifecycle_state='failed', status='draft', updated_at=? WHERE id=?")
         .bind(failedAt, row.hotel_id)
     ]);
@@ -1160,7 +1593,10 @@ function importJobRow(row) {
     currentImage: Number(row.current_image || 0),
     currentImageLabel: row.current_image_label || null,
     warning: row.warning || null,
-    compressionMode: row.compression_mode || null
+    compressionMode: row.compression_mode || null,
+    heartbeatAt: row.heartbeat_at || row.updated_at || null,
+    lastErrorCode: row.last_error_code || null,
+    cancelRequestedAt: row.cancel_requested_at || null
   };
 }
 
@@ -1189,9 +1625,9 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       await this.env.HOTELS_DB.batch([
         this.env.HOTELS_DB.prepare(`
           UPDATE hotel_import_jobs
-          SET status='running', stage='preparing_media', progress=1, current_image=0, current_image_label=NULL, warning=NULL, started_at=COALESCE(started_at, ?), updated_at=?
+          SET status='running', stage='preparing_media', progress=1, current_image=0, current_image_label=NULL, warning=NULL, started_at=COALESCE(started_at, ?), updated_at=?, heartbeat_at=?
           WHERE id=?
-        `).bind(now, now, jobID),
+        `).bind(now, now, now, jobID),
         this.env.HOTELS_DB.prepare("UPDATE hotels SET status='draft', lifecycle_state='importing', updated_at=? WHERE id=?")
           .bind(now, hotelID)
       ]);
@@ -1209,9 +1645,9 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       await step.do(`announce image ${String(index + 1).padStart(3, '0')}`, async () => {
         await this.env.HOTELS_DB.prepare(`
           UPDATE hotel_import_jobs
-          SET stage='downloading_image', progress=?, current_image=?, current_image_label=?, error=NULL, updated_at=?
+          SET stage='downloading_image', progress=?, current_image=?, current_image_label=?, error=NULL, updated_at=?, heartbeat_at=?
           WHERE id=?
-        `).bind(startProgress, index + 1, itemLabel, new Date().toISOString(), jobID).run();
+        `).bind(startProgress, index + 1, itemLabel, new Date().toISOString(), new Date().toISOString(), jobID).run();
         return { index: index + 1, label: itemLabel };
       });
 
@@ -1219,7 +1655,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       try {
         result = await step.do(
           `store image ${String(index + 1).padStart(3, '0')}`,
-          { retries: { limit: 4, delay: '4 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
+          { retries: { limit: 2, delay: '3 seconds', backoff: 'exponential' }, timeout: '45 seconds' },
           async () => storeRemoteHotelImage(this.env, jobID, hotelID, item, index)
         );
       } catch (error) {
@@ -1233,7 +1669,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       await step.do(`record progress ${String(index + 1).padStart(3, '0')}`, async () => {
         await this.env.HOTELS_DB.prepare(`
           UPDATE hotel_import_jobs
-          SET stored_images=?, failed_images=?, progress=?, stage=?, error=?, compression_mode=COALESCE(?, compression_mode), updated_at=?
+          SET stored_images=?, failed_images=?, progress=?, stage=?, error=?, compression_mode=COALESCE(?, compression_mode), updated_at=?, heartbeat_at=?
           WHERE id=?
         `).bind(
           stored,
@@ -1242,6 +1678,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
           result?.ok ? 'media_progress' : 'image_retry_exhausted',
           result?.ok ? null : result?.error || 'IMAGE_FAILED',
           result?.compressionMode || null,
+          new Date().toISOString(),
           new Date().toISOString(),
           jobID
         ).run();
@@ -1280,7 +1717,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       await this.env.HOTELS_DB.prepare(`
         UPDATE hotel_import_jobs
         SET status=?, stage=?, progress=100, stored_images=?, failed_images=?, current_image=?, current_image_label=NULL,
-            completed_at=?, updated_at=?, error=?, warning=?
+            completed_at=?, updated_at=?, heartbeat_at=?, error=?, warning=?
         WHERE id=?
       `).bind(
         completed ? 'completed' : 'failed',
@@ -1288,6 +1725,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
         stored,
         failed,
         total,
+        now,
         now,
         now,
         completed ? null : failureReason || 'IMPORT_INTEGRITY_FAILED',
@@ -1464,8 +1902,8 @@ async function storeRemoteHotelImage(env, jobID, hotelID, item, fallbackPosition
 
 async function updateImportJobStage(env, jobID, stage) {
   if (!safeID(jobID)) return;
-  await env.HOTELS_DB.prepare('UPDATE hotel_import_jobs SET stage=?, updated_at=? WHERE id=?')
-    .bind(stage, new Date().toISOString(), jobID).run().catch(() => {});
+  await env.HOTELS_DB.prepare('UPDATE hotel_import_jobs SET stage=?, updated_at=?, heartbeat_at=? WHERE id=?')
+    .bind(stage, new Date().toISOString(), new Date().toISOString(), jobID).run().catch(() => {});
 }
 
 async function optimizeHotelImageBytes(env, sourceBytes, { category = 'gallery', isCover = false, sourceContentType = 'image/jpeg' } = {}) {
@@ -1505,12 +1943,12 @@ function imageTransformProfile(category, isCover, fallback) {
   const detailed = ['room','bathroom','restaurant','breakfast','lobby','view','spa','gym','pool','lounge'].includes(category);
   if (isCover) {
     return fallback
-      ? { width: 1600, height: 1200, quality: 76, maxBytes: 1_050_000, transformVersion: 'cf-webp-cover-v2' }
-      : { width: 1800, height: 1350, quality: 82, maxBytes: 1_250_000, transformVersion: 'cf-webp-cover-v2' };
+      ? { width: 1440, height: 1080, quality: 74, maxBytes: 700_000, transformVersion: 'cf-webp-cover-v3' }
+      : { width: 1600, height: 1200, quality: 80, maxBytes: 900_000, transformVersion: 'cf-webp-cover-v3' };
   }
   return fallback
-    ? { width: detailed ? 1280 : 1120, height: detailed ? 960 : 840, quality: 72, maxBytes: 780_000, transformVersion: 'cf-webp-standard-v2' }
-    : { width: detailed ? 1440 : 1280, height: detailed ? 1080 : 960, quality: 78, maxBytes: 900_000, transformVersion: 'cf-webp-standard-v2' };
+    ? { width: detailed ? 1120 : 1024, height: detailed ? 840 : 768, quality: 70, maxBytes: 480_000, transformVersion: 'cf-webp-standard-v3' }
+    : { width: detailed ? 1280 : 1120, height: detailed ? 960 : 840, quality: 76, maxBytes: 650_000, transformVersion: 'cf-webp-standard-v3' };
 }
 
 async function runImageTransform(env, sourceBytes, profile) {
@@ -1902,13 +2340,22 @@ async function serveHotelImage(env, hotelID, imageID, admin) {
 }
 
 async function deleteHotel(env, hotelID) {
-  const images = await env.HOTELS_DB.prepare('SELECT object_key FROM hotel_images WHERE hotel_id = ?').bind(hotelID).all();
-  const result = await env.HOTELS_DB.prepare('DELETE FROM hotels WHERE id = ?').bind(hotelID).run();
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=?').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
 
+  const [images, jobs] = await Promise.all([
+    env.HOTELS_DB.prepare('SELECT object_key FROM hotel_images WHERE hotel_id = ?').bind(hotelID).all(),
+    env.HOTELS_DB.prepare("SELECT * FROM hotel_import_jobs WHERE hotel_id=? AND status IN ('queued','running')").bind(hotelID).all()
+  ]);
+
+  // Never delete a canonical row while a workflow can still write into it.
+  for (const job of jobs.results || []) await terminateWorkflowForJob(env, job);
+
+  const result = await env.HOTELS_DB.prepare('DELETE FROM hotels WHERE id = ?').bind(hotelID).run();
   if (!result.meta?.changes) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
 
   await Promise.allSettled((images.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
-  return json({ ok: true });
+  return json({ ok: true, deletedHotelID: hotelID });
 }
 
 async function summaryRow(env, hotelID) {

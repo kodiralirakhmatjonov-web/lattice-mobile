@@ -126,6 +126,17 @@ actor APIClient {
         return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
     }
 
+    func recoverSourceRooms(sourceURL: String) async throws -> SourceRoomRecoveryResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/source-rooms"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 35
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(SourceRoomRecoveryPayload(sourceURL: sourceURL))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(SourceRoomRecoveryResponse.self, from: data)
+    }
+
     func checkHotelDuplicate(_ hotel: HotelDraft) async throws -> HotelDuplicate? {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/dedupe"))
         request.httpMethod = "POST"
@@ -192,6 +203,29 @@ actor APIClient {
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
+    }
+
+    func cancelHotelImportJob(id: String) async throws -> HotelImportJob {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)/cancel"))
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelImportJobResponse.self, from: data).job
+    }
+
+    func deleteHotelImportJob(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+    }
+
+    func deleteHotel(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)"))
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 45
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
     }
 
     func saveHotel(_ hotel: HotelDraft, allowPossibleDuplicate: Bool = false) async throws -> HotelListItem? {
