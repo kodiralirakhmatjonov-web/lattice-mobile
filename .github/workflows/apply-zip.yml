@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract update safely
+      - name: Extract update safely and remove ZIP
         shell: python
         run: |
           import pathlib
@@ -39,11 +39,26 @@ jobs:
               '.github/workflows/',
           )
 
+          def is_junk(name: str) -> bool:
+              clean = name.replace('\\', '/')
+              parts = [part for part in clean.split('/') if part]
+              return (
+                  '__MACOSX' in parts
+                  or clean.endswith('/.DS_Store')
+                  or clean == '.DS_Store'
+              )
+
           for archive in archives:
               print(f'Applying {archive.name}')
+
               with zipfile.ZipFile(archive) as z:
                   for member in z.infolist():
                       name = member.filename.replace('\\', '/')
+
+                      if is_junk(name):
+                          print(f'Skipping ZIP junk: {name}')
+                          continue
+
                       target = (root / name).resolve()
 
                       if root not in target.parents and target != root:
@@ -61,7 +76,9 @@ jobs:
                       with z.open(member) as source, open(target, 'wb') as destination:
                           shutil.copyfileobj(source, destination)
 
+              # Remove the processed update archive only after successful extraction.
               archive.unlink()
+              print(f'Removed processed ZIP: {archive.name}')
 
       - name: Commit applied files
         run: |
