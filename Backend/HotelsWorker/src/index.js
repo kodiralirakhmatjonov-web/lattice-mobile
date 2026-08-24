@@ -987,7 +987,7 @@ async function recoverSourceRooms(request, env) {
   if (!hintedProvider) return json({ ok: false, error: 'UNSUPPORTED_SOURCE_PROVIDER' }, 400);
 
   const headers = new Headers({
-    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'accept-language': 'en-US,en;q=0.9',
     'cache-control': 'no-cache'
@@ -1012,6 +1012,9 @@ async function recoverSourceRooms(request, env) {
   const html = await response.text();
   if (!html || html.length < 500) return json({ ok: false, error: 'SOURCE_ROOM_EMPTY_PAGE' }, 502);
   if (html.length > 8_000_000) return json({ ok: false, error: 'SOURCE_ROOM_PAGE_TOO_LARGE' }, 502);
+  if (isProviderChallengeHTML(html)) {
+    return json({ ok: false, error: 'SOURCE_PROVIDER_CHALLENGE', detail: 'Provider returned an anti-bot verification page instead of the hotel property.' }, 409);
+  }
 
   let rooms = extractProviderRoomsFromHTML(html, provider);
   let recoveryURL = finalURL;
@@ -1048,6 +1051,14 @@ async function recoverSourceRooms(request, env) {
     rooms,
     method
   });
+}
+
+function isProviderChallengeHTML(html) {
+  const text = String(html || '').toLowerCase();
+  return [
+    'bot or not', 'verify you are human', 'are you a robot', 'security check',
+    'robot check', 'unusual traffic', 'captcha', 'access denied'
+  ].some(marker => text.includes(marker));
 }
 
 function detectRoomProvider(url) {

@@ -88,7 +88,6 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
-        config.defaultWebpagePreferences.preferredContentMode = .desktop
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.userContentController.addUserScript(
             WKUserScript(
@@ -102,7 +101,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         super.init()
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = true
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        webView.customUserAgent = Self.mobileSafariUserAgent
     }
 
     func start(sourceURL rawValue: String) {
@@ -323,6 +322,14 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             guard let name = snapshot.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
                 throw APIError.server("Не удалось прочитать название отеля с этой страницы.")
             }
+            guard !Self.isChallengeIdentity(name), !(await detectVerification()) else {
+                requiresUserAction = true
+                showSource = true
+                extractionStarted = false
+                stage = .loading
+                status = "Expedia открыла защитную страницу вместо карточки отеля. Пройдите проверку и нажмите «Продолжить»."
+                return
+            }
 
             var candidate = HotelNormalizer.makeDraft(snapshot: snapshot)
 
@@ -409,44 +416,61 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         let probeURLs = Self.roomProbeURLs(provider: provider, propertyURL: propertyURL)
         guard !probeURLs.isEmpty else { return recovered }
 
-        isRoomProbeNavigation = true
-        defer { isRoomProbeNavigation = false }
+        // Never navigate the primary importer WebView away from the already verified
+        // property page. Room probing runs in its own browser, with the same mobile
+        // Safari identity that proved reliable for the normal property import.
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        config.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.networkCaptureBootstrapScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
+        let roomWebView = WKWebView(frame: .zero, configuration: config)
+        roomWebView.customUserAgent = Self.mobileSafariUserAgent
 
         for (index, probeURL) in probeURLs.enumerated() {
             if recovered.count >= 4 { break }
-            status = index == 0 ? "Открываем варианты номеров…" : "Проверяем дополнительные типы номеров…"
+            status = index == 0 ? "Получаем варианты номеров…" : "Проверяем дополнительные типы номеров…"
             progress = min(0.90, 0.86 + Double(index) * 0.02)
 
             var request = URLRequest(url: probeURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
             request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
             request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-            webView.load(request)
+            roomWebView.load(request)
 
-            guard await waitForRoomProbeLoad(provider: provider, timeoutSeconds: 18) else { continue }
-            if await detectVerification() { continue }
+            guard await waitForRoomProbeLoad(roomWebView, provider: provider, timeoutSeconds: 20) else { continue }
+            if await detectVerification(in: roomWebView) { continue }
 
-            _ = try? await webView.evaluateJavaScript(Self.revealRoomsScript())
-            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            _ = try? await roomWebView.evaluateJavaScript(Self.revealRoomsScript())
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
             for fraction in [0.0, 0.22, 0.48, 0.74, 1.0] {
-                _ = try? await webView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
-                try? await Task.sleep(nanoseconds: 320_000_000)
+                _ = try? await roomWebView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
+                try? await Task.sleep(nanoseconds: 300_000_000)
             }
 
-            guard let pageURL = webView.url, provider.isProviderContentURL(pageURL) else { continue }
-            let raw = try? await webView.evaluateJavaScript(Self.extractionScript(provider: provider, sourceURL: propertyURL.absoluteString))
+            guard let pageURL = roomWebView.url, provider.isProviderContentURL(pageURL) else { continue }
+            if await detectVerification(in: roomWebView) { continue }
+            let raw = try? await roomWebView.evaluateJavaScript(Self.extractionScript(provider: provider, sourceURL: propertyURL.absoluteString))
             guard let json = raw as? String, let data = json.data(using: .utf8),
-                  let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data) else { continue }
+                  let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
+                  !Self.isChallengeIdentity(snapshot.name) else { continue }
             let roomDraft = HotelNormalizer.makeDraft(snapshot: snapshot)
             recovered = Self.mergeRooms(recovered, roomDraft.rooms)
         }
+        roomWebView.stopLoading()
         return recovered
     }
 
-    private func waitForRoomProbeLoad(provider: Provider, timeoutSeconds: Double) async -> Bool {
+    private func waitForRoomProbeLoad(_ targetWebView: WKWebView, provider: Provider, timeoutSeconds: Double) async -> Bool {
         let iterations = max(1, Int(timeoutSeconds / 0.25))
         for _ in 0..<iterations {
-            if !webView.isLoading, let url = webView.url, provider.isProviderContentURL(url) {
-                let state = (try? await webView.evaluateJavaScript("document.readyState")) as? String
+            if !targetWebView.isLoading, let url = targetWebView.url, provider.isProviderContentURL(url) {
+                let state = (try? await targetWebView.evaluateJavaScript("document.readyState")) as? String
                 if state == "complete" || state == "interactive" { return true }
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -497,14 +521,22 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     }
 
     private func detectVerification() async -> Bool {
+        await detectVerification(in: webView)
+    }
+
+    private func detectVerification(in targetWebView: WKWebView) async -> Bool {
         do {
-            let value = try await webView.evaluateJavaScript("""
+            let value = try await targetWebView.evaluateJavaScript("""
             (() => {
               const t = (document.body?.innerText || '').toLowerCase();
-              return [
+              const title = String(document.title || '').toLowerCase();
+              const h1 = String(document.querySelector('h1')?.innerText || '').toLowerCase();
+              const challenge = [
                 'captcha', 'verify you are human', 'are you a robot', 'security check',
-                'unusual traffic', 'проверка безопасности', 'подтвердите, что вы человек'
-              ].some(x => t.includes(x));
+                'unusual traffic', 'bot or not', 'robot check', 'access denied',
+                'проверка безопасности', 'подтвердите, что вы человек'
+              ];
+              return challenge.some(x => t.includes(x) || title.includes(x) || h1.includes(x));
             })();
             """)
             return (value as? Bool) == true
@@ -512,6 +544,17 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             return false
         }
     }
+
+    private static func isChallengeIdentity(_ value: String?) -> Bool {
+        let text = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !text.isEmpty else { return false }
+        return [
+            "bot or not", "verify you are human", "are you a robot", "security check",
+            "robot check", "access denied", "captcha"
+        ].contains { text.contains($0) }
+    }
+
+    private static let mobileSafariUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
 
     private func fail(_ message: String) {
         stage = .failed
