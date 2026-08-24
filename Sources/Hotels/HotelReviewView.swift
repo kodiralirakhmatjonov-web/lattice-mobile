@@ -497,11 +497,30 @@ struct HotelReviewView: View {
             }
 
             if draft.rooms.isEmpty {
-                ContentUnavailableView(
-                    "Номера не найдены",
-                    systemImage: "bed.double",
-                    description: Text("Эта страница не показала структурированный список типов номеров. Данные не будут придуманы автоматически.")
-                )
+                VStack(spacing: 14) {
+                    ContentUnavailableView(
+                        "Номера пока не подтверждены",
+                        systemImage: "bed.double",
+                        description: Text("Карточка отеля уже получена. Публикация заблокирована, пока importer не подтвердит реальные типы номеров.")
+                    )
+
+                    Button {
+                        coordinator.retryRoomRecovery()
+                    } label: {
+                        HStack(spacing: 8) {
+                            if coordinator.roomRecoveryRunning { ProgressView().tint(.white) }
+                            Image(systemName: "arrow.clockwise")
+                            Text(coordinator.roomRecoveryRunning ? "Ищем номера…" : "Повторить поиск номеров")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 50)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(.black, in: Capsule())
+                    .disabled(coordinator.roomRecoveryRunning)
+                }
             } else {
                 ForEach(draft.rooms) { room in
                     roomCard(room)

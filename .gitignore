@@ -9,3 +9,8 @@ iumrahBusiness.xcodeproj
 Backend/HotelsWorker/node_modules/
 Backend/HotelsWorker/wrangler.generated.jsonc
 Backend/HotelsWorker/.wrangler/
+
+# Legacy/transient repository artifacts. Existing tracked copies can be removed once;
+# these patterns prevent them from being re-added accidentally.
+*_APPLIED.txt
+mobile-update.zip

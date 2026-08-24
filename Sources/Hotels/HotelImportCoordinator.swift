@@ -73,11 +73,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     @Published var failureMessage: String?
     @Published var sourceURL: URL?
     @Published var duplicateCandidate: HotelDuplicate?
+    @Published var roomRecoveryRunning = false
 
     let webView: WKWebView
     private var stage: Stage = .idle
     private var extractionStarted = false
     private var completionReported = false
+    private var isRoomProbeNavigation = false
 
     var onCompleted: ((HotelDraft) -> Void)?
     var onFailed: ((String) -> Void)?
@@ -151,6 +153,26 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
     }
 
+    func retryRoomRecovery() {
+        guard !roomRecoveryRunning, var candidate = draft, let provider = currentProvider, let propertyURL = sourceURL else { return }
+        roomRecoveryRunning = true
+        Task {
+            defer { roomRecoveryRunning = false }
+            status = "Повторно получаем типы номеров…"
+            var rooms = candidate.rooms
+            let browserRooms = await recoverRoomsInBrowser(provider: provider, propertyURL: propertyURL)
+            rooms = Self.mergeRooms(rooms, browserRooms)
+            if rooms.count < 4,
+               let recovered = try? await APIClient.shared.recoverSourceRooms(sourceURL: propertyURL.absoluteString) {
+                rooms = Self.mergeRooms(rooms, recovered.rooms)
+            }
+            candidate.rooms = rooms
+            candidate.dataQuality["rooms"] = rooms.isEmpty ? "missing-needs-review" : "confirmed:\(rooms.count)"
+            draft = candidate
+            status = rooms.isEmpty ? "Типы номеров пока не подтверждены." : "Найдено типов номеров: \(rooms.count)"
+        }
+    }
+
     func continueAfterVerification() {
         requiresUserAction = false
         showSource = false
@@ -202,10 +224,12 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if isRoomProbeNavigation { return }
         fail(error.localizedDescription)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if isRoomProbeNavigation { return }
         fail(error.localizedDescription)
     }
 
@@ -302,21 +326,33 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
             var candidate = HotelNormalizer.makeDraft(snapshot: snapshot)
 
-            // Rooms are a first-class catalog requirement. Expedia/Booking frequently
-            // keep room cards outside the initially rendered mobile DOM, so use a second
-            // independent server-side read of the exact same property URL before we ever
-            // show a misleading “0 номеров” review card.
-            if candidate.rooms.count < 2 {
+            // Rooms are a first-class catalog requirement, but failure to recover them must
+            // never discard the hotel identity/photos we already parsed. First probe the exact
+            // same property in the live browser with deterministic future dates (Expedia and
+            // Booking often do not render sellable room cards until dates are present), then
+            // use the independent Cloudflare recovery endpoint as a second opinion.
+            if candidate.rooms.count < 4 {
                 status = "Получаем типы номеров из карточки отеля…"
-                progress = 0.90
+                progress = 0.86
+                let browserRooms = await recoverRoomsInBrowser(provider: provider, propertyURL: currentURL)
+                if !browserRooms.isEmpty {
+                    candidate.rooms = Self.mergeRooms(candidate.rooms, browserRooms)
+                }
+            }
+
+            if candidate.rooms.count < 4 {
+                status = "Проверяем номера вторым способом…"
+                progress = 0.91
                 if let recovered = try? await APIClient.shared.recoverSourceRooms(sourceURL: currentURL.absoluteString),
                    !recovered.rooms.isEmpty {
                     candidate.rooms = Self.mergeRooms(candidate.rooms, recovered.rooms)
                 }
             }
 
-            guard !candidate.rooms.isEmpty else {
-                throw APIError.server("ROOM_TYPES_NOT_FOUND: источник содержит карточку отеля, но типы номеров не удалось подтвердить. Отель не будет сохранён с 0 номеров.")
+            if candidate.rooms.isEmpty {
+                candidate.dataQuality["rooms"] = "missing-needs-review"
+            } else {
+                candidate.dataQuality["rooms"] = "confirmed:\(candidate.rooms.count)"
             }
 
             status = "Проверяем отель по всей базе iumrah…"
@@ -334,7 +370,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             draft = candidate
             progress = 1
             stage = .finished
-            status = "Готово: \(name)"
+            status = candidate.rooms.isEmpty ? "Карточка получена. Номера требуют повторной проверки." : "Готово: \(name)"
             if !completionReported {
                 completionReported = true
                 onCompleted?(candidate)
@@ -366,6 +402,98 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             if output.count >= 140 { break }
         }
         return output
+    }
+
+    private func recoverRoomsInBrowser(provider: Provider, propertyURL: URL) async -> [HotelRoomDraft] {
+        var recovered: [HotelRoomDraft] = []
+        let probeURLs = Self.roomProbeURLs(provider: provider, propertyURL: propertyURL)
+        guard !probeURLs.isEmpty else { return recovered }
+
+        isRoomProbeNavigation = true
+        defer { isRoomProbeNavigation = false }
+
+        for (index, probeURL) in probeURLs.enumerated() {
+            if recovered.count >= 4 { break }
+            status = index == 0 ? "Открываем варианты номеров…" : "Проверяем дополнительные типы номеров…"
+            progress = min(0.90, 0.86 + Double(index) * 0.02)
+
+            var request = URLRequest(url: probeURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            webView.load(request)
+
+            guard await waitForRoomProbeLoad(provider: provider, timeoutSeconds: 18) else { continue }
+            if await detectVerification() { continue }
+
+            _ = try? await webView.evaluateJavaScript(Self.revealRoomsScript())
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            for fraction in [0.0, 0.22, 0.48, 0.74, 1.0] {
+                _ = try? await webView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
+                try? await Task.sleep(nanoseconds: 320_000_000)
+            }
+
+            guard let pageURL = webView.url, provider.isProviderContentURL(pageURL) else { continue }
+            let raw = try? await webView.evaluateJavaScript(Self.extractionScript(provider: provider, sourceURL: propertyURL.absoluteString))
+            guard let json = raw as? String, let data = json.data(using: .utf8),
+                  let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data) else { continue }
+            let roomDraft = HotelNormalizer.makeDraft(snapshot: snapshot)
+            recovered = Self.mergeRooms(recovered, roomDraft.rooms)
+        }
+        return recovered
+    }
+
+    private func waitForRoomProbeLoad(provider: Provider, timeoutSeconds: Double) async -> Bool {
+        let iterations = max(1, Int(timeoutSeconds / 0.25))
+        for _ in 0..<iterations {
+            if !webView.isLoading, let url = webView.url, provider.isProviderContentURL(url) {
+                let state = (try? await webView.evaluateJavaScript("document.readyState")) as? String
+                if state == "complete" || state == "interactive" { return true }
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return false
+    }
+
+    private static func roomProbeURLs(provider: Provider, propertyURL: URL) -> [URL] {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date()
+        let offsets = [14, 45]
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        return offsets.compactMap { offset in
+            guard let checkIn = calendar.date(byAdding: .day, value: offset, to: now),
+                  let checkOut = calendar.date(byAdding: .day, value: offset + 2, to: now),
+                  var components = URLComponents(url: propertyURL, resolvingAgainstBaseURL: false) else { return nil }
+            var items = components.queryItems ?? []
+            let transientKeys: Set<String>
+            switch provider {
+            case .expedia:
+                transientKeys = ["chkin", "chkout", "rm1", "useRewards"]
+            case .booking:
+                transientKeys = ["checkin", "checkout", "group_adults", "group_children", "no_rooms"]
+            }
+            items.removeAll { transientKeys.contains($0.name) }
+            switch provider {
+            case .expedia:
+                items.append(URLQueryItem(name: "chkin", value: formatter.string(from: checkIn)))
+                items.append(URLQueryItem(name: "chkout", value: formatter.string(from: checkOut)))
+                items.append(URLQueryItem(name: "rm1", value: "a2"))
+                items.append(URLQueryItem(name: "useRewards", value: "false"))
+            case .booking:
+                items.append(URLQueryItem(name: "checkin", value: formatter.string(from: checkIn)))
+                items.append(URLQueryItem(name: "checkout", value: formatter.string(from: checkOut)))
+                items.append(URLQueryItem(name: "group_adults", value: "2"))
+                items.append(URLQueryItem(name: "group_children", value: "0"))
+                items.append(URLQueryItem(name: "no_rooms", value: "1"))
+            }
+            components.queryItems = items
+            return components.url
+        }
     }
 
     private func detectVerification() async -> Bool {

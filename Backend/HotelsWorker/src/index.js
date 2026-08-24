@@ -978,13 +978,13 @@ async function recoverSourceRooms(request, env) {
   const sourceURL = cleanURL(payload.value?.sourceURL);
   if (!sourceURL) return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400);
 
-  let parsed;
-  try { parsed = new URL(sourceURL); } catch (_) { return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400); }
-  const host = parsed.hostname.toLowerCase();
-  const provider = host === 'booking.com' || host.endsWith('.booking.com')
-    ? 'Booking'
-    : (host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.')) ? 'Expedia' : null;
-  if (!provider) return json({ ok: false, error: 'UNSUPPORTED_SOURCE_PROVIDER' }, 400);
+  let input;
+  try { input = new URL(sourceURL); } catch (_) { return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400); }
+  const inputHost = input.hostname.toLowerCase();
+  const hintedProvider = inputHost === 'expe.onelink.me' || inputHost.endsWith('.expe.onelink.me')
+    ? 'Expedia'
+    : detectRoomProvider(input);
+  if (!hintedProvider) return json({ ok: false, error: 'UNSUPPORTED_SOURCE_PROVIDER' }, 400);
 
   const headers = new Headers({
     'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
@@ -1000,14 +1000,14 @@ async function recoverSourceRooms(request, env) {
     return json({ ok: false, error: 'SOURCE_ROOM_FETCH_FAILED', detail: String(error?.message || error).slice(0, 500) }, 502);
   }
   if (!response.ok) return json({ ok: false, error: `SOURCE_ROOM_HTTP_${response.status}` }, 502);
+
   const finalURL = response.url || sourceURL;
-  try {
-    const finalHost = new URL(finalURL).hostname.toLowerCase();
-    const allowed = provider === 'Booking'
-      ? finalHost === 'booking.com' || finalHost.endsWith('.booking.com')
-      : finalHost === 'expedia.com' || finalHost.endsWith('.expedia.com') || finalHost.includes('expedia.');
-    if (!allowed) return json({ ok: false, error: 'SOURCE_REDIRECT_OUTSIDE_PROVIDER' }, 400);
-  } catch (_) {}
+  let finalParsed;
+  try { finalParsed = new URL(finalURL); } catch (_) { return json({ ok: false, error: 'SOURCE_ROOM_BAD_REDIRECT' }, 502); }
+  const provider = detectRoomProvider(finalParsed) || hintedProvider;
+  if (!provider || !providerRoomHostAllowed(finalParsed, provider)) {
+    return json({ ok: false, error: 'SOURCE_REDIRECT_OUTSIDE_PROVIDER' }, 400);
+  }
 
   const html = await response.text();
   if (!html || html.length < 500) return json({ ok: false, error: 'SOURCE_ROOM_EMPTY_PAGE' }, 502);
@@ -1015,34 +1015,27 @@ async function recoverSourceRooms(request, env) {
 
   let rooms = extractProviderRoomsFromHTML(html, provider);
   let recoveryURL = finalURL;
-  let method = rooms.length ? 'server-property-page-v1' : 'server-property-page-no-room-match';
+  let method = rooms.length ? 'server-property-page-v3' : 'server-property-page-no-room-match';
 
-  // Expedia regional/mobile shells are not consistent about SSR room cards. The
-  // .h<propertyID> path is the property identity, so these are alternate renders of
-  // the exact same hotel URL (never a hotel-name search and never another property).
-  if (!rooms.length && provider === 'Expedia') {
-    const candidates = [];
-    const exactPath = parsed.pathname;
-    const originalSearch = parsed.search || '';
-    candidates.push(`https://www.expedia.com${exactPath}${originalSearch}`);
-    const query = new URLSearchParams(parsed.searchParams);
-    query.set('rfrr', 'HOT.HIS.question.link.click');
-    candidates.push(`https://www.expedia.com${exactPath}?${query.toString()}`);
-
-    for (const fallbackURL of [...new Set(candidates)]) {
+  // Room cards are availability-driven on both Expedia and Booking. Probe only the
+  // exact resolved property URL with deterministic future dates; this never searches
+  // by hotel name and therefore cannot drift to a different physical hotel.
+  if (rooms.length < 4) {
+    const candidates = roomRecoveryProbeURLs(finalParsed, provider);
+    for (const fallbackURL of candidates) {
       try {
         const fallbackResponse = await fetch(fallbackURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
         if (!fallbackResponse.ok) continue;
         const fallbackFinal = new URL(fallbackResponse.url || fallbackURL);
-        if (!(fallbackFinal.hostname === 'expedia.com' || fallbackFinal.hostname.endsWith('.expedia.com'))) continue;
+        if (!providerRoomHostAllowed(fallbackFinal, provider)) continue;
         const fallbackHTML = await fallbackResponse.text();
         if (!fallbackHTML || fallbackHTML.length > 8_000_000) continue;
         const recovered = extractProviderRoomsFromHTML(fallbackHTML, provider);
         if (!recovered.length) continue;
-        rooms = recovered;
+        rooms = mergeRecoveredRooms(rooms, recovered);
         recoveryURL = fallbackResponse.url || fallbackURL;
-        method = 'server-property-page-expedia-exact-fallback-v2';
-        break;
+        method = 'server-property-page-dated-probe-v3';
+        if (rooms.length >= 4) break;
       } catch (_) {}
     }
   }
@@ -1055,6 +1048,72 @@ async function recoverSourceRooms(request, env) {
     rooms,
     method
   });
+}
+
+function detectRoomProvider(url) {
+  const host = String(url?.hostname || '').toLowerCase();
+  if (host === 'booking.com' || host.endsWith('.booking.com')) return 'Booking';
+  if (host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.')) return 'Expedia';
+  return null;
+}
+
+function providerRoomHostAllowed(url, provider) {
+  const host = String(url?.hostname || '').toLowerCase();
+  return provider === 'Booking'
+    ? host === 'booking.com' || host.endsWith('.booking.com')
+    : host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.');
+}
+
+function roomRecoveryProbeURLs(propertyURL, provider) {
+  const offsets = [14, 45];
+  const output = [];
+  const seen = new Set();
+  const dateFor = offset => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+  const push = url => {
+    const value = url.toString();
+    if (!seen.has(value)) { seen.add(value); output.push(value); }
+  };
+
+  for (const offset of offsets) {
+    const url = new URL(propertyURL.toString());
+    const checkIn = dateFor(offset);
+    const checkOut = dateFor(offset + 2);
+    if (provider === 'Expedia') {
+      url.searchParams.set('chkin', checkIn);
+      url.searchParams.set('chkout', checkOut);
+      url.searchParams.set('rm1', 'a2');
+      url.searchParams.set('useRewards', 'false');
+      push(url);
+
+      // Regional Expedia properties share the same .h<propertyID> identity/path.
+      // The .com render is often richer server-side, but the path is never changed.
+      const canonical = new URL(url.toString());
+      canonical.hostname = 'www.expedia.com';
+      push(canonical);
+    } else {
+      url.searchParams.set('checkin', checkIn);
+      url.searchParams.set('checkout', checkOut);
+      url.searchParams.set('group_adults', '2');
+      url.searchParams.set('group_children', '0');
+      url.searchParams.set('no_rooms', '1');
+      push(url);
+    }
+  }
+  return output.slice(0, 6);
+}
+
+function mergeRecoveredRooms(primary, recovered) {
+  const out = [];
+  const seen = new Set();
+  for (const room of [...(primary || []), ...(recovered || [])]) {
+    if (!room || !isPlausibleRoomName(room.name)) continue;
+    const key = normalizeRoomIdentity(room.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(room);
+    if (out.length >= 140) break;
+  }
+  return out;
 }
 
 function extractProviderRoomsFromHTML(html, provider) {
@@ -1099,6 +1158,39 @@ function extractProviderRoomsFromHTML(html, provider) {
     let match;
     while ((match = pattern.exec(html)) !== null && rawJSONAnchors.length < 300) {
       rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'json' });
+    }
+  }
+
+  // SSR room cards frequently expose the room name only through aria-label/title
+  // attributes. htmlToReadableText intentionally removes tags, so capture those
+  // attributes directly before the markup is stripped.
+  const rawAttributePatterns = provider === 'Expedia' ? [
+    /aria-label=["'][^"']*View all photos for\s+([^"']{3,220})["']/gi,
+    /aria-label=["'][^"']*More details(?:\s+More details)? for\s+([^"']{3,220})["']/gi,
+    /title=["'][^"']*View all photos for\s+([^"']{3,220})["']/gi
+  ] : [
+    /data-testid=["'][^"']*room[^"']*["'][^>]*>\s*([^<]{3,220})</gi,
+    /aria-label=["'][^"']*(?:room|suite)\s*[:\-]?\s*([^"']{3,220})["']/gi
+  ];
+  for (const pattern of rawAttributePatterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null && rawJSONAnchors.length < 420) {
+      rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'attribute' });
+    }
+  }
+
+  // Expedia application state is often JSON-escaped inside another script string.
+  // Normalize only quoting/unicode escapes and then reuse the strict room-name keys.
+  const normalizedStructuredHTML = String(html || '')
+    .replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\"/g, '"');
+  if (normalizedStructuredHTML !== html) {
+    for (const pattern of rawJSONPatterns) {
+      pattern.lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(normalizedStructuredHTML)) !== null && rawJSONAnchors.length < 500) {
+        rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'escaped-json' });
+      }
     }
   }
 
