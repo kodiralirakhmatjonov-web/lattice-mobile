@@ -21,14 +21,11 @@ struct HotelReviewView: View {
                     hotelHero(draft)
                     sourceCard(draft)
                     hotelFacts(draft)
-                    propertyIntelligence(draft)
-                    locationDetails(draft)
-                    servicesAndFacts(draft)
                     gallery(draft)
                     rooms(draft)
                     amenities(draft)
-                    fees(draft)
-                    policies(draft)
+                    locationDetails(draft)
+                    additionalDetails(draft)
                     publishBlock(draft)
                 }
                 .padding(.vertical, 14)
@@ -195,6 +192,40 @@ struct HotelReviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private func additionalDetails(_ draft: HotelDraft) -> some View {
+        let hasDetails = !draft.highlights.isEmpty ||
+            !draft.food.isEmpty ||
+            !draft.parkingTransport.isEmpty ||
+            !draft.accessibility.isEmpty ||
+            !draft.importantInformation.isEmpty ||
+            !draft.services.isEmpty ||
+            !draft.facts.isEmpty ||
+            !draft.fees.isEmpty ||
+            !draft.policies.isEmpty
+
+        if hasDetails {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 14) {
+                    propertyIntelligence(draft)
+                    servicesAndFacts(draft)
+                    fees(draft)
+                    policies(draft)
+                }
+                .padding(.top, 12)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Дополнительные данные")
+                        .font(.headline)
+                    Text("Правила, сборы и служебные детали")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(16)
+            .businessCard(radius: 26)
         }
     }
 

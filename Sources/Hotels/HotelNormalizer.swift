@@ -22,18 +22,18 @@ enum HotelNormalizer {
         draft.longitude = snapshot.longitude
         draft.checkIn = clean(snapshot.checkIn)
         draft.checkOut = clean(snapshot.checkOut)
-        draft.amenities = unique(snapshot.amenities).prefix(180).map { $0 }
-        draft.policies = unique(snapshot.policies).prefix(120).map { $0 }
+        draft.amenities = canonicalAmenities(snapshot.amenities).prefix(180).map { $0 }
+        draft.policies = unique(snapshot.policies).filter(isSafeHumanText).prefix(120).map { $0 }
         draft.googleMapsURL = clean(snapshot.googleMapsURL)
-        draft.nearby = Array((snapshot.nearby ?? []).prefix(100))
-        draft.facts = Array((snapshot.facts ?? []).prefix(180))
-        draft.fees = Array((snapshot.fees ?? []).prefix(100))
-        draft.services = unique(snapshot.services ?? []).prefix(180).map { $0 }
-        draft.highlights = unique(snapshot.highlights ?? []).prefix(120).map { $0 }
-        draft.importantInformation = unique(snapshot.importantInformation ?? []).prefix(160).map { $0 }
-        draft.food = Array((snapshot.food ?? []).prefix(160))
-        draft.parkingTransport = Array((snapshot.parkingTransport ?? []).prefix(160))
-        draft.accessibility = unique(snapshot.accessibility ?? []).prefix(120).map { $0 }
+        draft.nearby = cleanNearby(snapshot.nearby ?? []).prefix(100).map { $0 }
+        draft.facts = cleanFacts(snapshot.facts ?? []).prefix(180).map { $0 }
+        draft.fees = cleanFacts(snapshot.fees ?? []).prefix(100).map { $0 }
+        draft.services = unique(snapshot.services ?? []).filter(isSafeHumanText).prefix(180).map { $0 }
+        draft.highlights = unique(snapshot.highlights ?? []).filter(isSafeHumanText).prefix(120).map { $0 }
+        draft.importantInformation = unique(snapshot.importantInformation ?? []).filter(isSafeHumanText).prefix(160).map { $0 }
+        draft.food = cleanFacts(snapshot.food ?? []).prefix(160).map { $0 }
+        draft.parkingTransport = cleanFacts(snapshot.parkingTransport ?? []).prefix(160).map { $0 }
+        draft.accessibility = unique(snapshot.accessibility ?? []).filter(isSafeHumanText).prefix(120).map { $0 }
         draft.dataQuality = qualitySummary(snapshot)
         draft.lifecycleState = "draft"
         draft.sources = [snapshot]
@@ -120,6 +120,106 @@ enum HotelNormalizer {
             guard cleaned.count >= 2 else { continue }
             let key = cleaned.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
             if seen.insert(key).inserted { result.append(cleaned) }
+        }
+        return result
+    }
+
+
+    private static func isSafeHumanText(_ value: String) -> Bool {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        let lower = text.lowercased()
+        let noiseTokens = [
+            "\\\"", "__typename", "agencybusinessmodels", "availability_group",
+            "bedroomfilter", "bed_type_group", "startdate", "trip-type",
+            "shoppingproductcontent", "egdsplaintext"
+        ]
+        if noiseTokens.contains(where: lower.contains) { return false }
+        if text.contains("{") && (text.contains("\"") || text.contains(":")) { return false }
+        if text.contains("[") && text.contains("\"") { return false }
+        if lower.contains("see all about this property") && lower.contains("explore the area") { return false }
+        if lower.contains("free wififree cribs") || lower.contains("breakfast for a feerestaurant") { return false }
+        return true
+    }
+
+    private static func canonicalAmenities(_ values: [String]) -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func canonical(_ raw: String) -> String? {
+            guard isSafeHumanText(raw) else { return nil }
+            let text = raw.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = text.lowercased()
+            if lower.contains("free wifi") || lower.contains("free wi-fi") { return "Free WiFi" }
+            if lower.contains("wifi") || lower.contains("wi-fi") { return "Wi‑Fi" }
+            if lower.contains("restaurant") { return "Restaurant" }
+            if lower.contains("coffee shop") || lower.contains("cafe") || lower.contains("café") { return "Coffee shop" }
+            if lower.contains("24-hour front desk") || lower.contains("24 hour front desk") { return "24-hour front desk" }
+            if lower.contains("fitness center") || lower.contains("fitness centre") || lower == "gym" { return "Fitness center" }
+            if lower.contains("swimming pool") || lower.contains("outdoor pool") || lower.contains("indoor pool") { return "Swimming pool" }
+            if lower.contains("airport shuttle") || lower.contains("shuttle service") { return "Airport shuttle" }
+            if lower.contains("valet parking") { return "Valet parking" }
+            if lower.contains("luggage storage") || lower.contains("baggage storage") { return "Luggage storage" }
+            return text
+        }
+
+        for value in values {
+            guard let item = canonical(value), item.count >= 2 else { continue }
+            let key = item.lowercased()
+            if key == "wi‑fi", seen.contains("free wifi") { continue }
+            if key == "free wifi" {
+                result.removeAll { $0.lowercased() == "wi‑fi" }
+                seen.remove("wi‑fi")
+            }
+            if seen.insert(key).inserted { result.append(item) }
+        }
+        return result
+    }
+
+    private static func cleanFacts(_ values: [ProviderFact]) -> [ProviderFact] {
+        var seen = Set<String>()
+        var result: [ProviderFact] = []
+        for fact in values {
+            guard isSafeHumanText(fact.group),
+                  isSafeHumanText(fact.label),
+                  isSafeHumanText(fact.value) else { continue }
+            let key = "\(fact.group)|\(fact.label)|\(fact.value)".lowercased()
+            guard seen.insert(key).inserted else { continue }
+            result.append(fact)
+        }
+        return result
+    }
+
+    private static func cleanNearby(_ values: [ProviderNearbyPlace]) -> [ProviderNearbyPlace] {
+        var seen = Set<String>()
+        var result: [ProviderNearbyPlace] = []
+
+        for place in values {
+            guard isSafeHumanText(place.name) else { continue }
+            var name = place.name.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let range = name.range(of: " Place, ", options: .caseInsensitive) {
+                let first = String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let second = String(name[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if first.caseInsensitiveCompare(second) == .orderedSame {
+                    name = first
+                }
+            }
+
+            let key = "\(name.lowercased())|\(place.durationMinutes ?? -1)|\(place.distanceText ?? "")"
+            guard seen.insert(key).inserted else { continue }
+            result.append(
+                ProviderNearbyPlace(
+                    id: place.id,
+                    name: name,
+                    distanceText: place.distanceText,
+                    distanceMeters: place.distanceMeters,
+                    durationMinutes: place.durationMinutes,
+                    travelMode: place.travelMode
+                )
+            )
         }
         return result
     }

@@ -76,7 +76,7 @@ async function handleAdmin(request, env, url, user) {
   if (!hotelID) return json({ ok: false, error: 'INVALID_HOTEL_ID' }, 400);
 
   if (parts.length === 1) {
-    if (request.method === 'GET') return hotelDetail(env, hotelID, true);
+    if (request.method === 'GET') return hotelDetail(env, hotelID, true, url);
     if (request.method === 'DELETE') return deleteHotel(env, hotelID);
     return methodNotAllowed();
   }
@@ -113,7 +113,7 @@ async function handleCatalog(request, env, url) {
 
   if (parts.length === 1) {
     if (request.method !== 'GET') return methodNotAllowed();
-    return hotelDetail(env, hotelID, false);
+    return hotelDetail(env, hotelID, false, url);
   }
 
   if (parts.length === 3 && parts[1] === 'translations') {
@@ -224,7 +224,7 @@ async function listHotels(env, url, publishedOnly) {
   return json({ hotels }, 200, publishedOnly ? PUBLIC_CACHE_HEADERS : undefined);
 }
 
-async function hotelDetail(env, hotelID, admin) {
+async function hotelDetail(env, hotelID, admin, url = null) {
   const hotel = await env.HOTELS_DB.prepare(
     `SELECT * FROM hotels WHERE id = ? ${admin ? '' : "AND status = 'published'"}`
   ).bind(hotelID).first();
@@ -313,7 +313,42 @@ async function hotelDetail(env, hotelID, admin) {
     updatedAt: hotel.updated_at
   };
 
+  if (!admin && url) {
+    const requestedLocale = normalizeLocale(url.searchParams.get('locale') || 'en');
+    if (requestedLocale && requestedLocale !== 'en') {
+      try {
+        const source = await hotelDataForTranslation(env, hotelID);
+        if (source) {
+          const translated = await getOrCreateHotelTranslation(env, hotelID, requestedLocale, source);
+          applyHotelTranslation(detail, translated.translation);
+          detail.locale = requestedLocale;
+          detail.translationStatus = translated.cached ? 'cached' : 'generated';
+        }
+      } catch (error) {
+        console.error('HOTEL_DETAIL_TRANSLATION_FAILED', { hotelID, locale: requestedLocale, error: String(error?.message || error) });
+        detail.locale = 'en';
+        detail.translationStatus = 'fallback';
+      }
+    } else {
+      detail.locale = 'en';
+      detail.translationStatus = 'canonical';
+    }
+  }
+
   return json({ ok: true, hotel: detail }, 200, admin ? undefined : PUBLIC_CACHE_HEADERS);
+}
+
+function applyHotelTranslation(detail, translated) {
+  if (!translated || typeof translated !== 'object') return detail;
+  const fields = [
+    'propertyType','address','description','checkIn','checkOut','amenities','policies',
+    'nearby','facts','fees','services','highlights','importantInformation','food',
+    'parkingTransport','accessibility','rooms'
+  ];
+  for (const field of fields) {
+    if (translated[field] != null) detail[field] = translated[field];
+  }
+  return detail;
 }
 
 async function saveHotel(request, env, user) {
@@ -353,25 +388,25 @@ async function persistHotelDraft(draft, env, user, options = {}) {
   }
 
   const country = cleanText(draft.country, 120) || 'Saudi Arabia';
-  const propertyType = cleanText(draft.propertyType, 120);
+  const propertyType = safeHumanText(draft.propertyType, 120);
   const stars = nullableInteger(draft.stars, 1, 5);
   const rating = nullableNumber(draft.rating, 0, 10);
   const ratingScale = nullableNumber(draft.ratingScale, 1, 10);
   const reviewCount = nullableInteger(draft.reviewCount, 0, 100000000);
-  const address = cleanText(draft.address, 900) || '';
-  const description = cleanText(draft.description, 20_000) || '';
+  const address = safeHumanText(draft.address, 900) || '';
+  const description = safeHumanText(draft.description, 20_000) || '';
   const latitude = nullableNumber(draft.latitude, -90, 90);
   const longitude = nullableNumber(draft.longitude, -180, 180);
-  const checkIn = cleanText(draft.checkIn, 120);
-  const checkOut = cleanText(draft.checkOut, 120);
+  const checkIn = safeHumanText(draft.checkIn, 120);
+  const checkOut = safeHumanText(draft.checkOut, 120);
   const policies = uniqueStrings(draft.policies, 260, 900);
   const nearby = safeObjectArray(draft.nearby, 220, 64_000);
   const facts = safeObjectArray(draft.facts, 420, 160_000);
   const fees = safeObjectArray(draft.fees, 220, 80_000);
   const services = uniqueStrings(draft.services, 300, 240);
-  const brand = cleanText(draft.brand, 180);
-  const chainName = cleanText(draft.chain, 180) || cleanText(draft.chainName, 180);
-  const postalCode = cleanText(draft.postalCode, 40);
+  const brand = safeHumanText(draft.brand, 180);
+  const chainName = safeHumanText(draft.chain, 180) || safeHumanText(draft.chainName, 180);
+  const postalCode = safeHumanText(draft.postalCode, 40);
   const highlights = uniqueStrings(draft.highlights, 180, 600);
   const importantInformation = uniqueStrings(draft.importantInformation, 240, 1200);
   const food = safeObjectArray(draft.food, 220, 120_000);
@@ -431,7 +466,7 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     env.HOTELS_DB.prepare('DELETE FROM hotel_translations WHERE hotel_id = ?').bind(id)
   ];
 
-  const amenities = uniqueStrings(draft.amenities, 320, 240);
+  const amenities = canonicalAmenities(draft.amenities, 320);
   amenities.forEach((amenity, index) => {
     statements.push(
       env.HOTELS_DB.prepare('INSERT INTO hotel_amenities (hotel_id, amenity, position) VALUES (?, ?, ?)')
@@ -456,13 +491,13 @@ async function persistHotelDraft(draft, env, user, options = {}) {
         roomName,
         nullableInteger(room?.maxGuests, 1, 30),
         nullableNumber(room?.sizeM2, 1, 3000),
-        cleanText(room?.beds, 300),
-        cleanText(room?.view, 300),
-        cleanText(room?.description, 5000),
+        safeHumanText(room?.beds, 300),
+        safeHumanText(room?.view, 300),
+        safeHumanText(room?.description, 5000),
         JSON.stringify(uniqueStrings(room?.amenities, 100, 220)),
-        cleanText(room?.smoking, 160),
+        safeHumanText(room?.smoking, 160),
         JSON.stringify(uniqueStrings(room?.accessibility, 80, 320)),
-        cleanText(room?.category, 160),
+        safeHumanText(room?.category, 160),
         JSON.stringify(uniqueStrings(room?.bathroom, 100, 320)),
         index
       )
@@ -492,22 +527,22 @@ async function persistHotelDraft(draft, env, user, options = {}) {
         id,
         provider,
         sourceURL,
-        cleanText(source?.name, 300),
+        safeHumanText(source?.name, 300),
         canonicalCity(source?.city) || cleanText(source?.city, 80),
-        cleanText(source?.country, 120),
-        cleanText(source?.propertyType, 120),
-        cleanText(source?.address, 900),
-        cleanText(source?.description, 20_000),
+        safeHumanText(source?.country, 120),
+        safeHumanText(source?.propertyType, 120),
+        safeHumanText(source?.address, 900),
+        safeHumanText(source?.description, 20_000),
         nullableInteger(source?.stars, 1, 5),
         nullableNumber(source?.rating, 0, 10),
         nullableNumber(source?.ratingScale, 1, 10),
         nullableInteger(source?.reviewCount, 0, 100000000),
         nullableNumber(source?.latitude, -90, 90),
         nullableNumber(source?.longitude, -180, 180),
-        cleanText(source?.checkIn, 120),
-        cleanText(source?.checkOut, 120),
+        safeHumanText(source?.checkIn, 120),
+        safeHumanText(source?.checkOut, 120),
         JSON.stringify(uniqueStrings(source?.images, 600, 3000)),
-        JSON.stringify(uniqueStrings(source?.amenities, 240, 240)),
+        JSON.stringify(canonicalAmenities(source?.amenities, 240)),
         JSON.stringify(uniqueStrings(source?.roomNames, 180, 280)),
         JSON.stringify(Array.isArray(source?.rooms) ? source.rooms.filter(r => isPlausibleRoomName(r?.name)).slice(0, 200) : []),
         JSON.stringify(uniqueStrings(source?.policies, 260, 900)),
@@ -557,9 +592,9 @@ async function persistHotelDraft(draft, env, user, options = {}) {
           food_json=?, parking_transport_json=?, accessibility_json=?, raw_identity_json=?
       WHERE hotel_id=? AND LOWER(provider)=LOWER(?) AND source_url=?
     `).bind(
-      cleanText(source?.brand, 180),
-      cleanText(source?.chain, 180) || cleanText(source?.chainName, 180),
-      cleanText(source?.postalCode, 40),
+      safeHumanText(source?.brand, 180),
+      safeHumanText(source?.chain, 180) || safeHumanText(source?.chainName, 180),
+      safeHumanText(source?.postalCode, 40),
       JSON.stringify(uniqueStrings(source?.highlights, 180, 600)),
       JSON.stringify(uniqueStrings(source?.importantInformation, 240, 1200)),
       JSON.stringify(safeObjectArray(source?.food, 220, 120_000)),
@@ -1731,12 +1766,75 @@ function nullableNumber(value, min, max) {
   return number;
 }
 
+
+function isStructuredNoiseText(value) {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const tokens = [
+    '\\"', '__typename', 'agencybusinessmodels', 'availability_group',
+    'bedroomfilter', 'bed_type_group', 'startdate', 'trip-type',
+    'shoppingproductcontent', 'egdsplaintext'
+  ];
+  if (tokens.some(token => lower.includes(token))) return true;
+  if (text.includes('{') && (text.includes('"') || text.includes(':'))) return true;
+  if (text.includes('[') && text.includes('"')) return true;
+  if (lower.includes('see all about this property') && lower.includes('explore the area')) return true;
+  if (lower.includes('free wififree cribs') || lower.includes('breakfast for a feerestaurant')) return true;
+  return false;
+}
+
+function safeHumanText(value, maxLength = 1200) {
+  const text = cleanText(value, maxLength);
+  if (!text || isStructuredNoiseText(text)) return null;
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function canonicalAmenity(value) {
+  const text = safeHumanText(value, 240);
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  if (/free wi[- ]?fi|complimentary wi[- ]?fi/.test(lower)) return 'Free WiFi';
+  if (/wi[- ]?fi|wireless internet/.test(lower)) return 'Wi‑Fi';
+  if (/restaurants?/.test(lower)) return 'Restaurant';
+  if (/coffee shop|café|cafe/.test(lower)) return 'Coffee shop';
+  if (/24[- ]hour front desk|24 hour front desk/.test(lower)) return '24-hour front desk';
+  if (/fitness cent(?:er|re)|\bgym\b/.test(lower)) return 'Fitness center';
+  if (/swimming pool|outdoor pool|indoor pool/.test(lower)) return 'Swimming pool';
+  if (/airport shuttle|shuttle service/.test(lower)) return 'Airport shuttle';
+  if (/valet parking/.test(lower)) return 'Valet parking';
+  if (/luggage storage|baggage storage/.test(lower)) return 'Luggage storage';
+  return text;
+}
+
+function canonicalAmenities(value, maxItems = 320) {
+  if (!Array.isArray(value)) return [];
+  const result = [];
+  const seen = new Set();
+  for (const raw of value) {
+    const item = canonicalAmenity(raw);
+    if (!item) continue;
+    const key = item.toLowerCase();
+    if (key === 'wi‑fi' && seen.has('free wifi')) continue;
+    if (key === 'free wifi') {
+      const index = result.findIndex(x => x.toLowerCase() === 'wi‑fi');
+      if (index >= 0) result.splice(index, 1);
+      seen.delete('wi‑fi');
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+    if (result.length >= maxItems) break;
+  }
+  return result;
+}
+
 function uniqueStrings(value, maxItems, maxLength) {
   if (!Array.isArray(value)) return [];
   const result = [];
   const seen = new Set();
   for (const item of value) {
-    const text = cleanText(item, maxLength);
+    const text = safeHumanText(item, maxLength);
     if (!text) continue;
     const key = text.toLowerCase();
     if (seen.has(key)) continue;
@@ -1756,14 +1854,19 @@ function safeObjectArray(value, maxItems = 120, maxBytes = 30_000) {
   for (const item of value) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const clean = {};
+    let rejected = false;
     for (const [key, raw] of Object.entries(item)) {
       const safeKey = String(key).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
       if (!safeKey) continue;
-      if (typeof raw === 'string') clean[safeKey] = cleanText(raw, 1200);
-      else if (typeof raw === 'number' && Number.isFinite(raw)) clean[safeKey] = raw;
+      if (typeof raw === 'string') {
+        const text = safeHumanText(raw, 1200);
+        if (!text && String(raw || '').trim()) { rejected = true; break; }
+        clean[safeKey] = text;
+      } else if (typeof raw === 'number' && Number.isFinite(raw)) clean[safeKey] = raw;
       else if (typeof raw === 'boolean') clean[safeKey] = raw;
       else if (raw == null) clean[safeKey] = null;
     }
+    if (rejected) continue;
     const encoded = JSON.stringify(clean);
     if (encoded === '{}' || used + encoded.length > maxBytes) continue;
     const signature = encoded.toLowerCase();

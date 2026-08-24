@@ -530,6 +530,20 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const sourceURL = '\(escapedURL)';
           const clean = s => String(s || '').replace(/\\s+/g, ' ').trim();
           const lower = s => clean(s).toLowerCase();
+          const structuredNoise = value => {
+            const t = clean(value);
+            if (!t) return true;
+            if (/(?:\\\\\"|__typename|agencyBusinessModels|availability_group|bedroomFilter|bed_type_group|startDate|trip-Type|ShoppingProductContent|EGDSPlainText)/i.test(t)) return true;
+            if (/[{[]/.test(t) && /["':]/.test(t)) return true;
+            if ((t.match(/\\\"/g) || []).length >= 2) return true;
+            if (/(?:See all about this property.*Explore the area|Free WiFiFree cribs|breakfast for a feeRestaurant|Children and extra bedsChildren)/i.test(t)) return true;
+            return false;
+          };
+          const safeText = (value, max = 1200) => {
+            const t = clean(value);
+            if (!t || structuredNoise(t)) return null;
+            return t.slice(0, max);
+          };
           const uniq = arr => {
             const seen = new Set();
             const out = [];
@@ -717,6 +731,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           // Do not let guest-review prose leak into facilities, policies, fees or room/property facts.
           const propertyRoot = document.body?.cloneNode(true);
           if (propertyRoot?.querySelectorAll) {
+            // Detached clones otherwise expose embedded React/GraphQL JSON through textContent.
+            for (const node of propertyRoot.querySelectorAll('script,style,noscript,template,svg,canvas,[hidden],[aria-hidden="true"]')) node.remove();
             for (const node of propertyRoot.querySelectorAll('[data-stid*="review" i],[data-testid*="review" i],[id*="review" i],nav,footer')) node.remove();
             for (const node of propertyRoot.querySelectorAll('[data-stid*="recommend" i],[data-testid*="recommend" i],[data-stid*="similar" i],[data-testid*="similar" i],[data-stid*="search-result" i],[data-testid*="search-result" i]')) node.remove();
             for (const section of propertyRoot.querySelectorAll('section,article')) {
@@ -764,11 +780,37 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           }
 
           const amenities = [];
+          const canonicalAmenity = value => {
+            const t = safeText(value, 100);
+            if (!t) return null;
+            const l = lower(t);
+            const pairs = [
+              [/free wi[- ]?fi|complimentary wi[- ]?fi/, 'Free WiFi'],
+              [/wi[- ]?fi|wireless internet/, 'Wi‑Fi'],
+              [/24[- ]hour front desk|24 hour front desk/, '24-hour front desk'],
+              [/restaurants?/, 'Restaurant'],
+              [/coffee shop|café|cafe/, 'Coffee shop'],
+              [/fitness cent(?:er|re)|\\bgym\\b/, 'Fitness center'],
+              [/swimming pool|outdoor pool|indoor pool/, 'Swimming pool'],
+              [/airport shuttle|shuttle service/, 'Airport shuttle'],
+              [/valet parking/, 'Valet parking'],
+              [/luggage storage|baggage storage/, 'Luggage storage'],
+              [/business cent(?:er|re)/, 'Business center'],
+              [/facilities for disabled guests|wheelchair accessible/, 'Accessibility']
+            ];
+            for (const [pattern, label] of pairs) if (pattern.test(l)) return label;
+            return t;
+          };
           const addAmenity = value => {
-            const t = clean(value);
+            const t = canonicalAmenity(value);
             if (!t || t.length < 2 || t.length > 100) return;
             if (/reviews?|guest review|room type|availability|price|select|reserve|booking|expedia/i.test(t)) return;
-            amenities.push(t);
+            const key = t.toLowerCase();
+            if (key === 'wi‑fi' && amenities.some(x => x.toLowerCase() === 'free wifi')) return;
+            if (key === 'free wifi') {
+              for (let i = amenities.length - 1; i >= 0; i -= 1) if (amenities[i].toLowerCase() === 'wi‑fi') amenities.splice(i, 1);
+            }
+            if (!amenities.some(x => x.toLowerCase() === key)) amenities.push(t);
           };
           const featureValues = hotel.amenityFeature;
           const featureWalk = value => {
@@ -790,7 +832,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           }
           const commonAmenityMap = [
             ['Free WiFi', ['free wifi','free wi-fi']], ['Wi‑Fi', ['wifi','wi-fi']], ['Breakfast', ['breakfast']],
-            ['Restaurant', ['restaurant']], ['Restaurants', ['restaurants']], ['Bar and lounge', ['bar and lounge','bar/lounge','lounge bar']],
+            ['Restaurant', ['restaurant','restaurants']], ['Bar and lounge', ['bar and lounge','bar/lounge','lounge bar']],
             ['Coffee shop', ['coffee shop','cafe','café']], ['Room service', ['room service']], ['Family rooms', ['family rooms']],
             ['Non-smoking rooms', ['non-smoking rooms']], ['24-hour front desk', ['24-hour front desk','24 hour front desk']],
             ['Concierge', ['concierge']], ['Luggage storage', ['luggage storage','baggage storage']], ['Tour desk', ['tour desk']],
@@ -806,21 +848,61 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
           const roomCandidates = [];
           const roomSeen = new Set();
+          const scalarFrom = (object, paths) => {
+            for (const path of paths) {
+              let value = object;
+              for (const part of path.split('.')) value = value && typeof value === 'object' ? value[part] : null;
+              if (value != null && (typeof value === 'string' || typeof value === 'number')) {
+                const text = safeText(value, 300);
+                if (text) return text;
+              }
+            }
+            return null;
+          };
+          const collectNamedValues = (value, keyPattern, depth = 0, out = []) => {
+            if (!value || depth > 5 || out.length >= 24) return out;
+            if (Array.isArray(value)) {
+              for (const child of value.slice(0, 30)) collectNamedValues(child, keyPattern, depth + 1, out);
+              return out;
+            }
+            if (typeof value !== 'object') return out;
+            for (const [key, child] of Object.entries(value).slice(0, 80)) {
+              if (keyPattern.test(key)) {
+                if (typeof child === 'string' || typeof child === 'number') {
+                  const text = safeText(child, 180);
+                  if (text) out.push(text);
+                } else if (child && typeof child === 'object') {
+                  const text = safeText(child.name || child.label || child.value || child.description, 180);
+                  if (text) out.push(text);
+                }
+              }
+              if (child && typeof child === 'object') collectNamedValues(child, keyPattern, depth + 1, out);
+            }
+            return out;
+          };
           const roomKeyword = /(room|suite|king|queen|twin|triple|quad|family|deluxe|superior|classic|standard|executive|studio|premier|номер|люкс|غرفة|جناح)/i;
           const blockedRoom = /(how much|parking|breakfast|restaurant|front desk|concierge|room service|meeting room|prayer room|laundry room|locker room|non-smoking rooms|family rooms|guest rooms|choose your room|select room|room amenities|frequently asked|question|answer|policy|check[ -]?in|check[ -]?out)/i;
-          const addRoom = (rawName, container) => {
-            const roomName = clean(rawName);
+          const addRoom = (rawName, container, structured = null) => {
+            const roomName = safeText(rawName, 180);
             if (!roomName || roomName.length < 4 || roomName.length > 180 || roomName.endsWith('?') || roomName.endsWith('؟') || roomName.split(/\\s+/).length > 24 || !roomKeyword.test(roomName) || blockedRoom.test(roomName)) return;
             const key = roomName.toLowerCase();
             if (roomSeen.has(key)) return;
             roomSeen.add(key);
 
-            const context = clean(container?.innerText || container?.textContent || '').slice(0, 2500);
+            const rawContext = clean(container?.innerText || container?.textContent || '').slice(0, 2500);
+            const context = structuredNoise(rawContext) ? '' : rawContext;
             const bedMatch = context.match(/(?:[0-9]+\\s*)?(?:king|queen|twin|double|single)\\s*(?:bed|beds)|[0-9]+\\s*(?:twin|double|single)\\s*beds?/i);
             const guestMatch = context.match(/(?:sleeps?|guests?|adults?)\\s*[:]?\\s*([0-9]+)/i);
             const metricSize = context.match(/([0-9]{1,4}(?:[.,][0-9]+)?)\\s*(?:m²|m2|sq\\.?\\s*m|square metres?)/i);
             const feetSize = context.match(/([0-9]{2,5})\\s*(?:ft²|sq\\.?\\s*ft|square feet)/i);
-            let sizeM2 = metricSize ? Number(metricSize[1].replace(',', '.')) : null;
+            const structuredGuests = structured ? integerFrom(
+              scalarFrom(structured, ['maxGuests','maxOccupancy','occupancy.max','occupancy.maxGuests','sleeps','capacity','maxPersons'])
+            ) : null;
+            const structuredSize = structured ? numberFrom(
+              scalarFrom(structured, ['sizeM2','area.squareMeters','area.value','roomSize.value','size.value'])
+            ) : null;
+            const structuredBeds = structured ? uniq(collectNamedValues(structured, /bed|bedding/i)).slice(0, 4).join(' · ') : '';
+            let sizeM2 = structuredSize ?? (metricSize ? Number(metricSize[1].replace(',', '.')) : null);
             if (sizeM2 == null && feetSize) sizeM2 = Math.round(Number(feetSize[1]) * 0.092903 * 10) / 10;
             const viewMatch = context.match(/(?:landmark|city|kaaba|kabba|haram|mountain|courtyard|sea|garden)\\s+view|view\\s+of\\s+[^,.|]{2,80}/i);
 
@@ -851,9 +933,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             roomCandidates.push({
               id: crypto.randomUUID(),
               name: roomName,
-              maxGuests: guestMatch ? Number(guestMatch[1]) : null,
+              maxGuests: structuredGuests ?? (guestMatch ? Number(guestMatch[1]) : null),
               sizeM2: Number.isFinite(sizeM2) ? sizeM2 : null,
-              beds: bedMatch ? clean(bedMatch[0]) : null,
+              beds: structuredBeds || (bedMatch ? clean(bedMatch[0]) : null),
               view: viewMatch ? clean(viewMatch[0]) : null,
               description: context && context !== roomName ? context.slice(0, 1200) : null,
               amenities: uniq(roomAmenities),
@@ -879,6 +961,45 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             }
           }
 
+          // Provider markup changes frequently. Room cards are still recognizable by
+          // property-specific "Room options" sections and occupancy/bed/size context.
+          for (const section of document.querySelectorAll('section,article')) {
+            const heading = clean(section.querySelector('h1,h2,[role="heading"]')?.innerText || '');
+            if (!/(room options|available rooms|choose your room|select a room|rooms and rates|room types|номера)/i.test(heading)) continue;
+            for (const el of section.querySelectorAll('h2,h3,h4,[role="heading"]')) {
+              const text = clean(el.innerText || el.textContent || '');
+              if (text === heading) continue;
+              let container = el.parentElement;
+              let context = '';
+              for (let depth = 0; container && depth < 9; depth += 1, container = container.parentElement) {
+                const candidateContext = clean(container.innerText || container.textContent || '');
+                if (candidateContext.length > 2800) continue;
+                if (/(sleeps?|guests?|beds?|sq\\.?\\s*ft|ft²|m²|view prices|more details|free wi[- ]?fi)/i.test(candidateContext)) {
+                  context = candidateContext;
+                  break;
+                }
+              }
+              if (!context) continue;
+              addRoom(text, container || el.parentElement);
+            }
+          }
+
+          // Expedia can keep actual sellable room types in GraphQL/application state
+          // before the room cards are rendered. Only consume objects with explicit room signals.
+          for (const item of allJSON) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+            const type = lower(typeText(item['@type'] || item.__typename || item.type || item.contentType || ''));
+            const keys = Object.keys(item).join(' ').toLowerCase();
+            const roomSignal = /room|suite|unit|accommodation/.test(type) ||
+              /(roomtypename|roomtype|room_name|roomname|unitname|bedgroup|bedding|occupancy|maxoccupancy|sleeps|roomsize)/.test(keys);
+            if (!roomSignal) continue;
+            const candidateName = safeText(
+              item.roomTypeName || item.roomName || item.unitName || item.displayName || item.name || item.title || item.heading,
+              180
+            );
+            if (candidateName) addRoom(candidateName, null, item);
+          }
+
           const offerWalk = value => {
             if (!value) return;
             if (Array.isArray(value)) { value.forEach(offerWalk); return; }
@@ -895,8 +1016,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const roomNames = roomCandidates.map(r => r.name);
           const policies = [];
           const addPolicy = value => {
-            const t = clean(value);
-            if (t && t.length >= 4 && t.length <= 450) policies.push(t);
+            const t = safeText(value, 450);
+            if (t && t.length >= 4 && t.length <= 450 && !/(see all|learn more|property cla$)/i.test(t)) policies.push(t);
           };
           if (checkIn) addPolicy(`Check-in: ${checkIn}`);
           if (checkOut) addPolicy(`Check-out: ${checkOut}`);
@@ -916,8 +1037,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const nearby = [];
           const nearbySeen = new Set();
           const addNearby = (rawName, rawDistance, rawDuration, rawMode) => {
-            let placeName = clean(rawName);
+            let placeName = safeText(rawName, 140);
             if (!placeName || placeName.length < 2 || placeName.length > 140) return;
+            const repeatedPlace = placeName.match(/^(.+?)\\s+Place,\\s+(.+)$/i);
+            if (repeatedPlace && lower(repeatedPlace[1]) === lower(repeatedPlace[2])) placeName = clean(repeatedPlace[1]);
             if (/reviews?|check availability|see all|show all|sign in|price|room|breakfast|parking$/i.test(placeName)) return;
             const distanceText = clean(rawDistance) || null;
             const durationMinutes = rawDuration == null ? null : Number(rawDuration);
@@ -960,11 +1083,11 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const facts = [];
           const factSeen = new Set();
           const addFact = (group, label, value) => {
-            const g = clean(group) || 'Property';
-            const l = clean(label);
-            const v = clean(value);
+            const g = safeText(group, 120) || 'Property';
+            const l = safeText(label, 160);
+            const v = safeText(value, 900);
             if (!l || !v || l.length > 160 || v.length > 900) return;
-            if (/guest reviews?|reviews from|see all reviews|verified reviews|write a review/i.test(`${g} ${l}`)) return;
+            if (/guest reviews?|reviews from|see all reviews|verified reviews|write a review|see all about this property|explore the area|view in a map/i.test(`${g} ${l} ${v}`)) return;
             const key = `${g}|${l}|${v}`.toLowerCase();
             if (factSeen.has(key)) return;
             factSeen.add(key);
@@ -977,8 +1100,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             if (!heading || !sectionKeywords.test(heading) || /review/i.test(heading)) continue;
             const rows = [...section.querySelectorAll('li,[role="listitem"],dt,dd,p')].slice(0, 80);
             for (const row of rows) {
-              const text = clean(row.innerText || row.textContent || '');
-              if (text.length < 2 || text.length > 320 || /review/i.test(text)) continue;
+              const text = safeText(row.innerText || row.textContent || '', 320);
+              if (!text || text.length < 2 || text.length > 320 || /review/i.test(text)) continue;
               const parts = text.split(/\\s{2,}|:\\s+/).map(clean).filter(Boolean);
               if (parts.length >= 2) addFact(heading, parts[0], parts.slice(1).join(' · '));
               else addFact(heading, text, 'Yes');
@@ -994,7 +1117,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           ];
           for (const pattern of propertyStatements) {
             for (const match of (bodyText.match(pattern) || []).slice(0, 8)) {
-              const text = clean(match);
+              const text = safeText(match, 180);
+              if (!text) continue;
               if (/breakfast|restaurant/i.test(text)) addFact('Food & drink', text, 'Yes');
               else if (/parking|shuttle/i.test(text)) addFact('Parking & transport', text, 'Yes');
               else addFact('Property highlights', text, 'Yes');
@@ -1011,7 +1135,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const fees = [];
           const feeSeen = new Set();
           const addFee = text => {
-            const v = clean(text);
+            const v = safeText(text, 500);
             if (!v || v.length < 4 || v.length > 500 || !/(fee|charge|cost|sar|usd|per day|per night|deposit|parking)/i.test(v)) return;
             if (/room price|price per|total price|taxes and fees included|availability/i.test(v)) return;
             const key = v.toLowerCase();
@@ -1130,7 +1254,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
               providerHotelID: providerHotelID || '',
               canonicalURL: canonicalURL || '',
               schemaType: typeText(hotel['@type'] || hotel.__typename || hotel.type),
-              extractionStrategy: 'jsonld+embedded-state+scoped-dom-v2'
+              extractionStrategy: 'jsonld+embedded-state+scoped-dom-v3'
             }
           };
           return JSON.stringify(result);
