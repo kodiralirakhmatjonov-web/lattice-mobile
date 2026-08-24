@@ -599,9 +599,22 @@ struct HotelReviewView: View {
                     }
                     ProgressView(value: Double(job.progress), total: 100)
                         .tint(.black)
-                    Text("Фото: \(job.storedImages)/\(job.totalImages) · \(job.stage)")
+                    Text(importProgressText(job))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let warning = job.warning, !warning.isEmpty {
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let error = job.error, job.status == "failed" {
+                        Text(error)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(12)
                 .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -640,6 +653,27 @@ struct HotelReviewView: View {
         .padding(14)
         .businessCard(radius: 28)
     }
+    private func importProgressText(_ job: HotelImportJob) -> String {
+        let stage: String
+        switch job.stage {
+        case "queued", "retry_queued": stage = "в очереди"
+        case "preparing_media": stage = "подготовка фотографий"
+        case "downloading_image": stage = "скачивание"
+        case "optimizing_image": stage = "сжатие"
+        case "saving_to_r2": stage = "сохранение в R2"
+        case "media_progress": stage = "обработка фотографий"
+        case "image_retry_exhausted": stage = "одна фотография недоступна, продолжаем"
+        case "completed_with_warnings": stage = "завершено с предупреждением"
+        case "completed": stage = "завершено"
+        case "integrity_failed": stage = "проверка целостности не пройдена"
+        default: stage = job.stage.replacingOccurrences(of: "_", with: " ")
+        }
+        var value = "Фото: \(job.storedImages)/\(job.totalImages) · \(stage)"
+        if let current = job.currentImage, current > 0, job.isActive { value += " · №\(current)/\(job.totalImages)" }
+        if let label = job.currentImageLabel, !label.isEmpty, job.isActive { value += " · \(label)" }
+        return value
+    }
+
     private func submit(_ draft: HotelDraft, allowPossibleDuplicate: Bool) {
         let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty
         publishing = true

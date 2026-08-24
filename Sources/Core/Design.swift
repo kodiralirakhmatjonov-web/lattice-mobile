@@ -49,3 +49,24 @@ struct BusinessBrandLogo: View {
 extension View {
     func businessCard(radius: CGFloat = 28) -> some View { modifier(BusinessCardModifier(radius: radius)) }
 }
+
+
+private struct BusinessGlassModifier<S: Shape>: ViewModifier {
+    let shape: S
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background(.ultraThinMaterial, in: shape)
+                .overlay(shape.stroke(Color.white.opacity(0.55), lineWidth: 0.7))
+        }
+    }
+}
+
+extension View {
+    func businessGlass<S: Shape>(in shape: S) -> some View {
+        modifier(BusinessGlassModifier(shape: shape))
+    }
+}

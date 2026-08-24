@@ -9,6 +9,7 @@ struct HotelsView: View {
     @State private var cloudHealth: HotelCloudHealthResponse?
     @State private var backendMessage: String?
     @State private var importJobs: [HotelImportJob] = []
+    @State private var importJobsError: String?
 
     var body: some View {
         ScrollView {
@@ -63,7 +64,7 @@ struct HotelsView: View {
                 .padding(14)
                 .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                if !importJobs.isEmpty {
+                if !importJobs.isEmpty || importJobsError != nil {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text("Импорты").font(.title2.bold())
@@ -74,6 +75,11 @@ struct HotelsView: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
                             }
+                        }
+                        if let importJobsError {
+                            Label(importJobsError, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         ForEach(Array(importJobs.prefix(10))) { job in
                             importJobCard(job)
@@ -181,8 +187,15 @@ struct HotelsView: View {
         do {
             async let healthRequest = APIClient.shared.hotelCloudHealth()
             async let hotelsRequest = APIClient.shared.hotels()
+            async let jobsRequest = APIClient.shared.hotelImportJobs()
             cloudHealth = try await healthRequest
             hotels = try await hotelsRequest
+            do {
+                importJobs = try await jobsRequest
+                importJobsError = nil
+            } catch {
+                importJobsError = "Не удалось получить прогресс импортов: \(error.localizedDescription)"
+            }
         } catch {
             backendUnavailable = true
             backendMessage = error.localizedDescription
@@ -194,10 +207,14 @@ struct HotelsView: View {
     @MainActor
     private func monitorImports() async {
         while !Task.isCancelled {
-            if let jobs = try? await APIClient.shared.hotelImportJobs() {
+            do {
+                let jobs = try await APIClient.shared.hotelImportJobs()
                 importJobs = jobs
+                importJobsError = nil
                 await BusinessNotifications.trackActiveHotelImports(jobs)
                 await BusinessNotifications.notifyUnseenTerminalJobs(jobs)
+            } catch {
+                importJobsError = "Прогресс временно недоступен: \(error.localizedDescription)"
             }
             let hasActive = importJobs.contains(where: \.isActive)
             try? await Task.sleep(nanoseconds: UInt64(hasActive ? 2_000_000_000 : 8_000_000_000))
@@ -240,10 +257,16 @@ struct HotelsView: View {
             if job.isActive {
                 ProgressView(value: Double(job.progress), total: 100).tint(.black)
             }
-            Text("\(job.storedImages)/\(job.totalImages) фото · \(job.stage)" + ((job.retryCount ?? 0) > 0 ? " · retry \(job.retryCount ?? 0)" : ""))
+            Text(importStageDetail(job))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .lineLimit(3)
+            if let warning = job.warning, !warning.isEmpty {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let error = job.error, job.status == "failed" {
                 Text(error)
                     .font(.caption2)
@@ -258,11 +281,39 @@ struct HotelsView: View {
     private func importStatusText(_ job: HotelImportJob) -> String {
         switch job.status {
         case "queued": return "В очереди"
-        case "running": return "Выполняется"
-        case "completed": return job.publishWhenComplete ? "Завершён · published" : "Завершён · draft ready"
+        case "running": return "Фоновая загрузка"
+        case "completed": return job.stage == "completed_with_warnings" ? "Готово · с предупреждением" : (job.publishWhenComplete ? "Готово · опубликован" : "Готово · черновик")
         case "failed": return "Ошибка · можно повторить"
         default: return job.status
         }
+    }
+
+    private func importStageDetail(_ job: HotelImportJob) -> String {
+        let stage: String
+        switch job.stage {
+        case "queued", "retry_queued": stage = "ожидает серверную очередь"
+        case "preparing_media": stage = "подготавливаем фотографии"
+        case "downloading_image": stage = "скачиваем исходную фотографию"
+        case "optimizing_image": stage = "сжимаем фотографию"
+        case "saving_to_r2": stage = "сохраняем в R2"
+        case "media_progress": stage = "обрабатываем следующие фотографии"
+        case "image_retry_exhausted": stage = "одна фотография недоступна, продолжаем"
+        case "completed": stage = "импорт завершён"
+        case "completed_with_warnings": stage = "импорт завершён с предупреждением"
+        case "integrity_failed": stage = "проверка целостности не пройдена"
+        case "start_failed": stage = "не удалось запустить Cloudflare Workflow"
+        default: stage = job.stage.replacingOccurrences(of: "_", with: " ")
+        }
+        var parts = ["\(job.storedImages)/\(job.totalImages) фото", stage]
+        if let current = job.currentImage, current > 0, job.isActive {
+            parts.append("№\(current) из \(job.totalImages)")
+        }
+        if let label = job.currentImageLabel, !label.isEmpty, job.isActive { parts.append(label) }
+        if let mode = job.compressionMode, !mode.isEmpty {
+            parts.append(mode == "provider-sized-fallback-v1" ? "provider-compressed" : "WebP")
+        }
+        if (job.retryCount ?? 0) > 0 { parts.append("retry \(job.retryCount ?? 0)") }
+        return parts.joined(separator: " · ")
     }
 }
 

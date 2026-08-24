@@ -58,6 +58,52 @@ actor APIClient {
         return try decoder.decode(ChatsResponse.self, from: data).threads
     }
 
+    func businessChatThreads() async throws -> [BusinessChatThreadSummary] {
+        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats"))
+        try validate(response, data: data)
+        return try decoder.decode(BusinessChatThreadsResponse.self, from: data).threads
+    }
+
+    func businessChatMessages(bookingID: String) async throws -> [BusinessChatMessage] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats/\(bookingID)/messages")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessChatMessagesResponse.self, from: data).messages
+    }
+
+    func sendBusinessChatMessage(bookingID: String, body: String, clientMessageID: String) async throws -> BusinessChatMessage {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats/\(bookingID)/messages"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(SendBusinessChatMessagePayload(body: body, clientMessageID: clientMessageID))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessChatMessageResponse.self, from: data).message
+    }
+
+    func markBusinessChatRead(bookingID: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats/\(bookingID)/read"))
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+    }
+
+    func registerPushDevice(token: String, environment: String = "production") async throws -> PushDeviceRegistrationResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/push/devices"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(PushDeviceRegistrationPayload(deviceToken: token, environment: environment))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(PushDeviceRegistrationResponse.self, from: data)
+    }
+
+    func pushStatus() async throws -> PushStatusResponse {
+        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/push/status"))
+        try validate(response, data: data)
+        return try decoder.decode(PushStatusResponse.self, from: data)
+    }
+
     func hotels() async throws -> [HotelListItem] {
         let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels"))
         try validate(response, data: data)

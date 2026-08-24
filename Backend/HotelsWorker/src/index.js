@@ -72,6 +72,14 @@ async function handleAdmin(request, env, url, user) {
     return methodNotAllowed();
   }
 
+  if (parts[0] === 'chats') {
+    return handleBusinessChats(request, env, parts.slice(1), user);
+  }
+
+  if (parts[0] === 'push') {
+    return handleBusinessPush(request, env, parts.slice(1), user);
+  }
+
   const hotelID = safeID(parts[0]);
   if (!hotelID) return json({ ok: false, error: 'INVALID_HOTEL_ID' }, 400);
 
@@ -93,6 +101,200 @@ async function handleAdmin(request, env, url, user) {
   }
 
   return json({ ok: false, error: 'NOT_FOUND' }, 404);
+}
+
+
+async function handleBusinessChats(request, env, parts, user) {
+  if (parts.length === 0 && request.method === 'GET') return listBusinessChatThreads(env);
+  const bookingID = safeID(parts[0]);
+  if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
+  if (parts.length === 1 && request.method === 'GET') return chatMessages(env, bookingID);
+  if (parts.length === 2 && parts[1] === 'messages') {
+    if (request.method === 'GET') return chatMessages(env, bookingID);
+    if (request.method === 'POST') return sendChatMessage(request, env, bookingID, user);
+  }
+  if (parts.length === 2 && parts[1] === 'read' && request.method === 'POST') {
+    await env.HOTELS_DB.batch([
+      env.HOTELS_DB.prepare('UPDATE business_chat_messages SET read_by_staff=1 WHERE booking_id=?').bind(bookingID),
+      env.HOTELS_DB.prepare('UPDATE business_chat_threads SET unread_for_staff=0, updated_at=? WHERE booking_id=?').bind(new Date().toISOString(), bookingID)
+    ]);
+    return json({ ok: true });
+  }
+  return methodNotAllowed();
+}
+
+async function listBusinessChatThreads(env) {
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT booking_id, last_message_at, last_message_preview, last_sender_type, unread_for_staff, updated_at
+    FROM business_chat_threads
+    ORDER BY COALESCE(last_message_at, updated_at) DESC
+    LIMIT 300
+  `).all();
+  return json({
+    ok: true,
+    threads: (result.results || []).map(row => ({
+      bookingID: row.booking_id,
+      lastMessageAt: row.last_message_at || row.updated_at,
+      lastMessagePreview: row.last_message_preview || '',
+      lastSenderType: row.last_sender_type || null,
+      unreadForStaff: Number(row.unread_for_staff || 0) === 1
+    }))
+  });
+}
+
+async function chatMessages(env, bookingID) {
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT id, booking_id, sender_type, sender_name, body, created_at, read_by_staff
+    FROM business_chat_messages WHERE booking_id=? ORDER BY created_at ASC LIMIT 500
+  `).bind(bookingID).all();
+  return json({
+    ok: true,
+    bookingID,
+    messages: (result.results || []).map(row => ({
+      id: row.id,
+      bookingID: row.booking_id,
+      senderType: row.sender_type,
+      senderName: row.sender_name || null,
+      body: row.body,
+      createdAt: row.created_at,
+      readByStaff: Number(row.read_by_staff || 0) === 1
+    }))
+  });
+}
+
+async function sendChatMessage(request, env, bookingID, user) {
+  const payload = await request.json().catch(() => null);
+  const body = safeHumanText(payload?.body, 4000);
+  if (!body) return json({ ok: false, error: 'EMPTY_MESSAGE' }, 400);
+  const clientMessageID = safeID(payload?.clientMessageID) || null;
+  if (clientMessageID) {
+    const existing = await env.HOTELS_DB.prepare('SELECT id FROM business_chat_messages WHERE booking_id=? AND client_message_id=? LIMIT 1')
+      .bind(bookingID, clientMessageID).first();
+    if (existing?.id) return chatMessageDetail(env, existing.id, 200);
+  }
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const senderName = safeHumanText(user?.displayName || user?.login || 'iumrah Business', 160) || 'iumrah Business';
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`
+      INSERT INTO business_chat_threads (booking_id, created_at, updated_at, last_message_at, last_message_preview, last_sender_type, unread_for_staff)
+      VALUES (?, ?, ?, ?, ?, 'staff', 0)
+      ON CONFLICT(booking_id) DO UPDATE SET updated_at=excluded.updated_at, last_message_at=excluded.last_message_at,
+        last_message_preview=excluded.last_message_preview, last_sender_type='staff', unread_for_staff=0
+    `).bind(bookingID, now, now, now, body.slice(0, 240)),
+    env.HOTELS_DB.prepare(`
+      INSERT INTO business_chat_messages (id, booking_id, sender_type, sender_name, body, created_at, read_by_staff, client_message_id)
+      VALUES (?, ?, 'staff', ?, ?, ?, 1, ?)
+    `).bind(id, bookingID, senderName, body, now, clientMessageID)
+  ]);
+  return chatMessageDetail(env, id, 201);
+}
+
+async function chatMessageDetail(env, id, status = 200) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM business_chat_messages WHERE id=?').bind(id).first();
+  if (!row) return json({ ok: false, error: 'MESSAGE_NOT_FOUND' }, 404);
+  return json({ ok: true, message: {
+    id: row.id,
+    bookingID: row.booking_id,
+    senderType: row.sender_type,
+    senderName: row.sender_name || null,
+    body: row.body,
+    createdAt: row.created_at,
+    readByStaff: Number(row.read_by_staff || 0) === 1
+  }}, status);
+}
+
+async function handleBusinessPush(request, env, parts, user) {
+  if (parts.length === 1 && parts[0] === 'devices' && request.method === 'POST') {
+    const payload = await request.json().catch(() => null);
+    const token = cleanText(payload?.deviceToken, 256)?.toLowerCase();
+    if (!token || !/^[0-9a-f]{32,256}$/.test(token)) return json({ ok: false, error: 'INVALID_DEVICE_TOKEN' }, 400);
+    const environment = payload?.environment === 'development' ? 'development' : 'production';
+    const now = new Date().toISOString();
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO business_push_devices (device_token, staff_login, environment, app_bundle_id, enabled, created_at, updated_at, last_error)
+      VALUES (?, ?, ?, 'com.iumrah.business', 1, ?, ?, NULL)
+      ON CONFLICT(device_token) DO UPDATE SET staff_login=excluded.staff_login, environment=excluded.environment,
+        app_bundle_id=excluded.app_bundle_id, enabled=1, updated_at=excluded.updated_at, last_error=NULL
+    `).bind(token, cleanText(user?.login, 180), environment, now, now).run();
+    return json({ ok: true, ready: apnsConfigured(env) });
+  }
+  if (parts.length === 1 && parts[0] === 'status' && request.method === 'GET') {
+    const row = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM business_push_devices WHERE enabled=1').first();
+    return json({ ok: true, configured: apnsConfigured(env), devices: Number(row?.count || 0) });
+  }
+  return methodNotAllowed();
+}
+
+function apnsConfigured(env) {
+  return !!(env.APNS_PRIVATE_KEY && env.APNS_KEY_ID && env.APPLE_TEAM_ID);
+}
+
+async function sendStaffPush(env, title, body, data = {}) {
+  if (!apnsConfigured(env)) return { ok: false, skipped: 'APNS_NOT_CONFIGURED' };
+  const devices = await env.HOTELS_DB.prepare('SELECT device_token, environment FROM business_push_devices WHERE enabled=1 LIMIT 100').all();
+  const rows = devices.results || [];
+  if (!rows.length) return { ok: false, skipped: 'NO_DEVICES' };
+  const jwt = await apnsJWT(env);
+  let sent = 0;
+  for (const device of rows) {
+    const base = device.environment === 'development' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com';
+    const response = await fetch(`${base}/3/device/${device.device_token}`, {
+      method: 'POST',
+      headers: {
+        authorization: `bearer ${jwt}`,
+        'apns-topic': 'com.iumrah.business',
+        'apns-push-type': 'alert',
+        'apns-priority': '10',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ aps: { alert: { title, body }, sound: 'default' }, ...data })
+    }).catch(() => null);
+    if (response?.ok) {
+      sent += 1;
+      await env.HOTELS_DB.prepare('UPDATE business_push_devices SET last_success_at=?, last_error=NULL, updated_at=? WHERE device_token=?')
+        .bind(new Date().toISOString(), new Date().toISOString(), device.device_token).run().catch(() => {});
+    } else if (response) {
+      const text = await response.text().catch(() => '');
+      const disable = response.status === 410 || /BadDeviceToken|Unregistered/i.test(text);
+      await env.HOTELS_DB.prepare('UPDATE business_push_devices SET enabled=?, last_error=?, updated_at=? WHERE device_token=?')
+        .bind(disable ? 0 : 1, `${response.status}:${text}`.slice(0, 900), new Date().toISOString(), device.device_token).run().catch(() => {});
+    }
+  }
+  return { ok: sent > 0, sent, total: rows.length };
+}
+
+let cachedAPNSJWT = null;
+let cachedAPNSJWTAt = 0;
+async function apnsJWT(env) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (cachedAPNSJWT && nowSeconds - cachedAPNSJWTAt < 45 * 60) return cachedAPNSJWT;
+  const header = base64urlJSON({ alg: 'ES256', kid: env.APNS_KEY_ID });
+  const payload = base64urlJSON({ iss: env.APPLE_TEAM_ID, iat: nowSeconds });
+  const signingInput = `${header}.${payload}`;
+  const key = await crypto.subtle.importKey('pkcs8', pemToArrayBuffer(env.APNS_PRIVATE_KEY), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(signingInput));
+  cachedAPNSJWT = `${signingInput}.${base64urlBytes(new Uint8Array(signature))}`;
+  cachedAPNSJWTAt = nowSeconds;
+  return cachedAPNSJWT;
+}
+
+function pemToArrayBuffer(pem) {
+  const base64 = String(pem || '').replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s+/g, '');
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function base64urlJSON(value) {
+  return base64urlBytes(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+function base64urlBytes(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
 async function handleCatalog(request, env, url) {
@@ -627,6 +829,9 @@ async function checkDuplicateRequest(request, env) {
   const payload = await readJSON(request, 600_000);
   if (!payload.ok) return payload.response;
   const duplicate = await findDuplicateHotel(env, payload.value || {}, null);
+  if (isRepairableDuplicate(duplicate)) {
+    return json({ ok: true, duplicate: null, repairable: duplicate });
+  }
   return json({ ok: true, duplicate: duplicate || null });
 }
 
@@ -641,7 +846,7 @@ async function findDuplicateHotel(env, draft, excludeID = null) {
   for (const sourceURL of [...new Set(sourceURLs)]) {
     const canonicalSource = canonicalSourceURL(sourceURL);
     const row = await env.HOTELS_DB.prepare(`
-      SELECT h.id, h.name, h.city, h.address, h.latitude, h.longitude, h.brand, h.chain_name, hs.provider, hs.source_url
+      SELECT h.id, h.name, h.city, h.address, h.latitude, h.longitude, h.brand, h.chain_name, h.status, h.lifecycle_state, hs.provider, hs.source_url
       FROM hotel_sources hs JOIN hotels h ON h.id = hs.hotel_id
       WHERE (hs.source_url = ? OR hs.canonical_url = ?) ${excludeID ? 'AND h.id != ?' : ''}
       LIMIT 1
@@ -654,7 +859,7 @@ async function findDuplicateHotel(env, draft, excludeID = null) {
     const providerHotelID = cleanText(source?.providerHotelID, 220);
     if (!provider || !providerHotelID) continue;
     const row = await env.HOTELS_DB.prepare(`
-      SELECT h.id, h.name, h.city, h.address, h.latitude, h.longitude, h.brand, h.chain_name, hs.provider, hs.source_url
+      SELECT h.id, h.name, h.city, h.address, h.latitude, h.longitude, h.brand, h.chain_name, h.status, h.lifecycle_state, hs.provider, hs.source_url
       FROM hotel_sources hs JOIN hotels h ON h.id = hs.hotel_id
       WHERE LOWER(hs.provider) = LOWER(?) AND hs.provider_hotel_id = ? ${excludeID ? 'AND h.id != ?' : ''}
       LIMIT 1
@@ -671,7 +876,7 @@ async function findDuplicateHotel(env, draft, excludeID = null) {
   const address = cleanText(draft?.address, 900) || '';
   const requestedBrand = cleanText(draft?.brand, 180) || cleanText(draft?.chain, 180) || '';
   const candidates = await env.HOTELS_DB.prepare(`
-    SELECT id, name, city, address, latitude, longitude, brand, chain_name
+    SELECT id, name, city, address, latitude, longitude, brand, chain_name, status, lifecycle_state
     FROM hotels
     WHERE LOWER(city) = LOWER(?) ${excludeID ? 'AND id != ?' : ''}
     ORDER BY updated_at DESC
@@ -741,11 +946,21 @@ function duplicateSummary(row, match, certainty = 'definitive', confidence = 1, 
     chain: row.chain_name || null,
     provider: row.provider || null,
     sourceURL: row.source_url || null,
+    status: row.status || null,
+    lifecycleState: row.lifecycle_state || row.status || null,
     match,
     certainty,
     confidence: Math.round(Math.max(0, Math.min(1, Number(confidence) || 0)) * 1000) / 1000,
     signals: signals || null
   };
+}
+
+function isRepairableDuplicate(duplicate) {
+  if (!duplicate || duplicate.certainty !== 'definitive') return false;
+  const status = String(duplicate.status || '').toLowerCase();
+  const lifecycle = String(duplicate.lifecycleState || status).toLowerCase();
+  if (status === 'published' || lifecycle === 'published' || lifecycle === 'importing') return false;
+  return ['draft','failed','ready','archived'].includes(status) || ['draft','failed','ready','archived'].includes(lifecycle);
 }
 
 async function createImportJob(request, env, user) {
@@ -764,7 +979,8 @@ async function createImportJob(request, env, user) {
   }
 
   const duplicate = await findDuplicateHotel(env, draft, null);
-  if (duplicate?.certainty === 'definitive') {
+  const repairDuplicate = isRepairableDuplicate(duplicate) ? duplicate : null;
+  if (duplicate?.certainty === 'definitive' && !repairDuplicate) {
     return json({ ok: false, error: 'HOTEL_ALREADY_EXISTS', duplicate }, 409);
   }
   if (duplicate?.certainty === 'possible' && !allowPossibleDuplicate) {
@@ -787,11 +1003,16 @@ async function createImportJob(request, env, user) {
   const plausibleRooms = Array.isArray(draft?.rooms) ? draft.rooms.filter(room => isPlausibleRoomName(room?.name)) : [];
   const trustedImageCount = images.filter(image => image.category !== 'other').length;
   const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= 4 && plausibleRooms.length > 0;
-  const safeDraft = { ...draft, status: 'draft', lifecycleState: 'importing' };
+  const safeDraft = { ...draft, id: repairDuplicate?.id || draft?.id, status: 'draft', lifecycleState: 'importing' };
   const persisted = await persistHotelDraft(safeDraft, env, user, { checkDuplicate: false });
   if (!persisted.ok) return persisted.response;
 
   const hotelID = persisted.hotelID;
+  if (repairDuplicate) {
+    // Re-importing a failed/draft record repairs the same canonical hotel instead of
+    // creating a duplicate. Old partial media is removed before the immutable new job starts.
+    await deleteAllHotelImagesInternal(env, hotelID);
+  }
   const jobID = `hotel-import-${crypto.randomUUID()}`;
   const snapshotJSON = JSON.stringify({
     ...safeDraft,
@@ -885,7 +1106,8 @@ async function retryImportJob(env, jobID) {
   await env.HOTELS_DB.batch([
     env.HOTELS_DB.prepare(`
       UPDATE hotel_import_jobs
-      SET status='queued', stage='retry_queued', progress=0, stored_images=0, failed_images=0, error=NULL,
+      SET status='queued', stage='retry_queued', progress=0, stored_images=0, failed_images=0, error=NULL, warning=NULL,
+          current_image=0, current_image_label=NULL, compression_mode=NULL,
           retry_count=retry_count+1, started_at=NULL, completed_at=NULL, updated_at=? WHERE id=?
     `).bind(retryAt, jobID),
     env.HOTELS_DB.prepare("UPDATE hotels SET status='draft', lifecycle_state='importing', updated_at=? WHERE id=?")
@@ -934,7 +1156,11 @@ function importJobRow(row) {
     updatedAt: row.updated_at,
     retryCount: Number(row.retry_count || 0),
     snapshotHash: row.snapshot_hash || null,
-    possibleDuplicate: parseJSONObject(row.possible_duplicate_json)
+    possibleDuplicate: parseJSONObject(row.possible_duplicate_json),
+    currentImage: Number(row.current_image || 0),
+    currentImageLabel: row.current_image_label || null,
+    warning: row.warning || null,
+    compressionMode: row.compression_mode || null
   };
 }
 
@@ -963,7 +1189,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       await this.env.HOTELS_DB.batch([
         this.env.HOTELS_DB.prepare(`
           UPDATE hotel_import_jobs
-          SET status='running', stage='downloading_images', progress=1, started_at=COALESCE(started_at, ?), updated_at=?
+          SET status='running', stage='preparing_media', progress=1, current_image=0, current_image_label=NULL, warning=NULL, started_at=COALESCE(started_at, ?), updated_at=?
           WHERE id=?
         `).bind(now, now, jobID),
         this.env.HOTELS_DB.prepare("UPDATE hotels SET status='draft', lifecycle_state='importing', updated_at=? WHERE id=?")
@@ -978,12 +1204,23 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
 
     for (let index = 0; index < total; index += 1) {
       const item = images[index];
+      const itemLabel = cleanText(item?.label || item?.roomName || item?.category || `Фото ${index + 1}`, 220);
+      const startProgress = Math.min(92, Math.max(2, Math.round((index / Math.max(total, 1)) * 90)));
+      await step.do(`announce image ${String(index + 1).padStart(3, '0')}`, async () => {
+        await this.env.HOTELS_DB.prepare(`
+          UPDATE hotel_import_jobs
+          SET stage='downloading_image', progress=?, current_image=?, current_image_label=?, error=NULL, updated_at=?
+          WHERE id=?
+        `).bind(startProgress, index + 1, itemLabel, new Date().toISOString(), jobID).run();
+        return { index: index + 1, label: itemLabel };
+      });
+
       let result;
       try {
         result = await step.do(
           `store image ${String(index + 1).padStart(3, '0')}`,
           { retries: { limit: 4, delay: '4 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
-          async () => storeRemoteHotelImage(this.env, hotelID, item, index)
+          async () => storeRemoteHotelImage(this.env, jobID, hotelID, item, index)
         );
       } catch (error) {
         result = { ok: false, error: String(error?.message || error).slice(0, 900) };
@@ -992,18 +1229,19 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       if (result?.ok) stored += 1;
       else failed += 1;
 
-      const progress = Math.min(96, Math.max(2, Math.round(((index + 1) / Math.max(total, 1)) * 94)));
+      const progress = Math.min(96, Math.max(3, Math.round(((index + 1) / Math.max(total, 1)) * 94)));
       await step.do(`record progress ${String(index + 1).padStart(3, '0')}`, async () => {
         await this.env.HOTELS_DB.prepare(`
           UPDATE hotel_import_jobs
-          SET stored_images=?, failed_images=?, progress=?, stage=?, error=?, updated_at=?
+          SET stored_images=?, failed_images=?, progress=?, stage=?, error=?, compression_mode=COALESCE(?, compression_mode), updated_at=?
           WHERE id=?
         `).bind(
           stored,
           failed,
           progress,
-          result?.ok ? 'downloading_images' : 'image_retry_exhausted',
+          result?.ok ? 'media_progress' : 'image_retry_exhausted',
           result?.ok ? null : result?.error || 'IMAGE_FAILED',
+          result?.compressionMode || null,
           new Date().toISOString(),
           jobID
         ).run();
@@ -1013,7 +1251,22 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
 
     const finalState = await step.do('finalize hotel import', async () => {
       const now = new Date().toISOString();
-      const completed = failed === 0 && stored === total && total > 0;
+      const [roomRow, coverRow] = await Promise.all([
+        this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_rooms WHERE hotel_id=?').bind(hotelID).first(),
+        this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_images WHERE hotel_id=? AND is_cover=1').bind(hotelID).first()
+      ]);
+      const roomCount = Number(roomRow?.count || 0);
+      const coverCount = Number(coverRow?.count || 0);
+      const requiredImages = Math.min(4, total);
+      const mediaReady = total > 0 && stored >= requiredImages && coverCount > 0;
+      const roomsReady = !publishWhenComplete || roomCount > 0;
+      const completed = mediaReady && roomsReady;
+      const withWarnings = completed && failed > 0;
+      const warning = withWarnings ? `${failed} из ${total} фотографий недоступны у источника; сохранено ${stored}.` : null;
+      let failureReason = null;
+      if (!mediaReady) failureReason = `Сохранено только ${stored} из ${total} фотографий; для готовой карточки требуется минимум ${requiredImages} и обложка.`;
+      else if (!roomsReady) failureReason = 'Не найдено ни одного подтверждённого типа номера; публикация остановлена.';
+
       if (completed && publishWhenComplete) {
         await this.env.HOTELS_DB.prepare("UPDATE hotels SET status='published', lifecycle_state='published', updated_at=? WHERE id=?")
           .bind(now, hotelID).run();
@@ -1026,19 +1279,22 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       }
       await this.env.HOTELS_DB.prepare(`
         UPDATE hotel_import_jobs
-        SET status=?, stage=?, progress=100, stored_images=?, failed_images=?, completed_at=?, updated_at=?, error=?
+        SET status=?, stage=?, progress=100, stored_images=?, failed_images=?, current_image=?, current_image_label=NULL,
+            completed_at=?, updated_at=?, error=?, warning=?
         WHERE id=?
       `).bind(
         completed ? 'completed' : 'failed',
-        completed ? 'completed' : 'incomplete_media',
+        completed ? (withWarnings ? 'completed_with_warnings' : 'completed') : 'integrity_failed',
         stored,
         failed,
+        total,
         now,
         now,
-        completed ? null : `Не удалось сохранить ${failed} из ${total} фотографий. Отель оставлен черновиком.`,
+        completed ? null : failureReason || 'IMPORT_INTEGRITY_FAILED',
+        warning,
         jobID
       ).run();
-      return { completed, stored, failed, total, hotelID };
+      return { completed, stored, failed, total, hotelID, roomCount, coverCount, warning };
     });
 
     if (finalState.completed && publishWhenComplete) {
@@ -1053,14 +1309,30 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       });
     }
 
+    await step.do('notify business device', async () => {
+      try {
+        const row = await this.env.HOTELS_DB.prepare('SELECT hotel_name FROM hotel_import_jobs WHERE id=?').bind(jobID).first();
+        const title = finalState.completed ? 'Импорт отеля завершён' : 'Ошибка импорта отеля';
+        const body = finalState.completed
+          ? `${row?.hotel_name || 'Отель'} · сохранено ${finalState.stored} фото${finalState.warning ? ' · есть предупреждение' : ''}.`
+          : `${row?.hotel_name || 'Отель'} · импорт требует проверки.`;
+        return await sendStaffPush(this.env, title, body, { event: 'hotel_import', jobID, hotelID });
+      } catch (error) {
+        console.error('BUSINESS_PUSH_FAILED', String(error?.message || error));
+        return { ok: false };
+      }
+    });
+
     return finalState;
   }
 }
 
-async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
+async function storeRemoteHotelImage(env, jobID, hotelID, item, fallbackPosition) {
   const sourceURL = cleanURL(item?.url);
   if (!sourceURL) throw new Error('INVALID_IMAGE_URL');
-  const optimizedSourceURL = optimizeProviderImageURL(sourceURL);
+  const category = validImageCategory(item?.category) || 'gallery';
+  const isCover = item?.isCover === true ? 1 : 0;
+  const optimizedSourceURL = optimizeProviderImageURL(sourceURL, category, isCover === 1);
   const headers = new Headers({
     'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 Version/17.6 Mobile/15E148 Safari/604.1',
     'accept': 'image/avif,image/webp,image/jpeg,image/png,image/*;q=0.8',
@@ -1081,14 +1353,14 @@ async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
   if (sourceBytes.byteLength > 12 * 1024 * 1024) throw new Error('IMAGE_TOO_LARGE');
 
   const provider = cleanText(item?.provider, 80) || 'unknown';
-  const category = validImageCategory(item?.category) || 'gallery';
   const label = cleanText(item?.label, 600);
   const roomName = cleanText(item?.roomName, 260);
   const position = boundedInteger(item?.position, 0, 10000, fallbackPosition);
-  const isCover = item?.isCover === true ? 1 : 0;
   const sourceDedupeKey = canonicalImageSourceKey(sourceURL);
 
-  const transformed = await optimizeHotelImageBytes(env, sourceBytes, { category, isCover: isCover === 1 });
+  await updateImportJobStage(env, jobID, 'optimizing_image');
+  const transformed = await optimizeHotelImageBytes(env, sourceBytes, { category, isCover: isCover === 1, sourceContentType });
+  await updateImportJobStage(env, jobID, 'saving_to_r2');
   const contentHash = await sha256HexBytes(transformed.bytes);
 
   const existing = await env.HOTELS_DB.prepare(`
@@ -1104,14 +1376,14 @@ async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
           .bind(category, label, roomName, position, existing.id)
       ]);
     }
-    return { ok: true, imageID: existing.id, byteSize: transformed.bytes.byteLength, deduplicated: true };
+    return { ok: true, imageID: existing.id, byteSize: transformed.bytes.byteLength, deduplicated: true, compressionMode: transformed.transformVersion };
   }
 
   const imageID = crypto.randomUUID();
-  const objectKey = `hotels/${hotelID}/${contentHash.slice(0, 32)}.webp`;
+  const objectKey = `hotels/${hotelID}/${contentHash.slice(0, 32)}.${transformed.extension}`;
   await env.HOTELS_MEDIA.put(objectKey, transformed.bytes, {
     httpMetadata: {
-      contentType: 'image/webp',
+      contentType: transformed.contentType,
       cacheControl: 'public, max-age=31536000, immutable'
     },
     customMetadata: {
@@ -1133,7 +1405,7 @@ async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
         id, hotel_id, object_key, source_provider, source_url, category, label, room_name,
         content_type, byte_size, position, is_cover, content_hash, width, height,
         original_byte_size, transform_version, source_dedupe_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'image/webp', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       imageID,
       hotelID,
@@ -1143,6 +1415,7 @@ async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
       category,
       label,
       roomName,
+      transformed.contentType,
       transformed.bytes.byteLength,
       position,
       isCover,
@@ -1171,7 +1444,7 @@ async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
             .bind(category, label, roomName, position, concurrent.id)
         ]).catch(() => {});
       }
-      return { ok: true, imageID: concurrent.id, byteSize: transformed.bytes.byteLength, deduplicated: true, raced: true };
+      return { ok: true, imageID: concurrent.id, byteSize: transformed.bytes.byteLength, deduplicated: true, raced: true, compressionMode: transformed.transformVersion };
     }
     await env.HOTELS_MEDIA.delete(objectKey).catch(() => {});
     throw error;
@@ -1184,20 +1457,48 @@ async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
     originalByteSize: sourceBytes.byteLength,
     width: transformed.width,
     height: transformed.height,
-    contentHash
+    contentHash,
+    compressionMode: transformed.transformVersion
   };
 }
 
-async function optimizeHotelImageBytes(env, sourceBytes, { category = 'gallery', isCover = false } = {}) {
-  if (!env.IMAGES) throw new Error('IMAGES_BINDING_UNAVAILABLE');
+async function updateImportJobStage(env, jobID, stage) {
+  if (!safeID(jobID)) return;
+  await env.HOTELS_DB.prepare('UPDATE hotel_import_jobs SET stage=?, updated_at=? WHERE id=?')
+    .bind(stage, new Date().toISOString(), jobID).run().catch(() => {});
+}
+
+async function optimizeHotelImageBytes(env, sourceBytes, { category = 'gallery', isCover = false, sourceContentType = 'image/jpeg' } = {}) {
   const primary = imageTransformProfile(category, isCover, false);
-  let result = await runImageTransform(env, sourceBytes, primary);
-  if (result.bytes.byteLength > primary.maxBytes) {
-    const fallback = imageTransformProfile(category, isCover, true);
-    result = await runImageTransform(env, sourceBytes, fallback);
-    if (result.bytes.byteLength > fallback.maxBytes) throw new Error('OPTIMIZED_IMAGE_TOO_LARGE');
+  if (env.IMAGES) {
+    try {
+      let result = await runImageTransform(env, sourceBytes, primary);
+      if (result.bytes.byteLength > primary.maxBytes) {
+        const fallback = imageTransformProfile(category, isCover, true);
+        result = await runImageTransform(env, sourceBytes, fallback);
+        if (result.bytes.byteLength > fallback.maxBytes) throw new Error('OPTIMIZED_IMAGE_TOO_LARGE');
+      }
+      return { ...result, contentType: 'image/webp', extension: 'webp' };
+    } catch (error) {
+      console.warn('CLOUDFLARE_IMAGE_TRANSFORM_FALLBACK', String(error?.message || error));
+    }
   }
-  return result;
+
+  // Resilient fallback: the source URL itself is requested at a bounded provider
+  // resolution. If that already-compressed representation fits our R2 budget, keep
+  // it; never fall back to a multi-megabyte original.
+  const fallback = imageTransformProfile(category, isCover, true);
+  if (sourceBytes.byteLength > fallback.maxBytes) throw new Error('IMAGE_COMPRESSION_UNAVAILABLE_AND_SOURCE_TOO_LARGE');
+  const normalizedType = sourceContentType === 'image/jpg' ? 'image/jpeg' : sourceContentType;
+  const extension = normalizedType === 'image/png' ? 'png' : normalizedType === 'image/webp' ? 'webp' : normalizedType === 'image/avif' ? 'avif' : 'jpg';
+  return {
+    bytes: sourceBytes,
+    width: null,
+    height: null,
+    transformVersion: 'provider-sized-fallback-v1',
+    contentType: normalizedType,
+    extension
+  };
 }
 
 function imageTransformProfile(category, isCover, fallback) {
@@ -1233,20 +1534,20 @@ async function runImageTransform(env, sourceBytes, profile) {
   };
 }
 
-function optimizeProviderImageURL(value) {
+function optimizeProviderImageURL(value, category = 'gallery', isCover = false) {
   try {
     const url = new URL(value);
     const host = url.hostname.toLowerCase();
+    const detailed = ['room','bathroom','restaurant','breakfast','lobby','view','spa','gym','pool','lounge'].includes(category);
+    const width = isCover ? 1600 : (detailed ? 1280 : 1120);
+    const height = isCover ? 1200 : (detailed ? 960 : 840);
     if (host.includes('trvl-media.com') || host.includes('expedia')) {
       url.searchParams.set('impolicy', 'resizecrop');
-      url.searchParams.set('rw', '2200');
+      url.searchParams.set('rw', String(width));
       url.searchParams.set('ra', 'fit');
     }
-    // Booking's CDN often embeds a max size segment. Requesting a reasonable
-    // source resolution avoids downloading enormous originals before Cloudflare
-    // performs the canonical WebP transform.
     if (host.includes('bstatic.com') || host.includes('booking.com')) {
-      url.pathname = url.pathname.replace(/\/(?:max|square|smart)[0-9x_-]+\//ig, '/max1600x1200/');
+      url.pathname = url.pathname.replace(/\/(?:max|square|smart)[0-9x_-]+\//ig, `/max${width}x${height}/`);
     }
     return url.toString();
   } catch {
@@ -1497,7 +1798,7 @@ async function uploadHotelImage(request, env, hotelID) {
   const position = boundedInteger(request.headers.get('x-iumrah-position'), 0, 10000, 0);
   const isCover = request.headers.get('x-iumrah-cover') === '1' ? 1 : 0;
 
-  const transformed = await optimizeHotelImageBytes(env, sourceBytes, { category, isCover: isCover === 1 });
+  const transformed = await optimizeHotelImageBytes(env, sourceBytes, { category, isCover: isCover === 1, sourceContentType: contentType });
   const contentHash = await sha256HexBytes(transformed.bytes);
   const sourceDedupeKey = sourceURL ? canonicalImageSourceKey(sourceURL) : null;
   const existing = await env.HOTELS_DB.prepare('SELECT id FROM hotel_images WHERE hotel_id=? AND content_hash=? LIMIT 1')
@@ -1514,9 +1815,9 @@ async function uploadHotelImage(request, env, hotelID) {
   }
 
   const imageID = crypto.randomUUID();
-  const objectKey = `hotels/${hotelID}/${contentHash.slice(0, 32)}.webp`;
+  const objectKey = `hotels/${hotelID}/${contentHash.slice(0, 32)}.${transformed.extension}`;
   await env.HOTELS_MEDIA.put(objectKey, transformed.bytes, {
-    httpMetadata: { contentType: 'image/webp', cacheControl: 'public, max-age=31536000, immutable' },
+    httpMetadata: { contentType: transformed.contentType, cacheControl: 'public, max-age=31536000, immutable' },
     customMetadata: { hotelID, provider, category, roomName: roomName || '', contentHash, transformVersion: transformed.transformVersion }
   });
 
@@ -1527,9 +1828,9 @@ async function uploadHotelImage(request, env, hotelID) {
       INSERT INTO hotel_images (
         id, hotel_id, object_key, source_provider, source_url, category, label, room_name, content_type,
         byte_size, position, is_cover, content_hash, width, height, original_byte_size, transform_version, source_dedupe_key
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'image/webp', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      imageID, hotelID, objectKey, provider, sourceURL, category, label, roomName,
+      imageID, hotelID, objectKey, provider, sourceURL, category, label, roomName, transformed.contentType,
       transformed.bytes.byteLength, position, isCover, contentHash, transformed.width, transformed.height,
       sourceBytes.byteLength, transformed.transformVersion, sourceDedupeKey
     )
@@ -1573,7 +1874,7 @@ async function uploadHotelImage(request, env, hotelID) {
       height: transformed.height,
       byteSize: transformed.bytes.byteLength,
       originalByteSize: sourceBytes.byteLength,
-      format: 'webp'
+      format: transformed.extension
     }
   }, 201);
 }

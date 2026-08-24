@@ -69,3 +69,61 @@ struct ChatThread: Codable, Identifiable {
 }
 
 struct ChatsResponse: Codable { let threads: [ChatThread] }
+
+struct BusinessChatThreadSummary: Codable, Identifiable, Hashable {
+    var id: String { bookingID }
+    let bookingID: String
+    let lastMessageAt: String
+    let lastMessagePreview: String
+    let lastSenderType: String?
+    let unreadForStaff: Bool
+}
+
+struct BusinessChatThreadsResponse: Codable {
+    let ok: Bool
+    let threads: [BusinessChatThreadSummary]
+}
+
+struct BusinessChatMessage: Codable, Identifiable, Hashable {
+    let id: String
+    let bookingID: String
+    let senderType: String
+    let senderName: String?
+    let body: String
+    let createdAt: String
+    let readByStaff: Bool
+
+    var isStaff: Bool { senderType == "staff" }
+}
+
+struct BusinessChatMessagesResponse: Codable {
+    let ok: Bool
+    let bookingID: String
+    let messages: [BusinessChatMessage]
+}
+
+struct BusinessChatMessageResponse: Codable {
+    let ok: Bool
+    let message: BusinessChatMessage
+}
+
+struct SendBusinessChatMessagePayload: Encodable {
+    let body: String
+    let clientMessageID: String
+}
+
+struct PushDeviceRegistrationPayload: Encodable {
+    let deviceToken: String
+    let environment: String
+}
+
+struct PushDeviceRegistrationResponse: Codable {
+    let ok: Bool
+    let ready: Bool?
+}
+
+struct PushStatusResponse: Codable {
+    let ok: Bool
+    let configured: Bool
+    let devices: Int
+}

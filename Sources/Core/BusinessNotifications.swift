@@ -1,12 +1,52 @@
 import Foundation
+import UIKit
 import UserNotifications
+
+@MainActor
+final class BusinessAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        UserDefaults.standard.set(token, forKey: "iumrah.push.deviceToken")
+        UserDefaults.standard.removeObject(forKey: "iumrah.push.lastRegistrationError")
+        Task {
+            _ = try? await APIClient.shared.registerPushDevice(token: token, environment: "production")
+        }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        UserDefaults.standard.set(error.localizedDescription, forKey: "iumrah.push.lastRegistrationError")
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .badge, .list])
+    }
+}
 
 enum BusinessNotifications {
     private static let trackedJobsKey = "iumrah.notifications.trackedHotelImportJobs.v1"
     private static let notifiedJobsKey = "iumrah.notifications.notifiedHotelImportJobs.v1"
 
     static func prepare() async {
-        _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+        let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])) ?? false
+        guard granted else { return }
+        await MainActor.run {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+        if let token = UserDefaults.standard.string(forKey: "iumrah.push.deviceToken"), !token.isEmpty {
+            _ = try? await APIClient.shared.registerPushDevice(token: token, environment: "production")
+        }
     }
 
     static func hotelImportStarted(_ job: HotelImportJob) async {
@@ -21,9 +61,8 @@ enum BusinessNotifications {
         saveIDs(tracked, forKey: trackedJobsKey)
     }
 
-    /// Reconciles server-side jobs after foreground/relaunch. This is intentionally
-    /// not presented as APNs: the Cloudflare job keeps running while iOS is closed,
-    /// then the app surfaces any tracked terminal result the next time it can run.
+    /// Server-side imports keep running independently. This local reconciliation is
+    /// retained as a safe fallback until APNs credentials + entitlement are active.
     static func notifyUnseenTerminalJobs(_ jobs: [HotelImportJob]) async {
         var tracked = storedIDs(forKey: trackedJobsKey)
         var notified = storedIDs(forKey: notifiedJobsKey)
@@ -69,7 +108,6 @@ enum BusinessNotifications {
     }
 
     private static func saveIDs(_ values: Set<String>, forKey key: String) {
-        // Bound local bookkeeping; the server remains the source of truth for jobs.
         UserDefaults.standard.set(Array(values.suffix(250)), forKey: key)
     }
 }

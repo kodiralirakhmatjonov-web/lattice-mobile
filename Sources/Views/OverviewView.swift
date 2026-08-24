@@ -9,7 +9,7 @@ final class OverviewStore: ObservableObject {
     func reload() async {
         loading = true
         async let bookingsTask = APIClient.shared.bookings()
-        async let chatsTask = APIClient.shared.chats()
+        async let chatsTask = APIClient.shared.businessChatThreads()
         bookings = (try? await bookingsTask) ?? []
         unreadChats = ((try? await chatsTask) ?? []).filter(\.unreadForStaff).count
         loading = false

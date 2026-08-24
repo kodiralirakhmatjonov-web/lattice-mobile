@@ -86,6 +86,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        config.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.networkCaptureBootstrapScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
 
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
@@ -264,9 +271,21 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             try? await Task.sleep(nanoseconds: 220_000_000)
         }
 
+        status = "Открываем список типов номеров…"
+        progress = 0.68
+        let revealedRooms = ((try? await webView.evaluateJavaScript(Self.revealRoomsScript())) as? Bool) == true
+        if revealedRooms {
+            try? await Task.sleep(nanoseconds: 1_350_000_000)
+        }
+        for fraction in [0.0, 0.30, 0.62, 1.0] {
+            _ = try? await webView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
+            try? await Task.sleep(nanoseconds: 260_000_000)
+            await captureVisibleMedia(provider: provider)
+        }
+
         stage = .extracting
-        progress = 0.72
-        status = "Читаем номера, рейтинг, удобства и правила…"
+        progress = 0.76
+        status = "Читаем типы номеров, рейтинг, удобства и правила…"
 
         do {
             let source = currentURL.absoluteString
@@ -336,6 +355,104 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             completionReported = true
             onFailed?(message)
         }
+    }
+
+    private static let networkCaptureBootstrapScript = #"""
+    (() => {
+      if (window.__iumrahNetworkCaptureInstalled) return;
+      window.__iumrahNetworkCaptureInstalled = true;
+      window.__iumrahJSONResponses = window.__iumrahJSONResponses || [];
+      const keep = value => {
+        try {
+          if (!value || typeof value !== 'object') return;
+          const json = JSON.stringify(value);
+          if (!json || json.length > 4000000) return;
+          if (!/(room|suite|bed|occupancy|unit|accommodation|property|hotel)/i.test(json.slice(0, 600000))) return;
+          window.__iumrahJSONResponses.push(value);
+          if (window.__iumrahJSONResponses.length > 36) window.__iumrahJSONResponses.shift();
+        } catch (_) {}
+      };
+      const captureResponse = async response => {
+        try {
+          const url = String(response?.url || '');
+          if (!/(expedia|travelscape|booking|bstatic)/i.test(url)) return;
+          const contentType = String(response.headers?.get?.('content-type') || '');
+          if (!/json|graphql/i.test(contentType) && !/graphql|api|search|room|availability/i.test(url)) return;
+          const text = await response.clone().text();
+          if (!text || text.length > 4000000) return;
+          keep(JSON.parse(text));
+        } catch (_) {}
+      };
+      try {
+        const originalFetch = window.fetch;
+        if (originalFetch) {
+          window.fetch = async function(...args) {
+            const response = await originalFetch.apply(this, args);
+            captureResponse(response);
+            return response;
+          };
+        }
+      } catch (_) {}
+      try {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+          this.__iumrahURL = String(url || '');
+          return originalOpen.call(this, method, url, ...rest);
+        };
+        XMLHttpRequest.prototype.send = function(...args) {
+          this.addEventListener('load', function() {
+            try {
+              if (!/(expedia|travelscape|booking|bstatic)/i.test(this.__iumrahURL || '')) return;
+              const type = String(this.getResponseHeader('content-type') || '');
+              if (!/json|graphql/i.test(type) && !/graphql|api|search|room|availability/i.test(this.__iumrahURL || '')) return;
+              const text = String(this.responseText || '');
+              if (!text || text.length > 4000000) return;
+              keep(JSON.parse(text));
+            } catch (_) {}
+          });
+          return originalSend.apply(this, args);
+        };
+      } catch (_) {}
+    })();
+    """#
+
+    private static func revealRoomsScript() -> String {
+        """
+        (() => {
+          const clean = el => String(el?.innerText || el?.textContent || el?.getAttribute?.('aria-label') || '').replace(/\\s+/g, ' ').trim();
+          const nodes = [...document.querySelectorAll('button,a,[role="button"],[aria-controls]')];
+          const patterns = /show all rooms|view all rooms|see all rooms|room options|available rooms|choose your room|select a room|rooms and rates|all room types|показать все номера|все номера/i;
+          const target = nodes.find(el => patterns.test(clean(el)) && el.offsetParent !== null)
+            || nodes.find(el => patterns.test(clean(el)));
+          if (target) {
+            try { target.scrollIntoView({ block: 'center' }); target.click(); return true; } catch (_) {}
+          }
+          const headings = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')];
+          const heading = headings.find(el => /room options|available rooms|choose your room|rooms and rates|room types|номера/i.test(clean(el)));
+          if (heading) { try { heading.scrollIntoView({ block: 'start' }); return true; } catch (_) {} }
+          return false;
+        })();
+        """
+    }
+
+    private static func scrollRoomsScript(fraction: Double) -> String {
+        """
+        (() => {
+          const clean = el => String(el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+          const roots = [...document.querySelectorAll('[role="dialog"],section,article,main')]
+            .filter(el => /room options|available rooms|choose your room|rooms and rates|showing \\d+ of \\d+ rooms/i.test(clean(el).slice(0, 1600)))
+            .sort((a,b) => (b.scrollHeight || 0) - (a.scrollHeight || 0));
+          const target = roots[0];
+          if (target && target.scrollHeight > target.clientHeight + 200) {
+            target.scrollTop = Math.max(0, target.scrollHeight - target.clientHeight) * \(fraction);
+          } else if (target) {
+            const rect = target.getBoundingClientRect();
+            window.scrollTo(0, window.scrollY + rect.top - 90 + Math.max(0, target.scrollHeight - window.innerHeight) * \(fraction));
+          }
+          return !!target;
+        })();
+        """
     }
 
     private static func normalizedHotelURL(_ value: String) -> URL? {
@@ -595,6 +712,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           for (const key of ['__NEXT_DATA__','__INITIAL_STATE__','__APOLLO_STATE__','__STATE__']) {
             try { walkJSON(window[key]); } catch (_) {}
           }
+          try { walkJSON(window.__iumrahJSONResponses || []); } catch (_) {}
           const typeText = value => Array.isArray(value) ? value.join(' ') : String(value || '');
           const visibleH1 = clean(document.querySelector('h1')?.innerText || '');
           const canonicalHint = document.querySelector('link[rel=\\"canonical\\"]')?.href || sourceURL;
@@ -891,7 +1009,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
             const rawContext = clean(container?.innerText || container?.textContent || '').slice(0, 2500);
             const context = structuredNoise(rawContext) ? '' : rawContext;
-            const bedMatch = context.match(/(?:[0-9]+\\s*)?(?:king|queen|twin|double|single)\\s*(?:bed|beds)|[0-9]+\\s*(?:twin|double|single)\\s*beds?/i);
+            const roomContext = clean(`${roomName} ${context}`);
+            const bedMatch = roomContext.match(/(?:[0-9]+\\s*)?(?:king|queen|twin|double|single)\\s*(?:bed|beds)|[0-9]+\\s*(?:twin|double|single)\\s*beds?/i);
             const guestMatch = context.match(/(?:sleeps?|guests?|adults?)\\s*[:]?\\s*([0-9]+)/i);
             const metricSize = context.match(/([0-9]{1,4}(?:[.,][0-9]+)?)\\s*(?:m²|m2|sq\\.?\\s*m|square metres?)/i);
             const feetSize = context.match(/([0-9]{2,5})\\s*(?:ft²|sq\\.?\\s*ft|square feet)/i);
@@ -904,7 +1023,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             const structuredBeds = structured ? uniq(collectNamedValues(structured, /bed|bedding/i)).slice(0, 4).join(' · ') : '';
             let sizeM2 = structuredSize ?? (metricSize ? Number(metricSize[1].replace(',', '.')) : null);
             if (sizeM2 == null && feetSize) sizeM2 = Math.round(Number(feetSize[1]) * 0.092903 * 10) / 10;
-            const viewMatch = context.match(/(?:landmark|city|kaaba|kabba|haram|mountain|courtyard|sea|garden)\\s+view|view\\s+of\\s+[^,.|]{2,80}/i);
+            const viewMatch = roomContext.match(/(?:partial\\s+)?(?:landmark|city|kaaba|kabba|haram|mountain|courtyard|sea|garden)\\s+view|view\\s+of\\s+[^,.|]{2,80}/i);
 
             const roomAmenities = [];
             const roomAmenityMap = [
@@ -959,6 +1078,42 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
               const container = el.closest('tr,[data-testid*="room"],[data-stid*="room"],article,section,li') || el.parentElement;
               addRoom(el.innerText || el.textContent, container);
             }
+          }
+
+          // Expedia exposes stable, human-readable room names in action labels even
+          // when the visual room card hierarchy changes. Examples include
+          // "View all photos for Classic Twin Room, 2 Twin Beds" and
+          // "More details for Junior Suite Kaaba View".
+          for (const el of document.querySelectorAll('button,a,[role="button"],[aria-label]')) {
+            const actionText = clean([el.getAttribute?.('aria-label'), el.innerText, el.textContent].filter(Boolean).join(' '));
+            const matches = [
+              actionText.match(/view all photos for\\s+(.+?)(?:$|\\s+image:)/i),
+              actionText.match(/more details(?:\\s+more details)? for\\s+(.+)$/i),
+              actionText.match(/view prices(?:\\s+for)?\\s+(.+)$/i)
+            ].filter(Boolean);
+            for (const match of matches) {
+              const container = el.closest('[data-stid*="room"],[data-testid*="room"],article,section,li,div') || el.parentElement;
+              addRoom(match[1], container);
+            }
+          }
+
+          // DOM-independent fallback. A room-name line must be followed nearby by
+          // concrete sellable-room evidence (beds, occupancy, size, price/details).
+          const roomLines = String(propertyRoot?.innerText || document.body?.innerText || '').split(/\\n+/).map(clean).filter(Boolean);
+          for (let i = 0; i < roomLines.length; i += 1) {
+            let candidate = roomLines[i];
+            let strongRoomAction = false;
+            const photoPrefix = candidate.match(/^view all photos for\\s+(.+)$/i);
+            if (photoPrefix) { candidate = photoPrefix[1]; strongRoomAction = true; }
+            const detailPrefix = candidate.match(/^more details(?:\\s+more details)? for\\s+(.+)$/i);
+            if (detailPrefix) { candidate = detailPrefix[1]; strongRoomAction = true; }
+            if (!roomKeyword.test(candidate) || blockedRoom.test(candidate)) continue;
+            const contextLines = roomLines.slice(i + 1, Math.min(roomLines.length, i + 14));
+            const contextText = contextLines.join(' · ');
+            const evidence = /\\b(?:sleeps?|guests?)\\s*\\d+|\\b\\d+\\s*(?:king|queen|twin|double|single)\\s*beds?|\\d+\\s*(?:sq\\.?\\s*ft|ft²|m²)|more details|view prices|free wi[- ]?fi/i.test(contextText);
+            if (!strongRoomAction && !evidence) continue;
+            const synthetic = { innerText: [candidate, ...contextLines].join('\\n'), textContent: [candidate, ...contextLines].join('\\n') };
+            addRoom(candidate, synthetic);
           }
 
           // Provider markup changes frequently. Room cards are still recognizable by

@@ -471,6 +471,10 @@ struct HotelImportJob: Codable, Identifiable {
     let retryCount: Int?
     let snapshotHash: String?
     let possibleDuplicate: HotelDuplicate?
+    let currentImage: Int?
+    let currentImageLabel: String?
+    let warning: String?
+    let compressionMode: String?
 
     var isActive: Bool { status == "queued" || status == "running" }
     var isCompleted: Bool { status == "completed" }
