@@ -24,15 +24,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify update 010 is actually applied
+      - name: Verify current source before TestFlight
         run: |
           set -euo pipefail
-          test -f UPDATE_010_APPLIED.txt || {
-            echo "STOP: update 010 is NOT present in this repository checkout."
-            echo "Do not continue with TestFlight until the ZIP patch has been applied."
+
+          # Verify the actual Hotel Recovery 010 implementation instead of relying
+          # on disposable *_APPLIED.txt marker files in the repository root.
+          grep -F 'Повторить поиск номеров' Sources/Hotels/HotelReviewView.swift >/dev/null || {
+            echo "STOP: Hotel Recovery 010 UI is not present in Sources/Hotels/HotelReviewView.swift."
+            echo "Apply the latest iumrah Business ZIP update before TestFlight."
             exit 1
           }
-          cat UPDATE_010_APPLIED.txt
+
+          grep -F 'roomProbeURLs(provider: provider, propertyURL: propertyURL)' Sources/Hotels/HotelImportCoordinator.swift >/dev/null || {
+            echo "STOP: Hotel Recovery 010 room recovery logic is not present."
+            echo "Apply the latest iumrah Business ZIP update before TestFlight."
+            exit 1
+          }
+
+          grep -F 'missing-needs-review' Sources/Hotels/HotelImportCoordinator.swift >/dev/null || {
+            echo "STOP: Hotel Recovery 010 fail-safe room state is not present."
+            exit 1
+          }
 
           grep -F 'GENERATE_INFOPLIST_FILE: YES' project.yml >/dev/null || {
             echo "STOP: project.yml is still an old version (GENERATE_INFOPLIST_FILE is not YES)."
@@ -43,6 +56,8 @@ jobs:
             echo "STOP: project.yml does not configure AppIcon."
             exit 1
           }
+
+          echo "Current source verification passed."
 
       - name: Xcode environment
         run: |
