@@ -70,6 +70,66 @@ actor APIClient {
         return try decoder.decode(HotelCloudHealthResponse.self, from: data)
     }
 
+    func checkHotelSourceDuplicate(_ sourceURL: String) async throws -> HotelDuplicate? {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/dedupe"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(HotelSourceDuplicatePayload(sourceURL: sourceURL))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
+    }
+
+    func checkHotelDuplicate(_ hotel: HotelDraft) async throws -> HotelDuplicate? {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/dedupe"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(hotel)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
+    }
+
+    func startHotelImport(_ hotel: HotelDraft, publishWhenComplete: Bool) async throws -> HotelImportJob {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(
+            HotelImportStartPayload(
+                hotel: hotel,
+                images: hotel.selectedImages,
+                publishWhenComplete: publishWhenComplete
+            )
+        )
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelImportJobResponse.self, from: data).job
+    }
+
+    func hotelImportJob(id: String) async throws -> HotelImportJob {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(HotelImportJobResponse.self, from: data).job
+    }
+
+    func activeHotelImportJobs() async throws -> [HotelImportJob] {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "active", value: "1")]
+        let (data, response) = try await session.data(from: components.url!)
+        try validate(response, data: data)
+        return try decoder.decode(HotelImportJobsResponse.self, from: data).jobs
+    }
+
+    func retryHotelImportJob(id: String) async throws -> HotelImportJob {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)/retry"))
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelImportJobResponse.self, from: data).job
+    }
+
     func saveHotel(_ hotel: HotelDraft) async throws -> HotelListItem? {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels"))
         request.httpMethod = "POST"

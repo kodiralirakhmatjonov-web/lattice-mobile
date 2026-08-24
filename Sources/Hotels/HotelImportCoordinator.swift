@@ -75,6 +75,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     let webView: WKWebView
     private var stage: Stage = .idle
     private var extractionStarted = false
+    private var completionReported = false
+
+    var onCompleted: ((HotelDraft) -> Void)?
+    var onFailed: ((String) -> Void)?
 
     override init() {
         let config = WKWebViewConfiguration()
@@ -102,21 +106,35 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         stage = .loading
         extractionStarted = false
+        completionReported = false
         sourceURL = normalized
         currentProvider = provider
         draft = nil
         failureMessage = nil
         requiresUserAction = false
         showSource = false
-        progress = 0.08
-        status = provider.isShareRedirectURL(normalized)
-            ? "Открываем ссылку Expedia и переходим к карточке отеля…"
-            : "Открываем карточку \(provider.rawValue)…"
+        progress = 0.05
+        status = "Проверяем, не добавлен ли этот отель раньше…"
 
-        var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        webView.load(request)
+        Task {
+            do {
+                if let duplicate = try await APIClient.shared.checkHotelSourceDuplicate(normalized.absoluteString) {
+                    fail("Этот отель уже есть в базе: \(duplicate.name). Повторный импорт отключён.")
+                    return
+                }
+            } catch {
+                // A temporary dedupe-check failure must not block reading the source.
+            }
+
+            status = provider.isShareRedirectURL(normalized)
+                ? "Открываем ссылку Expedia и переходим к карточке отеля…"
+                : "Открываем карточку \(provider.rawValue)…"
+            progress = 0.08
+            var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            webView.load(request)
+        }
     }
 
     func continueAfterVerification() {
@@ -235,6 +253,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 await captureVisibleMedia(provider: provider)
                 progress = 0.42 + (Double(index + 1) / Double(galleryFractions.count)) * 0.24
             }
+            _ = try? await webView.evaluateJavaScript(Self.closeGalleryScript())
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            _ = try? await webView.evaluateJavaScript("window.scrollTo(0, document.documentElement.scrollHeight * 0.72);")
+            try? await Task.sleep(nanoseconds: 220_000_000)
         }
 
         stage = .extracting
@@ -252,10 +274,22 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 throw APIError.server("Не удалось прочитать название отеля с этой страницы.")
             }
 
-            draft = HotelNormalizer.makeDraft(snapshot: snapshot)
+            let candidate = HotelNormalizer.makeDraft(snapshot: snapshot)
+            status = "Проверяем отель по всей базе iumrah…"
+            progress = 0.94
+            if let duplicate = try await APIClient.shared.checkHotelDuplicate(candidate) {
+                fail("Этот отель уже есть в базе: \(duplicate.name). Expedia/Booking не создадут вторую карточку.")
+                return
+            }
+
+            draft = candidate
             progress = 1
             stage = .finished
             status = "Готово: \(name)"
+            if !completionReported {
+                completionReported = true
+                onCompleted?(candidate)
+            }
         } catch {
             fail("Не удалось полностью разобрать карточку отеля: \(error.localizedDescription)")
         }
@@ -288,6 +322,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         status = message
         progress = 0
         extractionStarted = false
+        if !completionReported {
+            completionReported = true
+            onFailed?(message)
+        }
     }
 
     private static func normalizedHotelURL(_ value: String) -> URL? {
@@ -414,6 +452,24 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         """
     }
 
+    private static func closeGalleryScript() -> String {
+        """
+        (() => {
+          const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+          const root = dialogs[dialogs.length - 1] || document;
+          const buttons = [...root.querySelectorAll('button,[role="button"]')];
+          const target = buttons.find(el => {
+            const text = String(el.getAttribute('aria-label') || el.innerText || '').toLowerCase();
+            const marker = String(el.getAttribute('data-stid') || el.getAttribute('data-testid') || '').toLowerCase();
+            return /close|dismiss|закрыть/.test(text) || marker.includes('close');
+          });
+          if (!target) { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); return false; }
+          target.click();
+          return true;
+        })();
+        """
+    }
+
     private static func scrollGalleryScript(fraction: Double) -> String {
         """
         (() => {
@@ -481,6 +537,21 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           }
           const typeText = value => Array.isArray(value) ? value.join(' ') : String(value || '');
           const hotel = allJSON.find(x => /hotel|lodgingbusiness|resort|accommodation/i.test(typeText(x?.['@type']))) || {};
+          const canonicalURL = (() => {
+            try {
+              const raw = document.querySelector('link[rel=\\"canonical\\"]')?.href || hotel.url || sourceURL;
+              return raw ? new URL(String(raw), location.href).toString() : sourceURL;
+            } catch (_) { return sourceURL; }
+          })();
+          const providerHotelID = (() => {
+            const identifier = hotel.identifier;
+            if (typeof identifier === 'string' || typeof identifier === 'number') return clean(identifier);
+            if (identifier && typeof identifier === 'object') return clean(identifier.value || identifier.name || identifier['@id'] || '') || null;
+            const raw = `${canonicalURL} ${sourceURL}`;
+            const patterns = [/(?:hotelid|hotel_id|propertyid|property_id)[=/:.-]+([0-9A-Za-z_-]{4,})/i, /\\.h([0-9]{4,})\\./i, /\\/hotel\\/[^/]+\\/([^/?#]+?)(?:\\.html)?(?:[?#]|$)/i];
+            for (const pattern of patterns) { const match = raw.match(pattern); if (match) return clean(match[1]); }
+            return null;
+          })();
 
           const titleCandidates = [
             hotel.name,
@@ -547,21 +618,37 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
           let stars = integerFrom(hotel.starRating?.ratingValue);
           if (stars == null) {
-            const starEl = [...document.querySelectorAll('[aria-label]')].find(el => /[1-5]\\s*(?:out of 5|star|stars)/i.test(el.getAttribute('aria-label') || ''));
-            const m = (starEl?.getAttribute('aria-label') || bodyText).match(/([1-5])\\s*(?:out of 5|star|stars|звезд|звезды|звезда)/i);
+            const propertyClass = bodyText.match(/property\\s+class\\s*:?\\s*([1-5])(?:\\.0)?\\b/i);
+            if (propertyClass) stars = Number(propertyClass[1]);
+          }
+          if (stars == null) {
+            const starEl = [...document.querySelectorAll('[aria-label]')].find(el => /[1-5](?:\\.0)?\\s*(?:out of 5|star|stars)/i.test(el.getAttribute('aria-label') || ''));
+            const m = (starEl?.getAttribute('aria-label') || bodyText).match(/(?:^|[^0-9.])([1-5])(?:\\.0)?\\s*(?:out of 5|star|stars|звезд|звезды|звезда)\\b/i);
             stars = m ? Number(m[1]) : null;
           }
 
-          const latitude = numberFrom(hotel.geo?.latitude);
-          const longitude = numberFrom(hotel.geo?.longitude);
+          let latitude = numberFrom(hotel.geo?.latitude);
+          let longitude = numberFrom(hotel.geo?.longitude);
+          if (latitude == null || longitude == null) {
+            const geoMeta = document.querySelector('meta[property=\\"place:location:latitude\\"]')?.content;
+            const lngMeta = document.querySelector('meta[property=\\"place:location:longitude\\"]')?.content;
+            latitude = latitude ?? numberFrom(geoMeta);
+            longitude = longitude ?? numberFrom(lngMeta);
+          }
+          const googleMapsURL = (() => {
+            const explicit = [...document.querySelectorAll('a[href]')].map(a => a.href).find(h => /google\\.[^/]+\\/maps|maps\\.google/i.test(h || ''));
+            if (explicit) return explicit;
+            const query = latitude != null && longitude != null ? `${latitude},${longitude}` : (address || name || '');
+            return query ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}` : null;
+          })();
           let checkIn = clean(hotel.checkinTime || hotel.checkInTime || '') || null;
           let checkOut = clean(hotel.checkoutTime || hotel.checkOutTime || '') || null;
           if (!checkIn) {
-            const m = bodyText.match(/check[ -]?in\\s*(?:from|time)?\\s*([0-9]{1,2}:[0-9]{2}(?:\\s*[ap]m)?|[0-9]{1,2}(?:\\s*[ap]m))/i);
+            const m = bodyText.match(/check[ -]?in\\s*(?:(?:start|from)\\s+time|start|from|time)?\\s*:?\\s*([0-9]{1,2}:[0-9]{2}(?:\\s*[ap]m)?|[0-9]{1,2}(?:\\s*[ap]m))/i);
             if (m) checkIn = clean(m[1]);
           }
           if (!checkOut) {
-            const m = bodyText.match(/check[ -]?out\\s*(?:until|time)?\\s*([0-9]{1,2}:[0-9]{2}(?:\\s*[ap]m)?|[0-9]{1,2}(?:\\s*[ap]m))/i);
+            const m = bodyText.match(/check[ -]?out\\s*(?:before|until|time)?\\s*:?\\s*([0-9]{1,2}:[0-9]{2}(?:\\s*[ap]m)?|[0-9]{1,2}(?:\\s*[ap]m))/i);
             if (m) checkOut = clean(m[1]);
           }
 
@@ -592,11 +679,16 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           }
           const commonAmenityMap = [
             ['Free WiFi', ['free wifi','free wi-fi']], ['Wi‑Fi', ['wifi','wi-fi']], ['Breakfast', ['breakfast']],
-            ['Restaurant', ['restaurant']], ['Room service', ['room service']], ['Family rooms', ['family rooms']],
+            ['Restaurant', ['restaurant']], ['Restaurants', ['restaurants']], ['Bar and lounge', ['bar and lounge','bar/lounge','lounge bar']],
+            ['Coffee shop', ['coffee shop','cafe','café']], ['Room service', ['room service']], ['Family rooms', ['family rooms']],
             ['Non-smoking rooms', ['non-smoking rooms']], ['24-hour front desk', ['24-hour front desk','24 hour front desk']],
-            ['Parking', ['parking']], ['Airport shuttle', ['airport shuttle','shuttle service']], ['Fitness center', ['fitness center','fitness centre','gym']],
-            ['Swimming pool', ['swimming pool','outdoor pool','indoor pool']], ['Spa', ['spa and wellness','spa']], ['Laundry', ['laundry']],
-            ['Facilities for disabled guests', ['facilities for disabled guests','wheelchair accessible']], ['Air conditioning', ['air conditioning']]
+            ['Concierge', ['concierge']], ['Luggage storage', ['luggage storage','baggage storage']], ['Tour desk', ['tour desk']],
+            ['Parking', ['parking']], ['Valet parking', ['valet parking']], ['Airport shuttle', ['airport shuttle','shuttle service']],
+            ['Fitness center', ['fitness center','fitness centre','gym']], ['Swimming pool', ['swimming pool','outdoor pool','indoor pool']],
+            ['Spa', ['spa and wellness','spa']], ['Laundry', ['laundry']], ['Dry cleaning', ['dry cleaning']], ['Housekeeping', ['housekeeping']],
+            ['Garden', ['garden']], ['Terrace', ['terrace']], ['Elevator', ['elevator','lift']], ['Business center', ['business center','business centre']],
+            ['Meeting rooms', ['meeting rooms','meeting room']], ['Facilities for disabled guests', ['facilities for disabled guests','wheelchair accessible']],
+            ['Air conditioning', ['air conditioning']], ['Security', ['24-hour security','security']], ['ATM', ['atm','cash machine']]
           ];
           const lowerBody = bodyText.toLowerCase();
           for (const [label, keys] of commonAmenityMap) if (keys.some(k => lowerBody.includes(k))) addAmenity(label);
@@ -604,10 +696,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const roomCandidates = [];
           const roomSeen = new Set();
           const roomKeyword = /(room|suite|king|queen|twin|triple|quad|family|deluxe|superior|classic|standard|executive|studio|premier|номер|люкс|غرفة|جناح)/i;
-          const blockedRoom = /(room service|meeting room|prayer room|laundry room|locker room|non-smoking rooms|family rooms|guest rooms|choose your room|select room|room amenities)/i;
+          const blockedRoom = /(how much|parking|breakfast|restaurant|front desk|concierge|room service|meeting room|prayer room|laundry room|locker room|non-smoking rooms|family rooms|guest rooms|choose your room|select room|room amenities|frequently asked|question|answer|policy|check[ -]?in|check[ -]?out)/i;
           const addRoom = (rawName, container) => {
             const roomName = clean(rawName);
-            if (!roomName || roomName.length < 4 || roomName.length > 180 || !roomKeyword.test(roomName) || blockedRoom.test(roomName)) return;
+            if (!roomName || roomName.length < 4 || roomName.length > 180 || roomName.endsWith('?') || roomName.endsWith('؟') || roomName.split(/\\s+/).length > 24 || !roomKeyword.test(roomName) || blockedRoom.test(roomName)) return;
             const key = roomName.toLowerCase();
             if (roomSeen.has(key)) return;
             roomSeen.add(key);
@@ -648,7 +740,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           ] : [
             '[data-stid*="room"] h2','[data-stid*="room"] h3','[data-stid*="room"] h4',
             '[data-testid*="room"] h2','[data-testid*="room"] h3','[data-testid*="room"] h4',
-            '[aria-label*="room"] h3','section h3'
+            '[aria-label*="room"] h3','[data-stid*="room"] [role="heading"]','[data-testid*="room"] [role="heading"]'
           ];
           for (const selector of roomSelectors) {
             for (const el of document.querySelectorAll(selector)) {
@@ -689,6 +781,109 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             const matches = bodyText.match(pattern) || [];
             matches.slice(0, 3).forEach(addPolicy);
           }
+
+          const rawLines = String(document.body?.innerText || '').split(/\\n+/).map(clean).filter(Boolean);
+          const nearby = [];
+          const nearbySeen = new Set();
+          const addNearby = (rawName, rawDistance, rawDuration, rawMode) => {
+            let placeName = clean(rawName);
+            if (!placeName || placeName.length < 2 || placeName.length > 140) return;
+            if (/reviews?|check availability|see all|show all|sign in|price|room|breakfast|parking$/i.test(placeName)) return;
+            const distanceText = clean(rawDistance) || null;
+            const durationMinutes = rawDuration == null ? null : Number(rawDuration);
+            const travelMode = clean(rawMode) || null;
+            let distanceMeters = null;
+            if (distanceText) {
+              const m = distanceText.match(/([0-9]+(?:[.,][0-9]+)?)\\s*(km|m|mi|mile|miles)\\b/i);
+              if (m) {
+                const amount = Number(m[1].replace(',', '.'));
+                const unit = m[2].toLowerCase();
+                distanceMeters = unit === 'km' ? amount * 1000 : (unit === 'mi' || unit.startsWith('mile')) ? amount * 1609.344 : amount;
+              }
+            }
+            const key = placeName.toLowerCase();
+            if (nearbySeen.has(key)) return;
+            nearbySeen.add(key);
+            nearby.push({ id: crypto.randomUUID(), name: placeName, distanceText, distanceMeters, durationMinutes: Number.isFinite(durationMinutes) ? Math.round(durationMinutes) : null, travelMode });
+          };
+
+          for (let i = 0; i < rawLines.length; i += 1) {
+            const line = rawLines[i];
+            const duration = line.match(/(?:^|\\s)([0-9]{1,3})\\s*(?:min|mins|minute|minutes)\\s*(walk|walking|drive|driving|by car)?\\b/i);
+            const distance = line.match(/([0-9]+(?:[.,][0-9]+)?)\\s*(km|m|mi|mile|miles)\\b/i);
+            if (duration || distance) {
+              const stripped = clean(line.replace(/(?:[0-9]{1,3})\\s*(?:min|mins|minute|minutes)\\s*(?:walk|walking|drive|driving|by car)?/ig, '').replace(/[0-9]+(?:[.,][0-9]+)?\\s*(?:km|m|mi|mile|miles)\\b/ig, '').replace(/^[-–—·•\\s]+|[-–—·•\\s]+$/g, ''));
+              const previous = i > 0 ? rawLines[i - 1] : '';
+              const next = i + 1 < rawLines.length ? rawLines[i + 1] : '';
+              const candidate = stripped.length >= 3 ? stripped : (previous.length >= 3 && previous.length <= 120 ? previous : next);
+              addNearby(candidate, distance ? distance[0] : null, duration ? duration[1] : null, duration ? (duration[2] || 'walk') : null);
+            }
+          }
+
+          const nearbySelectors = [
+            '[data-stid*="location"] li','[data-testid*="location"] li','[data-stid*="poi"]','[data-testid*="poi"]',
+            '[data-stid*="neighborhood"] li','[data-testid*="neighborhood"] li','section li'
+          ];
+          for (const selector of nearbySelectors) {
+            for (const el of document.querySelectorAll(selector)) {
+              const text = clean(el.innerText || el.textContent || '');
+              if (!/(?:[0-9]{1,3}\\s*(?:min|minute)|[0-9]+(?:[.,][0-9]+)?\\s*(?:km|m|mi|mile))\\b/i.test(text)) continue;
+              const duration = text.match(/([0-9]{1,3})\\s*(?:min|mins|minute|minutes)\\s*(walk|walking|drive|driving|by car)?/i);
+              const distance = text.match(/([0-9]+(?:[.,][0-9]+)?)\\s*(km|m|mi|mile|miles)\\b/i);
+              const candidate = clean(text.replace(duration?.[0] || '', '').replace(distance?.[0] || '', '').replace(/^[-–—·•\\s]+|[-–—·•\\s]+$/g, ''));
+              addNearby(candidate, distance ? distance[0] : null, duration ? duration[1] : null, duration ? (duration[2] || 'walk') : null);
+            }
+          }
+
+          const facts = [];
+          const factSeen = new Set();
+          const addFact = (group, label, value) => {
+            const g = clean(group) || 'Property';
+            const l = clean(label);
+            const v = clean(value);
+            if (!l || !v || l.length > 160 || v.length > 900) return;
+            if (/guest reviews?|reviews from|see all reviews|verified reviews|write a review/i.test(`${g} ${l}`)) return;
+            const key = `${g}|${l}|${v}`.toLowerCase();
+            if (factSeen.has(key)) return;
+            factSeen.add(key);
+            facts.push({ id: crypto.randomUUID(), group: g, label: l, value: v });
+          };
+
+          const sectionKeywords = /(about|property|amenit|facilit|service|parking|breakfast|food|drink|restaurant|bar|accessib|important|policy|policies|house rules|location|area|transport|internet|family|business|cleaning|reception|front desk|wellness|safety|security)/i;
+          for (const section of document.querySelectorAll('section, [data-stid], [data-testid]')) {
+            const heading = clean(section.querySelector('h1,h2,h3,h4,[role="heading"]')?.innerText || '');
+            if (!heading || !sectionKeywords.test(heading) || /review/i.test(heading)) continue;
+            const rows = [...section.querySelectorAll('li,[role="listitem"],dt,dd,p')].slice(0, 80);
+            for (const row of rows) {
+              const text = clean(row.innerText || row.textContent || '');
+              if (text.length < 2 || text.length > 320 || /review/i.test(text)) continue;
+              const parts = text.split(/\\s{2,}|:\\s+/).map(clean).filter(Boolean);
+              if (parts.length >= 2) addFact(heading, parts[0], parts.slice(1).join(' · '));
+              else addFact(heading, text, 'Yes');
+            }
+          }
+
+          const fees = [];
+          const feeSeen = new Set();
+          const addFee = text => {
+            const v = clean(text);
+            if (!v || v.length < 4 || v.length > 500 || !/(fee|charge|cost|sar|usd|per day|per night|deposit|parking)/i.test(v)) return;
+            if (/room price|price per|total price|taxes and fees included|availability/i.test(v)) return;
+            const key = v.toLowerCase();
+            if (feeSeen.has(key)) return;
+            feeSeen.add(key);
+            fees.push({ id: crypto.randomUUID(), group: 'Fees', label: 'Fee', value: v });
+          };
+          rawLines.forEach(addFee);
+
+          const services = [];
+          const serviceTokens = [
+            ['24-hour front desk', /24[- ]hour front desk/i], ['Concierge', /concierge/i], ['Luggage storage', /luggage|baggage storage/i],
+            ['Room service', /room service/i], ['Laundry', /laundry/i], ['Dry cleaning', /dry cleaning/i], ['Housekeeping', /housekeeping/i],
+            ['Airport shuttle', /airport shuttle|shuttle service/i], ['Valet parking', /valet parking/i], ['Business center', /business cent(?:er|re)/i],
+            ['Meeting rooms', /meeting rooms?/i], ['Tour desk', /tour desk/i], ['Currency exchange', /currency exchange/i], ['ATM', /\\batm\\b|cash machine/i]
+          ];
+          for (const [label, pattern] of serviceTokens) if (pattern.test(bodyText)) services.push(label);
 
           const classify = label => {
             const t = lower(label);
@@ -762,10 +957,17 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             checkOut,
             images,
             imageMetadata,
-            amenities: uniq(amenities).slice(0, 120),
-            rooms: roomCandidates.slice(0, 80),
-            roomNames: uniq(roomNames).slice(0, 80),
-            policies: uniq(policies).slice(0, 80)
+            amenities: uniq(amenities).slice(0, 220),
+            rooms: roomCandidates.slice(0, 140),
+            roomNames: uniq(roomNames).slice(0, 140),
+            policies: uniq(policies).slice(0, 220),
+            providerHotelID,
+            canonicalURL,
+            googleMapsURL,
+            nearby: nearby.slice(0, 180),
+            facts: facts.slice(0, 360),
+            fees: fees.slice(0, 180),
+            services: uniq(services).slice(0, 240)
           };
           return JSON.stringify(result);
         })();

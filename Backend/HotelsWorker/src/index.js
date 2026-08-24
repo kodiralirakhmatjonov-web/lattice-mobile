@@ -1,3 +1,5 @@
+import { WorkflowEntrypoint } from 'cloudflare:workers';
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store'
@@ -55,6 +57,21 @@ async function handleAdmin(request, env, url, user) {
     return health(env, true);
   }
 
+  if (parts[0] === 'dedupe') {
+    if (request.method !== 'POST' || parts.length !== 1) return methodNotAllowed();
+    return checkDuplicateRequest(request, env);
+  }
+
+  if (parts[0] === 'import-jobs') {
+    if (parts.length === 1 && request.method === 'GET') return listImportJobs(env, url);
+    if (parts.length === 1 && request.method === 'POST') return createImportJob(request, env, user);
+    const jobID = safeID(parts[1]);
+    if (!jobID) return json({ ok: false, error: 'INVALID_JOB_ID' }, 400);
+    if (parts.length === 2 && request.method === 'GET') return importJobDetail(env, jobID);
+    if (parts.length === 3 && parts[2] === 'retry' && request.method === 'POST') return retryImportJob(env, jobID);
+    return methodNotAllowed();
+  }
+
   const hotelID = safeID(parts[0]);
   if (!hotelID) return json({ ok: false, error: 'INVALID_HOTEL_ID' }, 400);
 
@@ -97,6 +114,11 @@ async function handleCatalog(request, env, url) {
   if (parts.length === 1) {
     if (request.method !== 'GET') return methodNotAllowed();
     return hotelDetail(env, hotelID, false);
+  }
+
+  if (parts.length === 3 && parts[1] === 'translations') {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return hotelTranslation(env, hotelID, parts[2]);
   }
 
   if (parts.length === 3 && parts[1] === 'images') {
@@ -245,6 +267,12 @@ async function hotelDetail(env, hotelID, admin) {
     checkIn: hotel.check_in || null,
     checkOut: hotel.check_out || null,
     policies: parseJSONArray(hotel.policies_json),
+    nearby: parseJSONArray(hotel.nearby_json),
+    facts: parseJSONArray(hotel.facts_json),
+    fees: parseJSONArray(hotel.fees_json),
+    services: parseJSONArray(hotel.services_json),
+    googleMapsURL: hotel.google_maps_url || googleMapsURL(hotel.latitude, hotel.longitude, hotel.address),
+    canonicalKey: hotel.canonical_key || null,
     status: hotel.status,
     amenities: (amenitiesResult.results || []).map(row => row.amenity),
     rooms: (roomsResult.results || []).map(row => ({
@@ -267,16 +295,32 @@ async function hotelDetail(env, hotelID, admin) {
 }
 
 async function saveHotel(request, env, user) {
-  const payload = await readJSON(request, 3_000_000);
+  const payload = await readJSON(request, 4_000_000);
   if (!payload.ok) return payload.response;
 
-  const draft = payload.value;
+  const result = await persistHotelDraft(payload.value, env, user, { checkDuplicate: false });
+  if (!result.ok) return result.response;
+  return json({ ok: true, hotel: result.hotel }, 200);
+}
+
+async function persistHotelDraft(draft, env, user, options = {}) {
   const id = safeID(draft?.id);
   const name = cleanText(draft?.name, 180);
   const city = canonicalCity(draft?.city);
 
   if (!id || !name || !city) {
-    return json({ ok: false, error: 'INVALID_HOTEL_PAYLOAD' }, 400);
+    return { ok: false, response: json({ ok: false, error: 'INVALID_HOTEL_PAYLOAD' }, 400) };
+  }
+
+  if (options.checkDuplicate) {
+    const duplicate = await findDuplicateHotel(env, draft, id);
+    if (duplicate) {
+      return {
+        ok: false,
+        duplicate,
+        response: json({ ok: false, error: 'HOTEL_ALREADY_EXISTS', duplicate }, 409)
+      };
+    }
   }
 
   const country = cleanText(draft.country, 120) || 'Saudi Arabia';
@@ -291,7 +335,13 @@ async function saveHotel(request, env, user) {
   const longitude = nullableNumber(draft.longitude, -180, 180);
   const checkIn = cleanText(draft.checkIn, 120);
   const checkOut = cleanText(draft.checkOut, 120);
-  const policies = uniqueStrings(draft.policies, 100, 600);
+  const policies = uniqueStrings(draft.policies, 260, 900);
+  const nearby = safeObjectArray(draft.nearby, 220, 64_000);
+  const facts = safeObjectArray(draft.facts, 420, 160_000);
+  const fees = safeObjectArray(draft.fees, 220, 80_000);
+  const services = uniqueStrings(draft.services, 300, 240);
+  const googleMaps = cleanURL(draft.googleMapsURL) || googleMapsURL(latitude, longitude, address);
+  const canonicalKey = canonicalHotelKey(name, city, address, latitude, longitude);
   const status = ['draft', 'published', 'archived'].includes(draft.status) ? draft.status : 'draft';
   const slug = await uniqueSlug(env, id, `${name}-${city}`);
   const now = new Date().toISOString();
@@ -301,8 +351,9 @@ async function saveHotel(request, env, user) {
       INSERT INTO hotels (
         id, slug, name, city, country, property_type, stars, rating, rating_scale,
         review_count, address, description, latitude, longitude, check_in, check_out,
-        policies_json, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        policies_json, canonical_key, google_maps_url, nearby_json, facts_json, fees_json,
+        services_json, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         city = excluded.city,
@@ -319,19 +370,27 @@ async function saveHotel(request, env, user) {
         check_in = excluded.check_in,
         check_out = excluded.check_out,
         policies_json = excluded.policies_json,
+        canonical_key = excluded.canonical_key,
+        google_maps_url = excluded.google_maps_url,
+        nearby_json = excluded.nearby_json,
+        facts_json = excluded.facts_json,
+        fees_json = excluded.fees_json,
+        services_json = excluded.services_json,
         status = excluded.status,
         updated_at = excluded.updated_at
     `).bind(
       id, slug, name, city, country, propertyType, stars, rating, ratingScale, reviewCount,
       address, description, latitude, longitude, checkIn, checkOut, JSON.stringify(policies),
-      status, now, now
+      canonicalKey, googleMaps, JSON.stringify(nearby), JSON.stringify(facts), JSON.stringify(fees),
+      JSON.stringify(services), status, now, now
     ),
     env.HOTELS_DB.prepare('DELETE FROM hotel_amenities WHERE hotel_id = ?').bind(id),
     env.HOTELS_DB.prepare('DELETE FROM hotel_rooms WHERE hotel_id = ?').bind(id),
-    env.HOTELS_DB.prepare('DELETE FROM hotel_sources WHERE hotel_id = ?').bind(id)
+    env.HOTELS_DB.prepare('DELETE FROM hotel_sources WHERE hotel_id = ?').bind(id),
+    env.HOTELS_DB.prepare('DELETE FROM hotel_translations WHERE hotel_id = ?').bind(id)
   ];
 
-  const amenities = uniqueStrings(draft.amenities, 160, 180);
+  const amenities = uniqueStrings(draft.amenities, 320, 240);
   amenities.forEach((amenity, index) => {
     statements.push(
       env.HOTELS_DB.prepare('INSERT INTO hotel_amenities (hotel_id, amenity, position) VALUES (?, ?, ?)')
@@ -339,11 +398,11 @@ async function saveHotel(request, env, user) {
     );
   });
 
-  const rooms = Array.isArray(draft.rooms) ? draft.rooms.slice(0, 120) : [];
+  const rooms = Array.isArray(draft.rooms) ? draft.rooms.slice(0, 200) : [];
   rooms.forEach((room, index) => {
     const roomID = safeID(room?.id) || crypto.randomUUID();
     const roomName = cleanText(room?.name, 240);
-    if (!roomName) return;
+    if (!roomName || !isPlausibleRoomName(roomName)) return;
     statements.push(
       env.HOTELS_DB.prepare(`
         INSERT INTO hotel_rooms (
@@ -357,8 +416,8 @@ async function saveHotel(request, env, user) {
         nullableNumber(room?.sizeM2, 1, 3000),
         cleanText(room?.beds, 300),
         cleanText(room?.view, 300),
-        cleanText(room?.description, 4000),
-        JSON.stringify(uniqueStrings(room?.amenities, 80, 180)),
+        cleanText(room?.description, 5000),
+        JSON.stringify(uniqueStrings(room?.amenities, 100, 220)),
         index
       )
     );
@@ -369,14 +428,19 @@ async function saveHotel(request, env, user) {
     const sourceURL = cleanURL(source?.sourceURL);
     const provider = cleanText(source?.provider, 80);
     if (!sourceURL || !provider) return;
+    const sourceNearby = safeObjectArray(source?.nearby, 220, 64_000);
+    const sourceFacts = safeObjectArray(source?.facts, 420, 160_000);
+    const sourceFees = safeObjectArray(source?.fees, 220, 80_000);
+    const sourceServices = uniqueStrings(source?.services, 300, 240);
     statements.push(
       env.HOTELS_DB.prepare(`
         INSERT INTO hotel_sources (
           id, hotel_id, provider, source_url, source_name, city, country, property_type,
           address, description, stars, rating, rating_scale, review_count, latitude, longitude,
           check_in, check_out, images_json, amenities_json, room_names_json, room_details_json,
-          policies_json, checked_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          policies_json, provider_hotel_id, canonical_url, google_maps_url, nearby_json, facts_json,
+          fees_json, services_json, checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         safeID(source?.id) || crypto.randomUUID(),
         id,
@@ -396,11 +460,18 @@ async function saveHotel(request, env, user) {
         nullableNumber(source?.longitude, -180, 180),
         cleanText(source?.checkIn, 120),
         cleanText(source?.checkOut, 120),
-        JSON.stringify(uniqueStrings(source?.images, 500, 3000)),
-        JSON.stringify(uniqueStrings(source?.amenities, 200, 220)),
-        JSON.stringify(uniqueStrings(source?.roomNames, 150, 260)),
-        JSON.stringify(Array.isArray(source?.rooms) ? source.rooms.slice(0, 120) : []),
-        JSON.stringify(uniqueStrings(source?.policies, 100, 600)),
+        JSON.stringify(uniqueStrings(source?.images, 600, 3000)),
+        JSON.stringify(uniqueStrings(source?.amenities, 240, 240)),
+        JSON.stringify(uniqueStrings(source?.roomNames, 180, 280)),
+        JSON.stringify(Array.isArray(source?.rooms) ? source.rooms.filter(r => isPlausibleRoomName(r?.name)).slice(0, 200) : []),
+        JSON.stringify(uniqueStrings(source?.policies, 260, 900)),
+        cleanText(source?.providerHotelID, 220),
+        cleanURL(source?.canonicalURL),
+        cleanURL(source?.googleMapsURL) || googleMapsURL(source?.latitude, source?.longitude, source?.address),
+        JSON.stringify(sourceNearby),
+        JSON.stringify(sourceFacts),
+        JSON.stringify(sourceFees),
+        JSON.stringify(sourceServices),
         now
       )
     );
@@ -414,11 +485,508 @@ async function saveHotel(request, env, user) {
     actor: user?.login || user?.email || 'staff',
     amenities: amenities.length,
     rooms: rooms.length,
-    sources: sources.length
+    sources: sources.length,
+    nearby: nearby.length,
+    facts: facts.length
   });
 
   const row = await summaryRow(env, id);
-  return json({ ok: true, hotel: hotelSummary(row) }, 200);
+  return { ok: true, hotel: hotelSummary(row), hotelID: id };
+}
+
+
+async function checkDuplicateRequest(request, env) {
+  const payload = await readJSON(request, 600_000);
+  if (!payload.ok) return payload.response;
+  const duplicate = await findDuplicateHotel(env, payload.value || {}, null);
+  return json({ ok: true, duplicate: duplicate || null });
+}
+
+async function findDuplicateHotel(env, draft, excludeID = null) {
+  const sourceURLs = [];
+  if (cleanURL(draft?.sourceURL)) sourceURLs.push(cleanURL(draft.sourceURL));
+  for (const source of Array.isArray(draft?.sources) ? draft.sources : []) {
+    const url = cleanURL(source?.sourceURL);
+    if (url) sourceURLs.push(url);
+  }
+
+  for (const sourceURL of [...new Set(sourceURLs)]) {
+    const canonicalSource = canonicalSourceURL(sourceURL);
+    const row = await env.HOTELS_DB.prepare(`
+      SELECT h.id, h.name, h.city, h.address, h.latitude, h.longitude, hs.provider, hs.source_url
+      FROM hotel_sources hs JOIN hotels h ON h.id = hs.hotel_id
+      WHERE (hs.source_url = ? OR hs.canonical_url = ?) ${excludeID ? 'AND h.id != ?' : ''}
+      LIMIT 1
+    `).bind(...(excludeID ? [sourceURL, canonicalSource, excludeID] : [sourceURL, canonicalSource])).first();
+    if (row) return duplicateSummary(row, 'same_source');
+  }
+
+  for (const source of Array.isArray(draft?.sources) ? draft.sources : []) {
+    const provider = cleanText(source?.provider, 80);
+    const providerHotelID = cleanText(source?.providerHotelID, 220);
+    if (!provider || !providerHotelID) continue;
+    const row = await env.HOTELS_DB.prepare(`
+      SELECT h.id, h.name, h.city, h.address, h.latitude, h.longitude, hs.provider, hs.source_url
+      FROM hotel_sources hs JOIN hotels h ON h.id = hs.hotel_id
+      WHERE LOWER(hs.provider) = LOWER(?) AND hs.provider_hotel_id = ? ${excludeID ? 'AND h.id != ?' : ''}
+      LIMIT 1
+    `).bind(...(excludeID ? [provider, providerHotelID, excludeID] : [provider, providerHotelID])).first();
+    if (row) return duplicateSummary(row, 'provider_id');
+  }
+
+  const name = cleanText(draft?.name, 180);
+  const city = canonicalCity(draft?.city);
+  if (!name || !city) return null;
+
+  const latitude = nullableNumber(draft?.latitude, -90, 90);
+  const longitude = nullableNumber(draft?.longitude, -180, 180);
+  const address = cleanText(draft?.address, 900) || '';
+  const candidates = await env.HOTELS_DB.prepare(`
+    SELECT id, name, city, address, latitude, longitude
+    FROM hotels
+    WHERE LOWER(city) = LOWER(?) ${excludeID ? 'AND id != ?' : ''}
+    ORDER BY updated_at DESC
+    LIMIT 600
+  `).bind(...(excludeID ? [city, excludeID] : [city])).all();
+
+  const requestedTokens = hotelNameTokens(name);
+  const requestedAddress = normalizedAddress(address);
+  for (const row of candidates.results || []) {
+    const nameScore = tokenSimilarity(requestedTokens, hotelNameTokens(row.name));
+    const addressScore = requestedAddress && row.address ? tokenSimilarity(addressTokens(requestedAddress), addressTokens(normalizedAddress(row.address))) : 0;
+    const geoMeters = latitude != null && longitude != null && row.latitude != null && row.longitude != null
+      ? haversineMeters(latitude, longitude, Number(row.latitude), Number(row.longitude))
+      : null;
+
+    const strongGeoAndName = geoMeters != null && geoMeters <= 180 && nameScore >= 0.50;
+    const strongNameAndAddress = nameScore >= 0.72 && addressScore >= 0.52;
+    const exactishName = nameScore >= 0.92;
+    if (strongGeoAndName || strongNameAndAddress || exactishName) {
+      return duplicateSummary({ ...row, provider: null, source_url: null }, geoMeters != null ? 'same_property_geo' : 'same_property_name');
+    }
+  }
+
+  return null;
+}
+
+function duplicateSummary(row, match) {
+  return {
+    id: row.id,
+    name: row.name,
+    city: row.city,
+    address: row.address || '',
+    latitude: row.latitude == null ? null : Number(row.latitude),
+    longitude: row.longitude == null ? null : Number(row.longitude),
+    provider: row.provider || null,
+    sourceURL: row.source_url || null,
+    match
+  };
+}
+
+async function createImportJob(request, env, user) {
+  const payload = await readJSON(request, 4_000_000);
+  if (!payload.ok) return payload.response;
+  const draft = payload.value?.hotel || payload.value;
+  const selectedImages = Array.isArray(payload.value?.images)
+    ? payload.value.images
+    : Array.isArray(draft?.images) ? draft.images.filter(image => image?.selected !== false) : [];
+
+  const duplicate = await findDuplicateHotel(env, draft, null);
+  if (duplicate) return json({ ok: false, error: 'HOTEL_ALREADY_EXISTS', duplicate }, 409);
+
+  const canPublish = Boolean(payload.value?.publishWhenComplete) && selectedImages.length >= 4 && Array.isArray(draft?.rooms) && draft.rooms.length > 0;
+  const safeDraft = { ...draft, status: 'draft' };
+  const persisted = await persistHotelDraft(safeDraft, env, user, { checkDuplicate: false });
+  if (!persisted.ok) return persisted.response;
+
+  const hotelID = persisted.hotelID;
+  const jobID = `hotel-import-${crypto.randomUUID()}`;
+  const images = selectedImages.slice(0, 240).map((image, index) => ({
+    url: cleanURL(image?.url),
+    provider: cleanText(image?.provider, 80) || 'unknown',
+    sourcePageURL: cleanURL(image?.sourcePageURL),
+    category: validImageCategory(image?.kind) || validImageCategory(image?.category) || 'gallery',
+    label: cleanText(image?.label, 600),
+    roomName: cleanText(image?.roomName, 260),
+    isCover: image?.isCover === true,
+    position: index
+  })).filter(image => image.url);
+
+  if (!images.length) return json({ ok: false, error: 'NO_IMAGES_SELECTED' }, 400);
+
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_import_jobs (
+      id, hotel_id, hotel_name, source_provider, source_url, status, stage, progress,
+      total_images, stored_images, failed_images, images_json, publish_when_complete, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, 0, 0, ?, ?, ?)
+  `).bind(
+    jobID,
+    hotelID,
+    cleanText(draft?.name, 180) || hotelID,
+    cleanText(draft?.sources?.[0]?.provider, 80),
+    cleanURL(draft?.sources?.[0]?.sourceURL),
+    images.length,
+    JSON.stringify(images),
+    canPublish ? 1 : 0,
+    new Date().toISOString()
+  ).run();
+
+  try {
+    const instance = await env.HOTEL_IMPORT_WORKFLOW.create({
+      id: jobID,
+      params: { jobID, hotelID, images, publishWhenComplete: canPublish }
+    });
+    await env.HOTELS_DB.prepare(`
+      UPDATE hotel_import_jobs SET workflow_instance_id = ?, updated_at = ? WHERE id = ?
+    `).bind(instance.id, new Date().toISOString(), jobID).run();
+  } catch (error) {
+    console.error('HOTEL_WORKFLOW_START_FAILED', error);
+    await env.HOTELS_DB.prepare(`
+      UPDATE hotel_import_jobs SET status = 'failed', stage = 'start_failed', error = ?, completed_at = ?, updated_at = ? WHERE id = ?
+    `).bind(String(error?.message || error).slice(0, 1200), new Date().toISOString(), new Date().toISOString(), jobID).run();
+    return json({ ok: false, error: 'IMPORT_WORKFLOW_START_FAILED', jobID }, 503);
+  }
+
+  return importJobDetail(env, jobID, 202);
+}
+
+async function listImportJobs(env, url) {
+  const activeOnly = url.searchParams.get('active') === '1';
+  const sql = `
+    SELECT * FROM hotel_import_jobs
+    ${activeOnly ? "WHERE status IN ('queued','running')" : ''}
+    ORDER BY created_at DESC
+    LIMIT 80
+  `;
+  const result = await env.HOTELS_DB.prepare(sql).all();
+  return json({ ok: true, jobs: (result.results || []).map(importJobRow) });
+}
+
+async function importJobDetail(env, jobID, status = 200) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM hotel_import_jobs WHERE id = ?').bind(jobID).first();
+  if (!row) return json({ ok: false, error: 'IMPORT_JOB_NOT_FOUND' }, 404);
+  return json({ ok: true, job: importJobRow(row) }, status);
+}
+
+async function retryImportJob(env, jobID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM hotel_import_jobs WHERE id = ?').bind(jobID).first();
+  if (!row) return json({ ok: false, error: 'IMPORT_JOB_NOT_FOUND' }, 404);
+  if (!['failed'].includes(row.status)) return json({ ok: false, error: 'IMPORT_JOB_NOT_RETRYABLE' }, 409);
+
+  const images = parseJSONArray(row.images_json);
+  await env.HOTELS_DB.prepare(`
+    UPDATE hotel_import_jobs
+    SET status='queued', stage='retry_queued', progress=0, stored_images=0, failed_images=0, error=NULL,
+        started_at=NULL, completed_at=NULL, updated_at=? WHERE id=?
+  `).bind(new Date().toISOString(), jobID).run();
+  await deleteAllHotelImagesInternal(env, row.hotel_id);
+
+  try {
+    const instance = await env.HOTEL_IMPORT_WORKFLOW.create({
+      id: `${jobID}-retry-${crypto.randomUUID().slice(0, 8)}`,
+      params: { jobID, hotelID: row.hotel_id, images, publishWhenComplete: Number(row.publish_when_complete) === 1 }
+    });
+    await env.HOTELS_DB.prepare('UPDATE hotel_import_jobs SET workflow_instance_id=?, updated_at=? WHERE id=?')
+      .bind(instance.id, new Date().toISOString(), jobID).run();
+  } catch (error) {
+    await env.HOTELS_DB.prepare("UPDATE hotel_import_jobs SET status='failed', stage='start_failed', error=?, updated_at=? WHERE id=?")
+      .bind(String(error?.message || error).slice(0, 1200), new Date().toISOString(), jobID).run();
+    return json({ ok: false, error: 'IMPORT_WORKFLOW_START_FAILED' }, 503);
+  }
+  return importJobDetail(env, jobID, 202);
+}
+
+function importJobRow(row) {
+  return {
+    id: row.id,
+    hotelID: row.hotel_id,
+    hotelName: row.hotel_name,
+    sourceProvider: row.source_provider || null,
+    sourceURL: row.source_url || null,
+    status: row.status,
+    stage: row.stage,
+    progress: Number(row.progress || 0),
+    totalImages: Number(row.total_images || 0),
+    storedImages: Number(row.stored_images || 0),
+    failedImages: Number(row.failed_images || 0),
+    publishWhenComplete: Number(row.publish_when_complete || 0) === 1,
+    error: row.error || null,
+    createdAt: row.created_at,
+    startedAt: row.started_at || null,
+    completedAt: row.completed_at || null,
+    updatedAt: row.updated_at
+  };
+}
+
+export class HotelImportWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    const { jobID, hotelID, images = [], publishWhenComplete = false } = event.payload || {};
+    if (!safeID(jobID) || !safeID(hotelID) || !Array.isArray(images)) {
+      throw new Error('INVALID_IMPORT_WORKFLOW_PAYLOAD');
+    }
+
+    await step.do('mark job running', async () => {
+      const now = new Date().toISOString();
+      await this.env.HOTELS_DB.prepare(`
+        UPDATE hotel_import_jobs
+        SET status='running', stage='downloading_images', progress=1, started_at=COALESCE(started_at, ?), updated_at=?
+        WHERE id=?
+      `).bind(now, now, jobID).run();
+      return { ok: true };
+    });
+
+    let stored = 0;
+    let failed = 0;
+    const total = images.length;
+
+    for (let index = 0; index < total; index += 1) {
+      const item = images[index];
+      let result;
+      try {
+        result = await step.do(
+          `store image ${String(index + 1).padStart(3, '0')}`,
+          { retries: { limit: 4, delay: '4 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
+          async () => storeRemoteHotelImage(this.env, hotelID, item, index)
+        );
+      } catch (error) {
+        result = { ok: false, error: String(error?.message || error).slice(0, 900) };
+      }
+
+      if (result?.ok) stored += 1;
+      else failed += 1;
+
+      const progress = Math.min(96, Math.max(2, Math.round(((index + 1) / Math.max(total, 1)) * 94)));
+      await step.do(`record progress ${String(index + 1).padStart(3, '0')}`, async () => {
+        await this.env.HOTELS_DB.prepare(`
+          UPDATE hotel_import_jobs
+          SET stored_images=?, failed_images=?, progress=?, stage=?, error=?, updated_at=?
+          WHERE id=?
+        `).bind(
+          stored,
+          failed,
+          progress,
+          result?.ok ? 'downloading_images' : 'image_retry_exhausted',
+          result?.ok ? null : result?.error || 'IMAGE_FAILED',
+          new Date().toISOString(),
+          jobID
+        ).run();
+        return { stored, failed, progress };
+      });
+    }
+
+    const finalState = await step.do('finalize hotel import', async () => {
+      const now = new Date().toISOString();
+      const completed = failed === 0 && stored === total && total > 0;
+      if (completed && publishWhenComplete) {
+        await this.env.HOTELS_DB.prepare("UPDATE hotels SET status='published', updated_at=? WHERE id=?")
+          .bind(now, hotelID).run();
+      } else {
+        await this.env.HOTELS_DB.prepare("UPDATE hotels SET status='draft', updated_at=? WHERE id=?")
+          .bind(now, hotelID).run();
+      }
+      await this.env.HOTELS_DB.prepare(`
+        UPDATE hotel_import_jobs
+        SET status=?, stage=?, progress=100, stored_images=?, failed_images=?, completed_at=?, updated_at=?, error=?
+        WHERE id=?
+      `).bind(
+        completed ? 'completed' : 'failed',
+        completed ? 'completed' : 'incomplete_media',
+        stored,
+        failed,
+        now,
+        now,
+        completed ? null : `Не удалось сохранить ${failed} из ${total} фотографий. Отель оставлен черновиком.`,
+        jobID
+      ).run();
+      return { completed, stored, failed, total, hotelID };
+    });
+
+    return finalState;
+  }
+}
+
+async function storeRemoteHotelImage(env, hotelID, item, fallbackPosition) {
+  const sourceURL = cleanURL(item?.url);
+  if (!sourceURL) throw new Error('INVALID_IMAGE_URL');
+  const optimizedURL = optimizeProviderImageURL(sourceURL);
+  const headers = new Headers({
+    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 Version/17.6 Mobile/15E148 Safari/604.1',
+    'accept': 'image/avif,image/webp,image/jpeg,image/png,image/*;q=0.8',
+    'accept-language': 'en-US,en;q=0.9'
+  });
+  if (cleanURL(item?.sourcePageURL)) headers.set('referer', item.sourcePageURL);
+
+  const response = await fetch(optimizedURL, { headers, redirect: 'follow' });
+  if (!response.ok) throw new Error(`IMAGE_HTTP_${response.status}`);
+  const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!['image/jpeg','image/jpg','image/png','image/webp','image/avif'].includes(contentType)) {
+    throw new Error(`UNSUPPORTED_IMAGE_TYPE_${contentType || 'unknown'}`);
+  }
+  const announced = Number(response.headers.get('content-length') || 0);
+  if (announced > 10 * 1024 * 1024) throw new Error('IMAGE_TOO_LARGE');
+  const bytes = await response.arrayBuffer();
+  if (!bytes.byteLength) throw new Error('EMPTY_IMAGE');
+  if (bytes.byteLength > 10 * 1024 * 1024) throw new Error('IMAGE_TOO_LARGE');
+
+  const imageID = crypto.randomUUID();
+  const extension = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : contentType.includes('avif') ? 'avif' : 'jpg';
+  const objectKey = `hotels/${hotelID}/${imageID}.${extension}`;
+  const provider = cleanText(item?.provider, 80) || 'unknown';
+  const category = validImageCategory(item?.category) || 'gallery';
+  const label = cleanText(item?.label, 600);
+  const roomName = cleanText(item?.roomName, 260);
+  const position = boundedInteger(item?.position, 0, 10000, fallbackPosition);
+  const isCover = item?.isCover === true ? 1 : 0;
+
+  await env.HOTELS_MEDIA.put(objectKey, bytes, {
+    httpMetadata: { contentType },
+    customMetadata: { hotelID, provider, category, roomName: roomName || '', source: 'background-import' }
+  });
+
+  try {
+    const statements = [];
+    if (isCover) statements.push(env.HOTELS_DB.prepare('UPDATE hotel_images SET is_cover=0 WHERE hotel_id=?').bind(hotelID));
+    statements.push(env.HOTELS_DB.prepare(`
+      INSERT INTO hotel_images (
+        id, hotel_id, object_key, source_provider, source_url, category, label, room_name,
+        content_type, byte_size, position, is_cover
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(imageID, hotelID, objectKey, provider, sourceURL, category, label, roomName, contentType, bytes.byteLength, position, isCover));
+    await env.HOTELS_DB.batch(statements);
+  } catch (error) {
+    await env.HOTELS_MEDIA.delete(objectKey).catch(() => {});
+    throw error;
+  }
+
+  return { ok: true, imageID, byteSize: bytes.byteLength };
+}
+
+function optimizeProviderImageURL(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (host.includes('trvl-media.com') || host.includes('expedia')) {
+      if (!url.searchParams.has('impolicy')) url.searchParams.set('impolicy', 'resizecrop');
+      if (!url.searchParams.has('rw')) url.searchParams.set('rw', '1600');
+      if (!url.searchParams.has('ra')) url.searchParams.set('ra', 'fit');
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+async function deleteAllHotelImagesInternal(env, hotelID) {
+  const rows = await env.HOTELS_DB.prepare('SELECT object_key FROM hotel_images WHERE hotel_id=?').bind(hotelID).all();
+  await Promise.allSettled((rows.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
+  await env.HOTELS_DB.prepare('DELETE FROM hotel_images WHERE hotel_id=?').bind(hotelID).run();
+}
+
+async function hotelTranslation(env, hotelID, rawLocale) {
+  const locale = normalizeLocale(rawLocale);
+  if (!locale) return json({ ok: false, error: 'UNSUPPORTED_LOCALE' }, 400);
+  const hotelResponse = await hotelDataForTranslation(env, hotelID);
+  if (!hotelResponse) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+  if (locale === 'en') return json({ ok: true, locale, cached: true, translation: hotelResponse }, 200, PUBLIC_CACHE_HEADERS);
+
+  const sourceHash = await sha256Hex(JSON.stringify(hotelResponse));
+  const cached = await env.HOTELS_DB.prepare('SELECT source_hash, payload_json FROM hotel_translations WHERE hotel_id=? AND locale=?')
+    .bind(hotelID, locale).first();
+  if (cached?.source_hash === sourceHash) {
+    try {
+      return json({ ok: true, locale, cached: true, translation: JSON.parse(cached.payload_json) }, 200, PUBLIC_CACHE_HEADERS);
+    } catch {}
+  }
+
+  const languageName = locale === 'ru' ? 'Russian' : locale === 'uz-Latn' ? 'Uzbek in Latin script' : 'Uzbek in Cyrillic script';
+  const system = `You are a hotel localization engine. Translate all human-readable strings in the supplied JSON into ${languageName}. Preserve JSON keys, IDs, URLs, numbers, measurements, times, brand names, hotel names and place names unless a conventional localized place name is obvious. Never invent missing information. Do not summarize. Return ONLY valid JSON with exactly the same structure.`;
+  let answer;
+  try {
+    const ai = await env.AI.run('@cf/zai-org/glm-4.7-flash', {
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: JSON.stringify(hotelResponse) }
+      ],
+      max_tokens: 12000,
+      temperature: 0.05
+    });
+    answer = ai?.response ?? ai?.result?.response ?? ai?.choices?.[0]?.message?.content;
+  } catch (error) {
+    console.error('HOTEL_TRANSLATION_AI_FAILED', error);
+    return json({ ok: false, error: 'TRANSLATION_UNAVAILABLE' }, 503);
+  }
+
+  const translated = parseJSONEnvelope(answer);
+  if (!translated || typeof translated !== 'object') return json({ ok: false, error: 'TRANSLATION_INVALID' }, 502);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_translations (hotel_id, locale, source_hash, payload_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(hotel_id, locale) DO UPDATE SET source_hash=excluded.source_hash, payload_json=excluded.payload_json, updated_at=excluded.updated_at
+  `).bind(hotelID, locale, sourceHash, JSON.stringify(translated), now, now).run();
+  return json({ ok: true, locale, cached: false, translation: translated }, 200, PUBLIC_CACHE_HEADERS);
+}
+
+async function hotelDataForTranslation(env, hotelID) {
+  const hotel = await env.HOTELS_DB.prepare("SELECT * FROM hotels WHERE id=? AND status='published'").bind(hotelID).first();
+  if (!hotel) return null;
+  const [amenities, rooms] = await Promise.all([
+    env.HOTELS_DB.prepare('SELECT amenity FROM hotel_amenities WHERE hotel_id=? ORDER BY position').bind(hotelID).all(),
+    env.HOTELS_DB.prepare('SELECT id,name,max_guests,size_m2,beds,view,description,amenities_json FROM hotel_rooms WHERE hotel_id=? ORDER BY position').bind(hotelID).all()
+  ]);
+  return {
+    name: hotel.name,
+    city: hotel.city,
+    country: hotel.country,
+    propertyType: hotel.property_type || null,
+    address: hotel.address || '',
+    description: hotel.description || '',
+    checkIn: hotel.check_in || null,
+    checkOut: hotel.check_out || null,
+    amenities: (amenities.results || []).map(x => x.amenity),
+    policies: parseJSONArray(hotel.policies_json),
+    nearby: parseJSONArray(hotel.nearby_json),
+    facts: parseJSONArray(hotel.facts_json),
+    fees: parseJSONArray(hotel.fees_json),
+    services: parseJSONArray(hotel.services_json),
+    rooms: (rooms.results || []).map(row => ({
+      id: row.id,
+      name: row.name,
+      maxGuests: row.max_guests == null ? null : Number(row.max_guests),
+      sizeM2: row.size_m2 == null ? null : Number(row.size_m2),
+      beds: row.beds || null,
+      view: row.view || null,
+      description: row.description || null,
+      amenities: parseJSONArray(row.amenities_json)
+    }))
+  };
+}
+
+function normalizeLocale(value) {
+  const raw = String(value || '').trim().replace('_', '-').toLowerCase();
+  if (raw === 'en' || raw.startsWith('en-')) return 'en';
+  if (raw === 'ru' || raw.startsWith('ru-')) return 'ru';
+  if (['uz','uz-latn','uz-latin'].includes(raw)) return 'uz-Latn';
+  if (['uz-cyrl','uz-cyrillic','uz-uz-cyrl'].includes(raw)) return 'uz-Cyrl';
+  return null;
+}
+
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+function parseJSONEnvelope(value) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try { return JSON.parse(trimmed); } catch {}
+  const start = Math.min(...['{','['].map(ch => trimmed.indexOf(ch)).filter(i => i >= 0));
+  const end = Math.max(trimmed.lastIndexOf('}'), trimmed.lastIndexOf(']'));
+  if (Number.isFinite(start) && start >= 0 && end > start) {
+    try { return JSON.parse(trimmed.slice(start, end + 1)); } catch {}
+  }
+  return null;
 }
 
 async function deleteAllHotelImages(env, hotelID) {
@@ -608,6 +1176,13 @@ function sourceRow(row) {
     roomNames: parseJSONArray(row.room_names_json),
     rooms: parseJSONArray(row.room_details_json),
     policies: parseJSONArray(row.policies_json),
+    providerHotelID: row.provider_hotel_id || null,
+    canonicalURL: row.canonical_url || null,
+    googleMapsURL: row.google_maps_url || null,
+    nearby: parseJSONArray(row.nearby_json),
+    facts: parseJSONArray(row.facts_json),
+    fees: parseJSONArray(row.fees_json),
+    services: parseJSONArray(row.services_json),
     checkedAt: row.checked_at
   };
 }
@@ -695,6 +1270,130 @@ function uniqueStrings(value, maxItems, maxLength) {
     if (result.length >= maxItems) break;
   }
   return result;
+}
+
+
+function safeObjectArray(value, maxItems = 120, maxBytes = 30_000) {
+  if (!Array.isArray(value)) return [];
+  const result = [];
+  const seen = new Set();
+  let used = 2;
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const clean = {};
+    for (const [key, raw] of Object.entries(item)) {
+      const safeKey = String(key).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+      if (!safeKey) continue;
+      if (typeof raw === 'string') clean[safeKey] = cleanText(raw, 1200);
+      else if (typeof raw === 'number' && Number.isFinite(raw)) clean[safeKey] = raw;
+      else if (typeof raw === 'boolean') clean[safeKey] = raw;
+      else if (raw == null) clean[safeKey] = null;
+    }
+    const encoded = JSON.stringify(clean);
+    if (encoded === '{}' || used + encoded.length > maxBytes) continue;
+    const signature = encoded.toLowerCase();
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    result.push(clean);
+    used += encoded.length + 1;
+    if (result.length >= maxItems) break;
+  }
+  return result;
+}
+
+function validImageCategory(value) {
+  const category = cleanText(typeof value === 'string' ? value : value?.rawValue, 30);
+  return ['exterior','room','bathroom','lobby','restaurant','amenity','view','gallery','other'].includes(category) ? category : null;
+}
+
+function isPlausibleRoomName(value) {
+  const text = cleanText(value, 260);
+  if (!text || text.length < 4 || text.length > 240) return false;
+  const lower = text.toLowerCase();
+  const roomToken = /(room|suite|studio|apartment|villa|king|queen|twin|double|triple|quad|family|deluxe|superior|classic|standard|executive|premier|номер|люкс|комнат|غرفة|جناح)/i;
+  const blocked = /(how much|parking|breakfast|restaurant|front desk|reception|concierge|room service|meeting room|prayer room|laundry room|locker room|non-smoking rooms|family rooms|guest rooms|choose your room|select room|room amenities|frequently asked|question|answer|policy|check[- ]?in|check[- ]?out)/i;
+  if (!roomToken.test(text) || blocked.test(text)) return false;
+  if (/[?؟]$/.test(text)) return false;
+  const words = lower.split(/\s+/).filter(Boolean);
+  if (words.length > 24) return false;
+  return true;
+}
+
+function canonicalSourceURL(value) {
+  try {
+    const url = new URL(String(value || ''));
+    url.hash = '';
+    const keep = new Set(['hotelid','hotel_id','propertyid','property_id','id']);
+    for (const key of [...url.searchParams.keys()]) {
+      if (!keep.has(key.toLowerCase())) url.searchParams.delete(key);
+    }
+    url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString().slice(0, 3000);
+  } catch {
+    return null;
+  }
+}
+
+function canonicalHotelKey(name, city, address, latitude, longitude) {
+  const namePart = [...hotelNameTokens(name)].sort().join('-');
+  const cityPart = slugify(canonicalCity(city) || city || '');
+  let locationPart = '';
+  const lat = nullableNumber(latitude, -90, 90);
+  const lng = nullableNumber(longitude, -180, 180);
+  if (lat != null && lng != null) locationPart = `${lat.toFixed(3)}:${lng.toFixed(3)}`;
+  else locationPart = [...addressTokens(normalizedAddress(address))].slice(0, 8).join('-');
+  return cleanText(`${cityPart}|${namePart}|${locationPart}`, 600);
+}
+
+function normalizedAddress(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\b(saudi arabia|kingdom of saudi arabia|ksa)\b/g, ' ')
+    .replace(/[^a-z0-9\u0600-\u06ff]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hotelNameTokens(value) {
+  const stop = new Set(['hotel','hotels','resort','resorts','by','the','makkah','mecca','madinah','medina','saudi','arabia','ksa','فندق']);
+  const text = String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9\u0600-\u06ff]+/g, ' ');
+  return new Set(text.split(/\s+/).filter(token => token.length > 1 && !stop.has(token)));
+}
+
+function addressTokens(value) {
+  const stop = new Set(['street','st','road','rd','district','area','saudi','arabia','makkah','mecca','madinah','medina']);
+  return new Set(String(value || '').split(/\s+/).filter(token => token.length > 1 && !stop.has(token)));
+}
+
+function tokenSimilarity(a, b) {
+  if (!(a instanceof Set) || !(b instanceof Set) || !a.size || !b.size) return 0;
+  let overlap = 0;
+  for (const token of a) if (b.has(token)) overlap += 1;
+  return overlap / Math.max(a.size, b.size);
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const toRad = deg => deg * Math.PI / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function googleMapsURL(latitude, longitude, address) {
+  const lat = nullableNumber(latitude, -90, 90);
+  const lng = nullableNumber(longitude, -180, 180);
+  const query = lat != null && lng != null ? `${lat},${lng}` : cleanText(address, 900);
+  return query ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}` : null;
 }
 
 function slugify(value) {

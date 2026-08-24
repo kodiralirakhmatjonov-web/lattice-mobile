@@ -19,12 +19,17 @@ enum HotelNormalizer {
         draft.longitude = snapshot.longitude
         draft.checkIn = clean(snapshot.checkIn)
         draft.checkOut = clean(snapshot.checkOut)
-        draft.amenities = unique(snapshot.amenities).prefix(120).map { $0 }
-        draft.policies = unique(snapshot.policies).prefix(80).map { $0 }
+        draft.amenities = unique(snapshot.amenities).prefix(180).map { $0 }
+        draft.policies = unique(snapshot.policies).prefix(120).map { $0 }
+        draft.googleMapsURL = clean(snapshot.googleMapsURL)
+        draft.nearby = Array((snapshot.nearby ?? []).prefix(100))
+        draft.facts = Array((snapshot.facts ?? []).prefix(180))
+        draft.fees = Array((snapshot.fees ?? []).prefix(100))
+        draft.services = unique(snapshot.services ?? []).prefix(180).map { $0 }
         draft.sources = [snapshot]
 
         if !snapshot.rooms.isEmpty {
-            draft.rooms = snapshot.rooms.prefix(80).map { room in
+            draft.rooms = snapshot.rooms.filter { plausibleRoomName($0.name) }.prefix(100).map { room in
                 HotelRoomDraft(
                     name: clean(room.name) ?? room.name,
                     maxGuests: room.maxGuests,
@@ -36,7 +41,7 @@ enum HotelNormalizer {
                 )
             }
         } else {
-            draft.rooms = unique(snapshot.roomNames).prefix(80).map { HotelRoomDraft(name: $0) }
+            draft.rooms = unique(snapshot.roomNames).filter(plausibleRoomName).prefix(100).map { HotelRoomDraft(name: $0) }
         }
 
         var seen = Set<String>()
@@ -130,6 +135,20 @@ enum HotelNormalizer {
         case .gallery: return 7
         case .other: return 99
         }
+    }
+
+    private static func plausibleRoomName(_ value: String) -> Bool {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 4, text.count <= 220 else { return false }
+        let lower = text.lowercased()
+        let blocked = [
+            "how much", "parking", "breakfast", "restaurant", "front desk", "concierge",
+            "room service", "meeting room", "prayer room", "laundry room", "locker room",
+            "choose your room", "select room", "room amenities", "frequently asked", "check-in", "check-out"
+        ]
+        if blocked.contains(where: lower.contains) || text.hasSuffix("?") { return false }
+        let markers = ["room", "suite", "studio", "apartment", "villa", "king", "queen", "twin", "double", "triple", "quad", "deluxe", "superior", "classic", "standard", "executive", "premier", "номер", "люкс", "غرفة", "جناح"]
+        return markers.contains(where: lower.contains)
     }
 
     private static func clean(_ value: String?) -> String? {

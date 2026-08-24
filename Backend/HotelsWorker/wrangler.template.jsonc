@@ -28,6 +28,16 @@
       "bucket_name": "iumrah-hotels-media"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
+  "workflows": [
+    {
+      "name": "iumrah-hotel-import",
+      "binding": "HOTEL_IMPORT_WORKFLOW",
+      "class_name": "HotelImportWorkflow"
+    }
+  ],
   "vars": {
     "AUTH_SESSION_URL": "https://iumrah.app/api/auth/staff/session"
   }

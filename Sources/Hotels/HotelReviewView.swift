@@ -5,6 +5,7 @@ struct HotelReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var publishing = false
     @State private var publishStatus: String?
+    @State private var importJob: HotelImportJob?
 
     private let columns = [
         GridItem(.flexible(), spacing: 8),
@@ -18,9 +19,12 @@ struct HotelReviewView: View {
                     hotelHero(draft)
                     sourceCard(draft)
                     hotelFacts(draft)
+                    locationDetails(draft)
+                    servicesAndFacts(draft)
                     gallery(draft)
                     rooms(draft)
                     amenities(draft)
+                    fees(draft)
                     policies(draft)
                     publishBlock(draft)
                 }
@@ -173,6 +177,92 @@ struct HotelReviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private func locationDetails(_ draft: HotelDraft) -> some View {
+        if !draft.nearby.isEmpty || draft.googleMapsURL != nil {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Рядом с отелем").font(.title2.bold())
+                    Spacer()
+                    if let maps = draft.googleMapsURL, let url = URL(string: maps) {
+                        Link(destination: url) {
+                            Label("Карта", systemImage: "map")
+                                .font(.subheadline.bold())
+                        }
+                    }
+                }
+
+                ForEach(draft.nearby) { place in
+                    HStack(alignment: .top, spacing: 11) {
+                        Image(systemName: "mappin.and.ellipse")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(place.name).font(.subheadline.weight(.semibold))
+                            HStack(spacing: 6) {
+                                if let minutes = place.durationMinutes {
+                                    Text("\(minutes) мин \(place.travelMode ?? "")")
+                                }
+                                if let distance = place.distanceText { Text(distance) }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .padding(16)
+            .businessCard(radius: 26)
+        }
+    }
+
+    @ViewBuilder private func servicesAndFacts(_ draft: HotelDraft) -> some View {
+        if !draft.services.isEmpty || !draft.facts.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Сервисы и детали").font(.title2.bold())
+
+                if !draft.services.isEmpty {
+                    FlowLayout {
+                        ForEach(draft.services, id: \.self) { service in
+                            Text(service)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(BusinessDesign.secondarySurface, in: Capsule())
+                        }
+                    }
+                }
+
+                ForEach(draft.facts) { fact in
+                    factRow("checkmark.circle", fact.label, fact.value == "Yes" ? fact.group : fact.value)
+                }
+            }
+            .padding(16)
+            .businessCard(radius: 26)
+        }
+    }
+
+    @ViewBuilder private func fees(_ draft: HotelDraft) -> some View {
+        if !draft.fees.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Сборы и стоимость услуг").font(.title2.bold())
+                ForEach(draft.fees) { fee in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "creditcard")
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 1)
+                        Text(fee.value)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(14)
+            .businessCard(radius: 28)
         }
     }
 
@@ -386,6 +476,23 @@ struct HotelReviewView: View {
                     .multilineTextAlignment(.center)
             }
 
+            if let job = importJob {
+                VStack(spacing: 7) {
+                    HStack {
+                        Text(job.hotelName).font(.caption.bold())
+                        Spacer()
+                        Text("\(job.progress)%").font(.caption.monospacedDigit())
+                    }
+                    ProgressView(value: Double(job.progress), total: 100)
+                        .tint(.black)
+                    Text("Фото: \(job.storedImages)/\(job.totalImages) · \(job.stage)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+
             if !canPublish {
                 Text("Карточка будет сохранена как черновик, пока у неё нет минимум 4 фотографий и распознанных типов номеров.")
                     .font(.footnote)
@@ -395,47 +502,26 @@ struct HotelReviewView: View {
 
             Button {
                 publishing = true
-                publishStatus = "Сохраняем данные отеля…"
+                publishStatus = "Передаём отель в защищённую фоновую очередь…"
                 Task {
                     do {
+                        await BusinessNotifications.prepare()
                         var cloudDraft = draft
                         cloudDraft.status = "draft"
-                        _ = try await APIClient.shared.saveHotel(cloudDraft)
-
-                        publishStatus = "Обновляем медиатеку в R2…"
-                        try await APIClient.shared.clearHotelImages(hotelID: cloudDraft.id)
-
-                        let selected = cloudDraft.selectedImages
-                        var uploaded = 0
-                        var failed = 0
-                        for (index, image) in selected.enumerated() {
-                            publishStatus = "Фото \(index + 1) из \(selected.count)"
-                            do {
-                                try await APIClient.shared.uploadHotelImage(hotelID: cloudDraft.id, candidate: image, position: index)
-                                uploaded += 1
-                            } catch {
-                                failed += 1
-                            }
-                        }
-
-                        if failed == 0 && canPublish {
-                            cloudDraft.status = "published"
-                            _ = try await APIClient.shared.saveHotel(cloudDraft)
-                            publishStatus = "Готово. Отель опубликован · \(uploaded) фото в R2."
-                        } else if failed == 0 {
-                            publishStatus = "Готово. Черновик сохранён · \(uploaded) фото в R2."
-                        } else {
-                            publishStatus = "Данные сохранены как черновик. Фото: \(uploaded) загружено, \(failed) не удалось."
-                        }
+                        let job = try await APIClient.shared.startHotelImport(cloudDraft, publishWhenComplete: canPublish)
+                        importJob = job
+                        publishing = false
+                        publishStatus = "Фоновый импорт запущен. Можно закрыть приложение — Cloudflare продолжит загрузку."
+                        await monitor(jobID: job.id)
                     } catch {
+                        publishing = false
                         publishStatus = "Ошибка Hotels Cloud: \(error.localizedDescription)"
                     }
-                    publishing = false
                 }
             } label: {
                 HStack {
                     if publishing { ProgressView().tint(.white) }
-                    Text(publishing ? "Сохраняем…" : (canPublish ? "Добавить в iumrah Hotels" : "Сохранить черновик"))
+                    Text(publishing ? "Запускаем…" : (importJob?.isActive == true ? "Импорт выполняется в фоне" : (canPublish ? "Добавить в iumrah Hotels" : "Сохранить черновик")))
                 }
                 .font(.headline)
                 .frame(maxWidth: .infinity)
@@ -443,7 +529,7 @@ struct HotelReviewView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.black)
-            .disabled(publishing || draft.sources.isEmpty || draft.selectedImages.isEmpty)
+            .disabled(publishing || importJob?.isActive == true || draft.sources.isEmpty || draft.selectedImages.isEmpty)
 
             Button("Закрыть") { dismiss() }
                 .font(.subheadline.bold())
@@ -451,6 +537,33 @@ struct HotelReviewView: View {
         }
         .padding(14)
         .businessCard(radius: 28)
+    }
+    @MainActor
+    private func monitor(jobID: String) async {
+        var lastStatus = ""
+        for _ in 0..<240 {
+            do {
+                let job = try await APIClient.shared.hotelImportJob(id: jobID)
+                importJob = job
+                if job.status != lastStatus || job.isActive {
+                    lastStatus = job.status
+                    if job.isActive {
+                        publishStatus = "Фоновая загрузка: \(job.storedImages) из \(job.totalImages) фото · \(job.progress)%"
+                    } else if job.isCompleted {
+                        publishStatus = "Готово. \(job.hotelName) сохранён полностью · \(job.storedImages) фото."
+                        await BusinessNotifications.hotelImportFinished(job)
+                        return
+                    } else {
+                        publishStatus = job.error ?? "Импорт остановлен. Отель оставлен черновиком — данные не потеряны."
+                        await BusinessNotifications.hotelImportFinished(job)
+                        return
+                    }
+                }
+            } catch {
+                // The cloud job keeps running even if this screen temporarily loses network.
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
     }
 }
 

@@ -8,6 +8,7 @@ struct HotelsView: View {
     @State private var backendUnavailable = false
     @State private var cloudHealth: HotelCloudHealthResponse?
     @State private var backendMessage: String?
+    @State private var activeJobs: [HotelImportJob] = []
 
     var body: some View {
         ScrollView {
@@ -61,6 +62,33 @@ struct HotelsView: View {
                 }
                 .padding(14)
                 .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                if !activeJobs.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Фоновые импорты").font(.title2.bold())
+                            Spacer()
+                            Text("\(activeJobs.count)").foregroundStyle(.secondary)
+                        }
+                        ForEach(activeJobs) { job in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text(job.hotelName).font(.subheadline.bold()).lineLimit(1)
+                                    Spacer()
+                                    Text("\(job.progress)%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                                ProgressView(value: Double(job.progress), total: 100).tint(.black)
+                                Text("\(job.storedImages)/\(job.totalImages) фото · \(job.stage)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(12)
+                            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+                    }
+                    .padding(16)
+                    .businessCard(radius: 28)
+                }
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -140,7 +168,11 @@ struct HotelsView: View {
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) {
             AddHotelView()
         }
-        .task { await load() }
+        .task {
+            await BusinessNotifications.prepare()
+            await load()
+            await monitorImports()
+        }
         .refreshable { await load() }
     }
 
@@ -164,6 +196,16 @@ struct HotelsView: View {
             cloudHealth = nil
         }
         loading = false
+    }
+
+    @MainActor
+    private func monitorImports() async {
+        while !Task.isCancelled {
+            if let jobs = try? await APIClient.shared.activeHotelImportJobs() {
+                activeJobs = jobs
+            }
+            try? await Task.sleep(nanoseconds: UInt64(activeJobs.isEmpty ? 8_000_000_000 : 2_000_000_000))
+        }
     }
 }
 
@@ -193,99 +235,66 @@ private struct HotelCountCard: View {
 
 private struct AddHotelView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var sourceURL = ""
+    @State private var sourceURLs = Array(repeating: "", count: 4)
     @State private var importRequest: ImportRequest?
+    @State private var duplicateMessages: [Int: String] = [:]
+    @State private var duplicateTasks: [Int: Task<Void, Never>] = [:]
 
     struct ImportRequest: Identifiable {
         let id = UUID()
-        let url: String
+        let urls: [String]
     }
 
-    private var detectedProvider: HotelImportCoordinator.Provider? {
-        var text = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        if !text.lowercased().hasPrefix("http") { text = "https://\(text)" }
-        guard let url = URL(string: text) else { return nil }
-        return HotelImportCoordinator.Provider.detect(from: url)
+    private var validURLs: [String] {
+        sourceURLs.enumerated().compactMap { index, raw in
+            guard duplicateMessages[index] == nil else { return nil }
+            let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return provider(for: clean) == nil ? nil : clean
+        }
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    BusinessBrandLogo(width: 132)
-                        .padding(.top, 6)
-
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Добавить отель")
+                        Text("Добавить отели")
                             .font(.system(size: 38, weight: .bold, design: .rounded))
                             .tracking(-1.4)
-                        Text("Вставьте прямую ссылку на страницу конкретного отеля. Importer не будет искать похожие варианты — он прочитает только эту карточку.")
+                        Text("До четырёх прямых ссылок Booking или Expedia. Importer читает их строго по очереди и никогда не смешивает карточки.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("ССЫЛКА НА ОТЕЛЬ")
-                            .font(.caption2.bold())
-                            .tracking(1.5)
-                            .foregroundStyle(.secondary)
-
-                        HStack(spacing: 10) {
-                            Image(systemName: "link")
-                                .foregroundStyle(.secondary)
-                            TextField("booking.com/hotel/…", text: $sourceURL, axis: .vertical)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .keyboardType(.URL)
-                                .lineLimit(1...3)
-                            Button {
-                                if let value = UIPasteboard.general.string { sourceURL = value }
-                            } label: {
-                                Image(systemName: "doc.on.clipboard")
-                                    .foregroundStyle(.primary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 15)
-                        .padding(.vertical, 14)
-                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                        if let provider = detectedProvider {
-                            Label("Источник: \(provider.rawValue)", systemImage: provider.sourceIcon)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        } else if !sourceURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Label("Нужна ссылка Booking или Expedia", systemImage: "exclamationmark.circle")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 13) {
+                        ForEach(sourceURLs.indices, id: \.self) { index in
+                            hotelURLField(index: index)
                         }
                     }
                     .padding(16)
                     .businessCard(radius: 26)
 
                     VStack(alignment: .leading, spacing: 12) {
-                        importFeature("photo.stack", "Фотографии", "Только медиа конкретной карточки отеля")
-                        importFeature("bed.double", "Номера", "Типы номеров, кровати, вместимость, площадь и вид — если источник их показывает")
-                        importFeature("star", "Рейтинг", "Звёзды, оценка и количество отзывов без копирования комментариев")
-                        importFeature("list.bullet.rectangle", "Данные", "Адрес, описание, удобства, check-in/out и правила")
+                        importFeature("doc.text.magnifyingglass", "Полная карточка", "Рейтинг, отзывы числом, описание, сервисы, правила, сборы и все доступные property details")
+                        importFeature("mappin.and.ellipse", "Локация", "Координаты, Google Maps и расстояния/время до Каабы и других мест, если источник их показывает")
+                        importFeature("photo.stack", "Фотографии", "Только hotel-media конкретной страницы; загрузка в R2 после подтверждения идёт уже на Cloudflare")
+                        importFeature("bed.double", "Номера", "FAQ, парковка и другие посторонние строки больше не могут попасть в список номеров")
                     }
                     .padding(16)
                     .businessCard(radius: 26)
 
                     Button {
-                        let clean = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !clean.isEmpty, detectedProvider != nil else { return }
-                        importRequest = ImportRequest(url: clean)
+                        guard !validURLs.isEmpty else { return }
+                        importRequest = ImportRequest(urls: validURLs)
                     } label: {
-                        Label("Импортировать эту карточку", systemImage: "arrow.down.doc.fill")
+                        Label("Подготовить \(validURLs.count) \(validURLs.count == 1 ? "отель" : "отеля")", systemImage: "arrow.down.doc.fill")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .frame(height: 56)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.black)
-                    .disabled(sourceURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || detectedProvider == nil)
+                    .disabled(validURLs.isEmpty)
                 }
                 .padding(.vertical, 18)
             }
@@ -293,14 +302,103 @@ private struct AddHotelView: View {
             .background(Color.white)
             .navigationTitle("")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    BusinessBrandLogo(width: 118)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Закрыть") { dismiss() }
                 }
             }
             .fullScreenCover(item: $importRequest) { request in
-                HotelImportSessionView(sourceURL: request.url)
+                HotelBatchImportView(sourceURLs: request.urls)
             }
         }
+    }
+
+    @ViewBuilder
+    private func hotelURLField(index: Int) -> some View {
+        let value = sourceURLs[index]
+        let detected = provider(for: value)
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("ССЫЛКА \(index + 1)")
+                    .font(.caption2.bold())
+                    .tracking(1.4)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let detected {
+                    Label(detected.rawValue, systemImage: detected.sourceIcon)
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 10) {
+                Image(systemName: "link")
+                    .foregroundStyle(.secondary)
+                TextField(index == 0 ? "Вставьте ссылку отеля" : "Ещё одна ссылка — необязательно", text: $sourceURLs[index], axis: .vertical)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .lineLimit(1...3)
+                    .onChange(of: sourceURLs[index]) { _, newValue in
+                        scheduleDuplicateCheck(index: index, value: newValue)
+                    }
+                Button {
+                    if let pasted = UIPasteboard.general.string {
+                        sourceURLs[index] = pasted
+                        scheduleDuplicateCheck(index: index, value: pasted)
+                    }
+                } label: {
+                    Image(systemName: "doc.on.clipboard")
+                        .foregroundStyle(.primary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+
+            if let message = duplicateMessages[index] {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && detected == nil {
+                Label("Нужна ссылка Booking или Expedia", systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func scheduleDuplicateCheck(index: Int, value: String) {
+        duplicateTasks[index]?.cancel()
+        duplicateMessages[index] = nil
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard provider(for: clean) != nil else { return }
+        duplicateTasks[index] = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            do {
+                if let duplicate = try await APIClient.shared.checkHotelSourceDuplicate(clean) {
+                    await MainActor.run {
+                        duplicateMessages[index] = "Уже в базе: \(duplicate.name)"
+                    }
+                }
+            } catch {
+                // Full identity dedupe is repeated after the property page is read.
+            }
+        }
+    }
+
+    private func provider(for rawValue: String) -> HotelImportCoordinator.Provider? {
+        var text = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if !text.lowercased().hasPrefix("http://") && !text.lowercased().hasPrefix("https://") { text = "https://\(text)" }
+        guard let url = URL(string: text) else { return nil }
+        return HotelImportCoordinator.Provider.detect(from: url)
     }
 
     private func importFeature(_ symbol: String, _ title: String, _ subtitle: String) -> some View {
