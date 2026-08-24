@@ -6,9 +6,12 @@ enum HotelNormalizer {
         let resolvedCity = canonicalCity(snapshot.city, address: snapshot.address, sourceURL: snapshot.sourceURL)
         var draft = HotelDraft.empty(name: resolvedName, city: resolvedCity)
 
-        draft.id = stableHotelID(name: resolvedName, city: resolvedCity)
+        draft.id = stableHotelID(snapshot: snapshot)
         draft.country = clean(snapshot.country) ?? "Saudi Arabia"
         draft.propertyType = clean(snapshot.propertyType)
+        draft.brand = clean(snapshot.brand)
+        draft.chain = clean(snapshot.chain)
+        draft.postalCode = clean(snapshot.postalCode)
         draft.stars = snapshot.stars
         draft.rating = snapshot.rating
         draft.ratingScale = snapshot.ratingScale
@@ -26,6 +29,13 @@ enum HotelNormalizer {
         draft.facts = Array((snapshot.facts ?? []).prefix(180))
         draft.fees = Array((snapshot.fees ?? []).prefix(100))
         draft.services = unique(snapshot.services ?? []).prefix(180).map { $0 }
+        draft.highlights = unique(snapshot.highlights ?? []).prefix(120).map { $0 }
+        draft.importantInformation = unique(snapshot.importantInformation ?? []).prefix(160).map { $0 }
+        draft.food = Array((snapshot.food ?? []).prefix(160))
+        draft.parkingTransport = Array((snapshot.parkingTransport ?? []).prefix(160))
+        draft.accessibility = unique(snapshot.accessibility ?? []).prefix(120).map { $0 }
+        draft.dataQuality = qualitySummary(snapshot)
+        draft.lifecycleState = "draft"
         draft.sources = [snapshot]
 
         if !snapshot.rooms.isEmpty {
@@ -37,7 +47,11 @@ enum HotelNormalizer {
                     beds: clean(room.beds),
                     view: clean(room.view),
                     description: cleanLong(room.description),
-                    amenities: unique(room.amenities).prefix(60).map { $0 }
+                    amenities: unique(room.amenities).prefix(60).map { $0 },
+                    smoking: clean(room.smoking),
+                    accessibility: unique(room.accessibility).prefix(40).map { $0 },
+                    category: clean(room.category),
+                    bathroom: unique(room.bathroom).prefix(40).map { $0 }
                 )
             }
         } else {
@@ -131,8 +145,14 @@ enum HotelNormalizer {
         case .bathroom: return 3
         case .lobby: return 4
         case .restaurant: return 5
-        case .amenity: return 6
-        case .gallery: return 7
+        case .breakfast: return 6
+        case .lounge: return 7
+        case .pool: return 8
+        case .spa: return 9
+        case .gym: return 10
+        case .facility: return 11
+        case .amenity: return 12
+        case .gallery: return 13
         case .other: return 99
         }
     }
@@ -151,6 +171,17 @@ enum HotelNormalizer {
         return markers.contains(where: lower.contains)
     }
 
+    private static func qualitySummary(_ snapshot: ProviderSnapshot) -> [String: String] {
+        var result: [String: String] = [:]
+        result["identity"] = (snapshot.name != nil && snapshot.address != nil) ? "complete" : "partial"
+        result["geo"] = (snapshot.latitude != nil && snapshot.longitude != nil) ? "source" : "missing"
+        result["rooms"] = snapshot.rooms.isEmpty ? "missing" : "structured"
+        result["media"] = (snapshot.imageMetadata?.isEmpty == false) ? "classified" : "partial"
+        result["nearby"] = (snapshot.nearby?.isEmpty == false) ? "structured" : "missing"
+        result["propertyContent"] = ((snapshot.facts?.isEmpty == false) || !(snapshot.amenities.isEmpty)) ? "structured" : "partial"
+        return result
+    }
+
     private static func clean(_ value: String?) -> String? {
         guard let value else { return nil }
         let cleaned = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -167,14 +198,24 @@ enum HotelNormalizer {
         return String(cleaned.prefix(12_000))
     }
 
-    private static func stableHotelID(name: String, city: String) -> String {
-        let raw = "\(city)-\(name)"
+    private static func stableHotelID(snapshot: ProviderSnapshot) -> String {
+        let provider = snapshot.provider
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
             .uppercased()
-        let slug = raw
             .replacingOccurrences(of: "[^A-Z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        let short = String(slug.prefix(88))
-        return "IUM-HOTEL-\(short.isEmpty ? UUID().uuidString.prefix(8) : Substring(short))"
+        if let sourceID = clean(snapshot.providerHotelID) {
+            let normalizedSourceID = sourceID
+                .uppercased()
+                .replacingOccurrences(of: "[^A-Z0-9._:-]+", with: "-", options: .regularExpression)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            if !normalizedSourceID.isEmpty {
+                return String("IUM-HOTEL-\(provider)-\(normalizedSourceID)".prefix(120))
+            }
+        }
+        // Never derive identity from name+city alone: two distinct physical hotels
+        // may legitimately share a similar name. Server-side duplicate matching is
+        // responsible for physical-property identity.
+        return "IUM-HOTEL-\(provider)-\(UUID().uuidString)"
     }
 }

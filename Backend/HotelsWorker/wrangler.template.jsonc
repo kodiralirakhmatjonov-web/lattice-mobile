@@ -40,5 +40,8 @@
   ],
   "vars": {
     "AUTH_SESSION_URL": "https://iumrah.app/api/auth/staff/session"
+  },
+  "images": {
+    "binding": "IMAGES"
   }
 }

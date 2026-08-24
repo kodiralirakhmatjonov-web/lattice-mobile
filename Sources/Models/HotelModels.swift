@@ -6,6 +6,12 @@ enum HotelImageKind: String, Codable, CaseIterable, Hashable {
     case bathroom
     case lobby
     case restaurant
+    case breakfast
+    case gym
+    case spa
+    case pool
+    case lounge
+    case facility
     case amenity
     case view
     case gallery
@@ -18,6 +24,12 @@ enum HotelImageKind: String, Codable, CaseIterable, Hashable {
         case .bathroom: return "Ванные"
         case .lobby: return "Лобби"
         case .restaurant: return "Рестораны"
+        case .breakfast: return "Завтрак"
+        case .gym: return "Фитнес"
+        case .spa: return "Спа"
+        case .pool: return "Бассейн"
+        case .lounge: return "Лаунж"
+        case .facility: return "Инфраструктура"
         case .amenity: return "Удобства"
         case .view: return "Виды"
         case .gallery: return "Галерея"
@@ -44,6 +56,10 @@ struct ProviderRoomSnapshot: Codable, Identifiable, Hashable {
     let view: String?
     let description: String?
     let amenities: [String]
+    let smoking: String?
+    let accessibility: [String]
+    let category: String?
+    let bathroom: [String]
 
     init(
         id: UUID = UUID(),
@@ -53,7 +69,11 @@ struct ProviderRoomSnapshot: Codable, Identifiable, Hashable {
         beds: String? = nil,
         view: String? = nil,
         description: String? = nil,
-        amenities: [String] = []
+        amenities: [String] = [],
+        smoking: String? = nil,
+        accessibility: [String] = [],
+        category: String? = nil,
+        bathroom: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -63,6 +83,10 @@ struct ProviderRoomSnapshot: Codable, Identifiable, Hashable {
         self.view = view
         self.description = description
         self.amenities = amenities
+        self.smoking = smoking
+        self.accessibility = accessibility
+        self.category = category
+        self.bathroom = bathroom
     }
 }
 
@@ -108,6 +132,9 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
     let address: String?
     let description: String?
     let propertyType: String?
+    let brand: String?
+    let chain: String?
+    let postalCode: String?
     let stars: Int?
     let rating: Double?
     let ratingScale: Double?
@@ -129,6 +156,12 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
     let facts: [ProviderFact]?
     let fees: [ProviderFact]?
     let services: [String]?
+    let highlights: [String]?
+    let importantInformation: [String]?
+    let food: [ProviderFact]?
+    let parkingTransport: [ProviderFact]?
+    let accessibility: [String]?
+    let rawIdentity: [String: String]?
 
     init(
         id: UUID = UUID(),
@@ -140,6 +173,9 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
         address: String?,
         description: String?,
         propertyType: String?,
+        brand: String? = nil,
+        chain: String? = nil,
+        postalCode: String? = nil,
         stars: Int?,
         rating: Double?,
         ratingScale: Double?,
@@ -160,7 +196,13 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
         nearby: [ProviderNearbyPlace]? = nil,
         facts: [ProviderFact]? = nil,
         fees: [ProviderFact]? = nil,
-        services: [String]? = nil
+        services: [String]? = nil,
+        highlights: [String]? = nil,
+        importantInformation: [String]? = nil,
+        food: [ProviderFact]? = nil,
+        parkingTransport: [ProviderFact]? = nil,
+        accessibility: [String]? = nil,
+        rawIdentity: [String: String]? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -171,6 +213,9 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
         self.address = address
         self.description = description
         self.propertyType = propertyType
+        self.brand = brand
+        self.chain = chain
+        self.postalCode = postalCode
         self.stars = stars
         self.rating = rating
         self.ratingScale = ratingScale
@@ -192,6 +237,12 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
         self.facts = facts
         self.fees = fees
         self.services = services
+        self.highlights = highlights
+        self.importantInformation = importantInformation
+        self.food = food
+        self.parkingTransport = parkingTransport
+        self.accessibility = accessibility
+        self.rawIdentity = rawIdentity
     }
 }
 
@@ -238,6 +289,10 @@ struct HotelRoomDraft: Codable, Identifiable, Hashable {
     var view: String?
     var description: String?
     var amenities: [String]
+    var smoking: String?
+    var accessibility: [String]
+    var category: String?
+    var bathroom: [String]
 
     init(
         id: UUID = UUID(),
@@ -247,7 +302,11 @@ struct HotelRoomDraft: Codable, Identifiable, Hashable {
         beds: String? = nil,
         view: String? = nil,
         description: String? = nil,
-        amenities: [String] = []
+        amenities: [String] = [],
+        smoking: String? = nil,
+        accessibility: [String] = [],
+        category: String? = nil,
+        bathroom: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -257,6 +316,10 @@ struct HotelRoomDraft: Codable, Identifiable, Hashable {
         self.view = view
         self.description = description
         self.amenities = amenities
+        self.smoking = smoking
+        self.accessibility = accessibility
+        self.category = category
+        self.bathroom = bathroom
     }
 }
 
@@ -266,6 +329,9 @@ struct HotelDraft: Codable, Identifiable {
     var city: String
     var country: String
     var propertyType: String?
+    var brand: String?
+    var chain: String?
+    var postalCode: String?
     var stars: Int?
     var rating: Double?
     var ratingScale: Double?
@@ -283,6 +349,13 @@ struct HotelDraft: Codable, Identifiable {
     var facts: [ProviderFact]
     var fees: [ProviderFact]
     var services: [String]
+    var highlights: [String]
+    var importantInformation: [String]
+    var food: [ProviderFact]
+    var parkingTransport: [ProviderFact]
+    var accessibility: [String]
+    var dataQuality: [String: String]
+    var lifecycleState: String
     var rooms: [HotelRoomDraft]
     var images: [HotelImageCandidate]
     var sources: [ProviderSnapshot]
@@ -295,6 +368,9 @@ struct HotelDraft: Codable, Identifiable {
             city: city,
             country: "Saudi Arabia",
             propertyType: nil,
+            brand: nil,
+            chain: nil,
+            postalCode: nil,
             stars: nil,
             rating: nil,
             ratingScale: nil,
@@ -312,6 +388,13 @@ struct HotelDraft: Codable, Identifiable {
             facts: [],
             fees: [],
             services: [],
+            highlights: [],
+            importantInformation: [],
+            food: [],
+            parkingTransport: [],
+            accessibility: [],
+            dataQuality: [:],
+            lifecycleState: "draft",
             rooms: [],
             images: [],
             sources: [],
@@ -331,6 +414,7 @@ struct HotelListItem: Codable, Identifiable {
     let city: String
     let stars: Int?
     let status: String
+    let lifecycleState: String?
     let coverImageURL: String?
     let imageCount: Int
     let roomCount: Int
@@ -349,9 +433,16 @@ struct HotelDuplicate: Codable, Identifiable {
     let address: String?
     let latitude: Double?
     let longitude: Double?
+    let brand: String?
+    let chain: String?
     let provider: String?
     let sourceURL: String?
     let match: String
+    let certainty: String?
+    let confidence: Double?
+
+    var isDefinitive: Bool { certainty == nil || certainty == "definitive" }
+    var isPossible: Bool { certainty == "possible" }
 }
 
 struct HotelDuplicateResponse: Codable {
@@ -377,18 +468,24 @@ struct HotelImportJob: Codable, Identifiable {
     let startedAt: String?
     let completedAt: String?
     let updatedAt: String
+    let retryCount: Int?
+    let snapshotHash: String?
+    let possibleDuplicate: HotelDuplicate?
 
     var isActive: Bool { status == "queued" || status == "running" }
     var isCompleted: Bool { status == "completed" }
 }
 
 struct HotelImportJobResponse: Codable { let ok: Bool; let job: HotelImportJob }
+struct HotelImportConflictResponse: Codable { let ok: Bool?; let error: String; let duplicate: HotelDuplicate? }
 struct HotelImportJobsResponse: Codable { let ok: Bool; let jobs: [HotelImportJob] }
 
 struct HotelImportStartPayload: Encodable {
     let hotel: HotelDraft
     let images: [HotelImageCandidate]
     let publishWhenComplete: Bool
+    let idempotencyKey: String
+    let allowPossibleDuplicate: Bool
 }
 
 struct HotelSourceDuplicatePayload: Encodable {

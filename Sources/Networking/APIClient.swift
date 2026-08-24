@@ -90,19 +90,33 @@ actor APIClient {
         return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
     }
 
-    func startHotelImport(_ hotel: HotelDraft, publishWhenComplete: Bool) async throws -> HotelImportJob {
+    func startHotelImport(
+        _ hotel: HotelDraft,
+        publishWhenComplete: Bool,
+        idempotencyKey: String,
+        allowPossibleDuplicate: Bool = false
+    ) async throws -> HotelImportJob {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs"))
         request.httpMethod = "POST"
         request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         request.httpBody = try encoder.encode(
             HotelImportStartPayload(
                 hotel: hotel,
                 images: hotel.selectedImages,
-                publishWhenComplete: publishWhenComplete
+                publishWhenComplete: publishWhenComplete,
+                idempotencyKey: idempotencyKey,
+                allowPossibleDuplicate: allowPossibleDuplicate
             )
         )
         let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 409,
+           let conflict = try? decoder.decode(HotelImportConflictResponse.self, from: data),
+           let duplicate = conflict.duplicate {
+            if conflict.error == "POSSIBLE_DUPLICATE" { throw APIError.possibleDuplicate(duplicate) }
+            throw APIError.hotelAlreadyExists(duplicate)
+        }
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
     }
@@ -114,12 +128,16 @@ actor APIClient {
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
     }
 
-    func activeHotelImportJobs() async throws -> [HotelImportJob] {
+    func hotelImportJobs(activeOnly: Bool = false) async throws -> [HotelImportJob] {
         var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "active", value: "1")]
+        if activeOnly { components.queryItems = [URLQueryItem(name: "active", value: "1")] }
         let (data, response) = try await session.data(from: components.url!)
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobsResponse.self, from: data).jobs
+    }
+
+    func activeHotelImportJobs() async throws -> [HotelImportJob] {
+        try await hotelImportJobs(activeOnly: true)
     }
 
     func retryHotelImportJob(id: String) async throws -> HotelImportJob {
@@ -130,12 +148,19 @@ actor APIClient {
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
     }
 
-    func saveHotel(_ hotel: HotelDraft) async throws -> HotelListItem? {
+    func saveHotel(_ hotel: HotelDraft, allowPossibleDuplicate: Bool = false) async throws -> HotelListItem? {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if allowPossibleDuplicate { request.setValue("1", forHTTPHeaderField: "X-Iumrah-Allow-Possible-Duplicate") }
         request.httpBody = try encoder.encode(hotel)
         let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 409,
+           let conflict = try? decoder.decode(HotelImportConflictResponse.self, from: data),
+           let duplicate = conflict.duplicate {
+            if conflict.error == "POSSIBLE_DUPLICATE" { throw APIError.possibleDuplicate(duplicate) }
+            throw APIError.hotelAlreadyExists(duplicate)
+        }
         try validate(response, data: data)
         return try decoder.decode(HotelSaveResponse.self, from: data).hotel
     }
@@ -192,6 +217,8 @@ enum APIError: LocalizedError {
     case unauthorized
     case invalidURL
     case invalidResponse
+    case possibleDuplicate(HotelDuplicate)
+    case hotelAlreadyExists(HotelDuplicate)
     case server(String)
 
     var errorDescription: String? {
@@ -199,6 +226,8 @@ enum APIError: LocalizedError {
         case .unauthorized: return "Сессия администратора истекла. Войдите снова."
         case .invalidURL: return "Некорректная ссылка."
         case .invalidResponse: return "Сервер вернул некорректный ответ."
+        case .possibleDuplicate(let hotel): return "Возможно, этот отель уже есть в базе: \(hotel.name)."
+        case .hotelAlreadyExists(let hotel): return "Этот отель уже есть в базе: \(hotel.name)."
         case .server(let value): return value
         }
     }

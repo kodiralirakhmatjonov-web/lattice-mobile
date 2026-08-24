@@ -6,6 +6,8 @@ struct HotelReviewView: View {
     @State private var publishing = false
     @State private var publishStatus: String?
     @State private var importJob: HotelImportJob?
+    @State private var importIdempotencyKey = UUID().uuidString
+    @State private var showPossibleDuplicateAlert = false
 
     private let columns = [
         GridItem(.flexible(), spacing: 8),
@@ -19,6 +21,7 @@ struct HotelReviewView: View {
                     hotelHero(draft)
                     sourceCard(draft)
                     hotelFacts(draft)
+                    propertyIntelligence(draft)
                     locationDetails(draft)
                     servicesAndFacts(draft)
                     gallery(draft)
@@ -36,6 +39,18 @@ struct HotelReviewView: View {
         .background(Color.white)
         .navigationTitle("Проверка отеля")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Возможный дубль", isPresented: $showPossibleDuplicateAlert) {
+            Button("Отмена", role: .cancel) {}
+            Button("Всё равно сохранить") {
+                if let draft = coordinator.draft {
+                    submit(draft, allowPossibleDuplicate: true)
+                }
+            }
+        } message: {
+            if let duplicate = coordinator.duplicateCandidate {
+                Text("Похожий отель уже есть в базе: \(duplicate.name). Совпадение не считается достаточным для автоматической блокировки — проверьте карточку перед продолжением.")
+            }
+        }
     }
 
     @ViewBuilder private func hotelHero(_ draft: HotelDraft) -> some View {
@@ -140,6 +155,9 @@ struct HotelReviewView: View {
             if let propertyType = draft.propertyType {
                 factRow("building.2", "Тип", propertyType)
             }
+            if let brand = draft.brand { factRow("tag", "Бренд", brand) }
+            if let chain = draft.chain, chain != draft.brand { factRow("link", "Сеть", chain) }
+            if let postalCode = draft.postalCode { factRow("envelope", "Индекс", postalCode) }
             if let stars = draft.stars {
                 factRow("star", "Категория", "\(stars) звёзд")
             }
@@ -177,6 +195,51 @@ struct HotelReviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private func propertyIntelligence(_ draft: HotelDraft) -> some View {
+        if !draft.highlights.isEmpty || !draft.food.isEmpty || !draft.parkingTransport.isEmpty || !draft.accessibility.isEmpty || !draft.importantInformation.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("О гостинице")
+                    .font(.title2.bold())
+
+                if !draft.highlights.isEmpty {
+                    detailGroup("sparkles", "Главное", draft.highlights)
+                }
+                if !draft.food.isEmpty {
+                    detailGroup("fork.knife", "Питание", draft.food.map { $0.value == "Yes" ? $0.label : "\($0.label): \($0.value)" })
+                }
+                if !draft.parkingTransport.isEmpty {
+                    detailGroup("car", "Парковка и транспорт", draft.parkingTransport.map { $0.value == "Yes" ? $0.label : "\($0.label): \($0.value)" })
+                }
+                if !draft.accessibility.isEmpty {
+                    detailGroup("figure.roll", "Доступность", draft.accessibility)
+                }
+                if !draft.importantInformation.isEmpty {
+                    detailGroup("info.circle", "Важная информация", draft.importantInformation)
+                }
+            }
+            .padding(16)
+            .businessCard(radius: 26)
+        }
+    }
+
+    private func detailGroup(_ symbol: String, _ title: String, _ values: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.bold())
+            ForEach(Array(values.prefix(18)), id: \.self) { value in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "checkmark")
+                        .font(.caption2.bold())
+                        .padding(.top, 3)
+                    Text(value)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -302,7 +365,7 @@ struct HotelReviewView: View {
     }
 
     private func photoKinds(for draft: HotelDraft) -> [HotelImageKind] {
-        let order: [HotelImageKind] = [.exterior, .view, .room, .bathroom, .lobby, .restaurant, .amenity, .gallery, .other]
+        let order: [HotelImageKind] = [.exterior, .view, .room, .bathroom, .lobby, .restaurant, .breakfast, .lounge, .gym, .spa, .pool, .facility, .amenity, .gallery, .other]
         return order.filter { kind in draft.images.contains(where: { $0.kind == kind }) }
     }
 
@@ -420,6 +483,13 @@ struct HotelReviewView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            let roomMeta = [room.category, room.smoking].compactMap { $0 } + room.bathroom + room.accessibility
+            if !roomMeta.isEmpty {
+                Text(roomMeta.prefix(8).joined(separator: " · "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(13)
         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -469,6 +539,19 @@ struct HotelReviewView: View {
         let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty
 
         VStack(spacing: 12) {
+            if let duplicate = coordinator.duplicateCandidate, duplicate.isPossible {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("Возможно, отель уже существует", systemImage: "exclamationmark.triangle.fill")
+                        .font(.subheadline.bold())
+                    Text("\(duplicate.name) · уверенность \(Int((duplicate.confidence ?? 0) * 100))%. Автоматическое объединение отключено.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+
             if let publishStatus {
                 Text(publishStatus)
                     .font(.footnote)
@@ -501,22 +584,10 @@ struct HotelReviewView: View {
             }
 
             Button {
-                publishing = true
-                publishStatus = "Передаём отель в защищённую фоновую очередь…"
-                Task {
-                    do {
-                        await BusinessNotifications.prepare()
-                        var cloudDraft = draft
-                        cloudDraft.status = "draft"
-                        let job = try await APIClient.shared.startHotelImport(cloudDraft, publishWhenComplete: canPublish)
-                        importJob = job
-                        publishing = false
-                        publishStatus = "Фоновый импорт запущен. Можно закрыть приложение — Cloudflare продолжит загрузку."
-                        await monitor(jobID: job.id)
-                    } catch {
-                        publishing = false
-                        publishStatus = "Ошибка Hotels Cloud: \(error.localizedDescription)"
-                    }
+                if coordinator.duplicateCandidate?.isPossible == true {
+                    showPossibleDuplicateAlert = true
+                } else {
+                    submit(draft, allowPossibleDuplicate: false)
                 }
             } label: {
                 HStack {
@@ -529,7 +600,7 @@ struct HotelReviewView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.black)
-            .disabled(publishing || importJob?.isActive == true || draft.sources.isEmpty || draft.selectedImages.isEmpty)
+            .disabled(publishing || importJob?.isActive == true || draft.sources.isEmpty)
 
             Button("Закрыть") { dismiss() }
                 .font(.subheadline.bold())
@@ -538,6 +609,44 @@ struct HotelReviewView: View {
         .padding(14)
         .businessCard(radius: 28)
     }
+    private func submit(_ draft: HotelDraft, allowPossibleDuplicate: Bool) {
+        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty
+        publishing = true
+        publishStatus = draft.selectedImages.isEmpty ? "Сохраняем серверный черновик…" : "Передаём отель в защищённую фоновую очередь…"
+        Task { @MainActor in
+            do {
+                await BusinessNotifications.prepare()
+                var cloudDraft = draft
+                cloudDraft.status = "draft"
+                if cloudDraft.selectedImages.isEmpty {
+                    _ = try await APIClient.shared.saveHotel(cloudDraft, allowPossibleDuplicate: allowPossibleDuplicate)
+                    publishing = false
+                    publishStatus = "Черновик сохранён в D1. Можно вернуться к нему после дополнительной проверки данных и фотографий."
+                    return
+                }
+                let job = try await APIClient.shared.startHotelImport(
+                    cloudDraft,
+                    publishWhenComplete: canPublish,
+                    idempotencyKey: importIdempotencyKey,
+                    allowPossibleDuplicate: allowPossibleDuplicate
+                )
+                importJob = job
+                await BusinessNotifications.hotelImportStarted(job)
+                publishing = false
+                publishStatus = "Фоновый импорт запущен. Можно закрыть приложение — Cloudflare продолжит загрузку."
+                await monitor(jobID: job.id)
+            } catch let APIError.possibleDuplicate(duplicate) {
+                coordinator.duplicateCandidate = duplicate
+                publishing = false
+                showPossibleDuplicateAlert = true
+                publishStatus = "Найдено возможное совпадение. Проверьте предупреждение перед продолжением."
+            } catch {
+                publishing = false
+                publishStatus = "Ошибка Hotels Cloud: \(error.localizedDescription)"
+            }
+        }
+    }
+
     @MainActor
     private func monitor(jobID: String) async {
         var lastStatus = ""

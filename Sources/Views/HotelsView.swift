@@ -8,7 +8,7 @@ struct HotelsView: View {
     @State private var backendUnavailable = false
     @State private var cloudHealth: HotelCloudHealthResponse?
     @State private var backendMessage: String?
-    @State private var activeJobs: [HotelImportJob] = []
+    @State private var importJobs: [HotelImportJob] = []
 
     var body: some View {
         ScrollView {
@@ -63,27 +63,20 @@ struct HotelsView: View {
                 .padding(14)
                 .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                if !activeJobs.isEmpty {
+                if !importJobs.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text("Фоновые импорты").font(.title2.bold())
+                            Text("Импорты").font(.title2.bold())
                             Spacer()
-                            Text("\(activeJobs.count)").foregroundStyle(.secondary)
-                        }
-                        ForEach(activeJobs) { job in
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text(job.hotelName).font(.subheadline.bold()).lineLimit(1)
-                                    Spacer()
-                                    Text("\(job.progress)%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                }
-                                ProgressView(value: Double(job.progress), total: 100).tint(.black)
-                                Text("\(job.storedImages)/\(job.totalImages) фото · \(job.stage)")
-                                    .font(.caption2)
+                            let activeCount = importJobs.filter(\.isActive).count
+                            if activeCount > 0 {
+                                Text("\(activeCount) активных")
+                                    .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
                             }
-                            .padding(12)
-                            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+                        ForEach(Array(importJobs.prefix(10))) { job in
+                            importJobCard(job)
                         }
                     }
                     .padding(16)
@@ -148,9 +141,9 @@ struct HotelsView: View {
                                 }
                             }
                             Spacer()
-                            Text(hotel.status == "published" ? "LIVE" : "DRAFT")
+                            Text(hotel.status == "published" ? "LIVE" : (hotel.lifecycleState?.uppercased() ?? "DRAFT"))
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(hotel.status == "published" ? .green : .secondary)
+                                .foregroundStyle(hotel.status == "published" ? .green : (hotel.lifecycleState == "failed" ? .red : .secondary))
                         }
                         .padding(12)
                         .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -201,10 +194,74 @@ struct HotelsView: View {
     @MainActor
     private func monitorImports() async {
         while !Task.isCancelled {
-            if let jobs = try? await APIClient.shared.activeHotelImportJobs() {
-                activeJobs = jobs
+            if let jobs = try? await APIClient.shared.hotelImportJobs() {
+                importJobs = jobs
+                await BusinessNotifications.trackActiveHotelImports(jobs)
+                await BusinessNotifications.notifyUnseenTerminalJobs(jobs)
             }
-            try? await Task.sleep(nanoseconds: UInt64(activeJobs.isEmpty ? 8_000_000_000 : 2_000_000_000))
+            let hasActive = importJobs.contains(where: \.isActive)
+            try? await Task.sleep(nanoseconds: UInt64(hasActive ? 2_000_000_000 : 8_000_000_000))
+        }
+    }
+
+    @ViewBuilder
+    private func importJobCard(_ job: HotelImportJob) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(job.hotelName).font(.subheadline.bold()).lineLimit(1)
+                    Text(importStatusText(job))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(job.status == "failed" ? .red : .secondary)
+                }
+                Spacer()
+                if job.isActive {
+                    Text("\(job.progress)%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else if job.status == "failed" {
+                    Button("Повторить") {
+                        Task {
+                            if let retried = try? await APIClient.shared.retryHotelImportJob(id: job.id) {
+                                await BusinessNotifications.hotelImportStarted(retried)
+                                if let jobs = try? await APIClient.shared.hotelImportJobs() { importJobs = jobs }
+                            }
+                        }
+                    }
+                    .font(.caption.bold())
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
+            }
+
+            if job.isActive {
+                ProgressView(value: Double(job.progress), total: 100).tint(.black)
+            }
+            Text("\(job.storedImages)/\(job.totalImages) фото · \(job.stage)" + ((job.retryCount ?? 0) > 0 ? " · retry \(job.retryCount ?? 0)" : ""))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            if let error = job.error, job.status == "failed" {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        }
+        .padding(12)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func importStatusText(_ job: HotelImportJob) -> String {
+        switch job.status {
+        case "queued": return "В очереди"
+        case "running": return "Выполняется"
+        case "completed": return job.publishWhenComplete ? "Завершён · published" : "Завершён · draft ready"
+        case "failed": return "Ошибка · можно повторить"
+        default: return job.status
         }
     }
 }
