@@ -1,6 +1,0 @@
-iumrah Business hotel operations 008
-
-Rooms extraction hardening, resilient Cloudflare import progress/retry,
-D1-backed staff chat surface, and APNs-ready device/backend plumbing.
-
-Signing assets and GitHub workflows are intentionally unchanged.

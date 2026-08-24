@@ -1,7 +1,0 @@
-iumrah Hotels Cloud 001
-Central source of truth:
-- D1: iumrah-hotels
-- R2: iumrah-hotels-media
-- Worker: iumrah-hotels-api
-- Admin API: /api/admin/hotels
-- Public catalog API: /api/catalog/hotels

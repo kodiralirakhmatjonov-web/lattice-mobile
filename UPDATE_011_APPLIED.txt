@@ -1,2 +1,0 @@
-iumrah Business Hotel Link Importer 004
-Adds Expedia expe.onelink.me share-link redirect support.

@@ -1,6 +1,0 @@
-iumrah Business update 009 applied
-Expected project config:
-- GENERATE_INFOPLIST_FILE: YES
-- ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-- TARGETED_DEVICE_FAMILY: 1
-- classic iPhone AppIcon slots + ios-marketing 1024x1024

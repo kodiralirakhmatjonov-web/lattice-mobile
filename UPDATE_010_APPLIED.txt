@@ -1,1 +1,0 @@
-Update 010 applied: XcodeGen asset catalog is now declared under target sources with buildPhase: resources.
