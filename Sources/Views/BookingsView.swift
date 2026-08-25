@@ -9,12 +9,20 @@ struct BookingsView: View {
         List {
             if let error { Text(error).foregroundStyle(.red) }
             ForEach(bookings) { booking in
-                BookingRow(booking: booking).listRowBackground(Color.clear).listRowSeparator(.hidden)
+                NavigationLink {
+                    BookingDetailView(bookingID: booking.id)
+                } label: {
+                    BookingRow(booking: booking)
+                }
+                .buttonStyle(.plain)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             }
         }
         .listStyle(.plain).scrollContentBackground(.hidden).background(BusinessDesign.background)
         .navigationTitle("Бронирования")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
             ToolbarItem(placement: .principal) {
                 Image("Logo").resizable().scaledToFit().frame(width: 116, height: 28)
             }

@@ -19,6 +19,7 @@ struct HotelsView: View {
             LazyVStack(alignment: .leading, spacing: 18) {
                 header
                 cityCounters
+                primaryHotelsEntry
                 cloudStatus
                 importsSection
                 hotelCatalog
@@ -31,6 +32,7 @@ struct HotelsView: View {
         .background(Color.white)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() } }
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) {
             AddHotelView()
         }
@@ -78,6 +80,35 @@ struct HotelsView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Импортировать отель")
         }
+    }
+
+
+    private var primaryHotelsEntry: some View {
+        NavigationLink {
+            PrimaryHotelsView()
+        } label: {
+            HStack(spacing: 13) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.black)
+                        .frame(width: 48, height: 48)
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Primary Hotels").font(.headline)
+                    Text("1–3 рекомендуемых iumrah отеля на каждую категорию")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
     }
 
     private var cityCounters: some View {

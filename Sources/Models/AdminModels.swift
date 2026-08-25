@@ -55,6 +55,10 @@ struct BookingSummary: Codable, Identifiable {
     let flightName: String
     let makkahHotel: String
     let madinahHotel: String
+    let clientName: String?
+    let pilgrimID: String?
+    let tripID: String?
+    let operationStatus: String?
 }
 
 struct BookingsResponse: Codable { let bookings: [BookingSummary] }
@@ -90,10 +94,14 @@ struct BusinessChatMessage: Codable, Identifiable, Hashable {
     let senderType: String
     let senderName: String?
     let body: String
+    let messageType: String?
+    let attachmentID: String?
+    let attachmentURL: String?
     let createdAt: String
     let readByStaff: Bool
 
     var isStaff: Bool { senderType == "staff" }
+    var isImage: Bool { messageType == "image" && attachmentURL != nil }
 }
 
 struct BusinessChatMessagesResponse: Codable {

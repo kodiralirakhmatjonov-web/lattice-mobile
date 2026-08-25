@@ -87,6 +87,10 @@ async function handleAdmin(request, env, url, user) {
     return handleBusinessPush(request, env, parts.slice(1), user);
   }
 
+  if (parts[0] === 'operations') {
+    return handleBusinessOperations(request, env, url, parts.slice(1), user);
+  }
+
   const hotelID = safeID(parts[0]);
   if (!hotelID) return json({ ok: false, error: 'INVALID_HOTEL_ID' }, 400);
 
@@ -113,12 +117,18 @@ async function handleAdmin(request, env, url, user) {
 
 async function handleBusinessChats(request, env, parts, user) {
   if (parts.length === 0 && request.method === 'GET') return listBusinessChatThreads(env);
-  const bookingID = safeID(parts[0]);
+  const bookingID = cleanText(parts[0], 180);
   if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
-  if (parts.length === 1 && request.method === 'GET') return chatMessages(env, bookingID);
+  if (parts.length === 1 && request.method === 'GET') return chatMessages(env, bookingID, true);
   if (parts.length === 2 && parts[1] === 'messages') {
-    if (request.method === 'GET') return chatMessages(env, bookingID);
+    if (request.method === 'GET') return chatMessages(env, bookingID, true);
     if (request.method === 'POST') return sendChatMessage(request, env, bookingID, user);
+  }
+  if (parts.length === 2 && parts[1] === 'attachments' && request.method === 'POST') {
+    return sendChatAttachment(request, env, bookingID, user, true);
+  }
+  if (parts.length === 3 && parts[1] === 'media' && request.method === 'GET') {
+    return serveChatAttachment(env, bookingID, parts[2]);
   }
   if (parts.length === 2 && parts[1] === 'read' && request.method === 'POST') {
     await env.HOTELS_DB.batch([
@@ -149,24 +159,45 @@ async function listBusinessChatThreads(env) {
   });
 }
 
-async function chatMessages(env, bookingID) {
+async function chatMessages(env, bookingID, admin = true) {
   const result = await env.HOTELS_DB.prepare(`
-    SELECT id, booking_id, sender_type, sender_name, body, created_at, read_by_staff
+    SELECT id, booking_id, sender_type, sender_name, body, created_at, read_by_staff, message_type, attachment_id
     FROM business_chat_messages WHERE booking_id=? ORDER BY created_at ASC LIMIT 500
   `).bind(bookingID).all();
   return json({
     ok: true,
     bookingID,
-    messages: (result.results || []).map(row => ({
-      id: row.id,
-      bookingID: row.booking_id,
-      senderType: row.sender_type,
-      senderName: row.sender_name || null,
-      body: row.body,
-      createdAt: row.created_at,
-      readByStaff: Number(row.read_by_staff || 0) === 1
-    }))
+    messages: (result.results || []).map(row => mapChatMessage(row, admin))
   });
+}
+
+function mapChatMessage(row, admin = true) {
+  const attachmentID = row.attachment_id || null;
+  return {
+    id: row.id,
+    bookingID: row.booking_id,
+    senderType: row.sender_type,
+    senderName: row.sender_name || null,
+    body: row.body || '',
+    messageType: row.message_type || 'text',
+    attachmentID,
+    attachmentURL: attachmentID ? (admin ? `/api/admin/hotels/chats/${encodeURIComponent(row.booking_id)}/media/${encodeURIComponent(attachmentID)}` : `/api/catalog/hotels/client/chats/${encodeURIComponent(row.booking_id)}/media/${encodeURIComponent(attachmentID)}`) : null,
+    createdAt: row.created_at,
+    readByStaff: Number(row.read_by_staff || 0) === 1
+  };
+}
+
+async function staffDisplayName(env, user) {
+  const login = cleanText(user?.login, 180);
+  if (login) {
+    const row = await env.HOTELS_DB.prepare('SELECT first_name, last_name, role_title FROM team_members WHERE staff_login=? LIMIT 1').bind(login).first().catch(() => null);
+    if (row) {
+      const name = [row.first_name, row.last_name].filter(Boolean).join(' ').trim();
+      if (name) return safeHumanText(name, 160) || 'iumrah Business';
+      if (row.role_title) return safeHumanText(row.role_title, 160) || 'iumrah Business';
+    }
+  }
+  return safeHumanText(user?.displayName || user?.login || 'iumrah Business', 160) || 'iumrah Business';
 }
 
 async function sendChatMessage(request, env, bookingID, user) {
@@ -181,7 +212,7 @@ async function sendChatMessage(request, env, bookingID, user) {
   }
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const senderName = safeHumanText(user?.displayName || user?.login || 'iumrah Business', 160) || 'iumrah Business';
+  const senderName = await staffDisplayName(env, user);
   await env.HOTELS_DB.batch([
     env.HOTELS_DB.prepare(`
       INSERT INTO business_chat_threads (booking_id, created_at, updated_at, last_message_at, last_message_preview, last_sender_type, unread_for_staff)
@@ -197,18 +228,10 @@ async function sendChatMessage(request, env, bookingID, user) {
   return chatMessageDetail(env, id, 201);
 }
 
-async function chatMessageDetail(env, id, status = 200) {
+async function chatMessageDetail(env, id, status = 200, admin = true) {
   const row = await env.HOTELS_DB.prepare('SELECT * FROM business_chat_messages WHERE id=?').bind(id).first();
   if (!row) return json({ ok: false, error: 'MESSAGE_NOT_FOUND' }, 404);
-  return json({ ok: true, message: {
-    id: row.id,
-    bookingID: row.booking_id,
-    senderType: row.sender_type,
-    senderName: row.sender_name || null,
-    body: row.body,
-    createdAt: row.created_at,
-    readByStaff: Number(row.read_by_staff || 0) === 1
-  }}, status);
+  return json({ ok: true, message: mapChatMessage(row, admin) }, status);
 }
 
 async function handleBusinessPush(request, env, parts, user) {
@@ -317,6 +340,20 @@ async function handleCatalog(request, env, url) {
     return health(env, false);
   }
 
+  if (parts[0] === 'team') {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return publicTeam(env, parts.slice(1));
+  }
+
+  if (parts.length === 1 && parts[0] === 'primary') {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return publicPrimaryHotels(env, url);
+  }
+
+  if (parts[0] === 'client') {
+    return handleClientOperations(request, env, parts.slice(1));
+  }
+
   const hotelID = safeID(parts[0]);
   if (!hotelID) return json({ ok: false, error: 'INVALID_HOTEL_ID' }, 400);
 
@@ -337,6 +374,756 @@ async function handleCatalog(request, env, url) {
 
   return json({ ok: false, error: 'NOT_FOUND' }, 404);
 }
+
+
+const TRIP_STATUSES = new Set([
+  'new','availability_check','payment_pending','paid','booking_confirmed',
+  'documents_ready','ready_to_travel','in_trip','completed','cancelled'
+]);
+
+async function handleBusinessOperations(request, env, url, parts, user) {
+  if (parts.length === 1 && parts[0] === 'me') {
+    if (request.method === 'GET') return businessProfileMe(env, user);
+    if (request.method === 'PUT') return saveBusinessProfileMe(request, env, user);
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'team') {
+    if (parts.length === 1 && request.method === 'GET') return adminTeam(env);
+    if (parts.length === 1 && request.method === 'POST') return createTeamMember(request, env);
+    const memberID = safeID(parts[1]);
+    if (!memberID) return json({ ok: false, error: 'INVALID_TEAM_MEMBER_ID' }, 400);
+    if (parts.length === 2 && request.method === 'GET') return adminTeamMember(env, memberID);
+    if (parts.length === 2 && request.method === 'PUT') return updateTeamMember(request, env, memberID);
+    if (parts.length === 2 && request.method === 'DELETE') return deleteTeamMember(env, memberID);
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'bookings') {
+    if (parts.length === 1 && request.method === 'GET') return operationsBookings(request, env);
+    const bookingID = cleanText(parts[1], 180);
+    if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
+    if (parts.length === 2 && request.method === 'GET') return operationsBookingDetail(request, env, bookingID);
+    if (parts.length === 2 && request.method === 'PATCH') return updateOperationsBooking(request, env, bookingID, user);
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'pilgrims') {
+    if (parts.length === 1 && request.method === 'GET') return listPilgrims(env, url);
+    const publicID = cleanText(parts[1], 80);
+    if (!publicID) return json({ ok: false, error: 'INVALID_PILGRIM_ID' }, 400);
+    if (parts.length === 2 && request.method === 'GET') return pilgrimDetail(env, publicID);
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'primary-hotels') {
+    if (parts.length !== 1) return json({ ok: false, error: 'NOT_FOUND' }, 404);
+    if (request.method === 'GET') return adminPrimaryHotels(env, url);
+    if (request.method === 'PUT') return savePrimaryHotels(request, env);
+    return methodNotAllowed();
+  }
+
+  return json({ ok: false, error: 'NOT_FOUND' }, 404);
+}
+
+function teamMemberPayload(payload, defaults = {}) {
+  const firstName = safeHumanText(payload?.firstName ?? defaults.firstName ?? '', 120) || '';
+  const lastName = safeHumanText(payload?.lastName ?? defaults.lastName ?? '', 120) || '';
+  const roleKindRaw = String(payload?.roleKind ?? defaults.roleKind ?? 'guide').toLowerCase();
+  const roleKind = ['owner','guide','manager','operations'].includes(roleKindRaw) ? roleKindRaw : 'guide';
+  const publicSlugInput = cleanText(payload?.publicSlug ?? defaults.publicSlug, 120);
+  const slugBase = publicSlugInput || `${firstName}-${lastName}` || `team-${crypto.randomUUID().slice(0, 8)}`;
+  return {
+    firstName,
+    lastName,
+    roleKind,
+    roleTitle: safeHumanText(payload?.roleTitle ?? defaults.roleTitle ?? '', 160) || '',
+    phoneUZ: cleanText(payload?.phoneUZ ?? defaults.phoneUZ ?? '', 80) || '',
+    phoneSA: cleanText(payload?.phoneSA ?? defaults.phoneSA ?? '', 80) || '',
+    telegram: cleanText(payload?.telegram ?? defaults.telegram ?? '', 160) || '',
+    whatsapp: cleanText(payload?.whatsapp ?? defaults.whatsapp ?? '', 160) || '',
+    instagram: cleanText(payload?.instagram ?? defaults.instagram ?? '', 160) || '',
+    bio: safeHumanText(payload?.bio ?? defaults.bio ?? '', 1800) || '',
+    publicSlug: slugify(slugBase) || `team-${crypto.randomUUID().slice(0, 8)}`,
+    publicVisible: payload?.publicVisible == null ? (defaults.publicVisible ?? true) : !!payload.publicVisible,
+    active: payload?.active == null ? (defaults.active ?? true) : !!payload.active
+  };
+}
+
+function mapTeamMember(row, admin = true) {
+  if (!row) return null;
+  const base = {
+    id: row.id,
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+    displayName: [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || row.role_title || 'iumrah',
+    roleKind: row.role_kind || 'guide',
+    roleTitle: row.role_title || '',
+    phoneUZ: row.phone_uz || '',
+    phoneSA: row.phone_sa || '',
+    telegram: row.telegram || '',
+    whatsapp: row.whatsapp || '',
+    instagram: row.instagram || '',
+    bio: row.bio || '',
+    publicSlug: row.public_slug,
+    publicVisible: Number(row.public_visible || 0) === 1,
+    active: Number(row.active || 0) === 1,
+    isOwner: Number(row.is_owner || 0) === 1
+  };
+  if (admin) base.staffLogin = row.staff_login || null;
+  return base;
+}
+
+async function ensureOwnerProfile(env, user) {
+  const login = cleanText(user?.login, 180) || 'owner';
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE staff_login=? LIMIT 1').bind(login).first();
+  if (row) return row;
+  const id = `team-${crypto.randomUUID()}`;
+  const display = safeHumanText(user?.displayName || '', 200) || '';
+  const pieces = display.split(/\s+/).filter(Boolean);
+  const firstName = pieces[0] || '';
+  const lastName = pieces.slice(1).join(' ');
+  let slug = slugify(display || login) || `owner-${crypto.randomUUID().slice(0,8)}`;
+  const exists = await env.HOTELS_DB.prepare('SELECT id FROM team_members WHERE public_slug=? LIMIT 1').bind(slug).first();
+  if (exists) slug = `${slug}-${crypto.randomUUID().slice(0,6)}`;
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO team_members (id, staff_login, first_name, last_name, role_kind, role_title, public_slug, public_visible, active, is_owner, sort_order, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'owner', 'Owner · iumrah', ?, 1, 1, 1, 0, ?, ?)
+  `).bind(id, login, firstName, lastName, slug, now, now).run();
+  return env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE id=?').bind(id).first();
+}
+
+async function businessProfileMe(env, user) {
+  return json({ ok: true, member: mapTeamMember(await ensureOwnerProfile(env, user), true) });
+}
+
+async function saveBusinessProfileMe(request, env, user) {
+  const existing = await ensureOwnerProfile(env, user);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const value = teamMemberPayload(payload, mapTeamMember(existing, true));
+  const duplicate = await env.HOTELS_DB.prepare('SELECT id FROM team_members WHERE public_slug=? AND id<>? LIMIT 1').bind(value.publicSlug, existing.id).first();
+  if (duplicate) return json({ ok: false, error: 'PUBLIC_SLUG_TAKEN' }, 409);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    UPDATE team_members SET first_name=?, last_name=?, role_kind='owner', role_title=?, phone_uz=?, phone_sa=?, telegram=?, whatsapp=?, instagram=?, bio=?, public_slug=?, public_visible=?, active=1, is_owner=1, updated_at=? WHERE id=?
+  `).bind(value.firstName, value.lastName, value.roleTitle, value.phoneUZ, value.phoneSA, value.telegram, value.whatsapp, value.instagram, value.bio, value.publicSlug, value.publicVisible ? 1 : 0, now, existing.id).run();
+  return businessProfileMe(env, user);
+}
+
+async function adminTeam(env) {
+  const result = await env.HOTELS_DB.prepare('SELECT * FROM team_members ORDER BY is_owner DESC, sort_order ASC, last_name COLLATE NOCASE, first_name COLLATE NOCASE').all();
+  return json({ ok: true, members: (result.results || []).map(row => mapTeamMember(row, true)) });
+}
+
+async function adminTeamMember(env, memberID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE id=?').bind(memberID).first();
+  if (!row) return json({ ok: false, error: 'TEAM_MEMBER_NOT_FOUND' }, 404);
+  return json({ ok: true, member: mapTeamMember(row, true) });
+}
+
+async function createTeamMember(request, env) {
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const value = teamMemberPayload(payload);
+  if (!value.firstName && !value.lastName) return json({ ok: false, error: 'NAME_REQUIRED' }, 400);
+  const duplicate = await env.HOTELS_DB.prepare('SELECT id FROM team_members WHERE public_slug=? LIMIT 1').bind(value.publicSlug).first();
+  if (duplicate) return json({ ok: false, error: 'PUBLIC_SLUG_TAKEN' }, 409);
+  const id = `team-${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  const max = await env.HOTELS_DB.prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM team_members').first();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO team_members (id, first_name, last_name, role_kind, role_title, phone_uz, phone_sa, telegram, whatsapp, instagram, bio, public_slug, public_visible, active, is_owner, sort_order, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+  `).bind(id, value.firstName, value.lastName, value.roleKind, value.roleTitle, value.phoneUZ, value.phoneSA, value.telegram, value.whatsapp, value.instagram, value.bio, value.publicSlug, value.publicVisible ? 1 : 0, value.active ? 1 : 0, Number(max?.max_order || 0) + 1, now, now).run();
+  return adminTeamMember(env, id);
+}
+
+async function updateTeamMember(request, env, memberID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE id=?').bind(memberID).first();
+  if (!row) return json({ ok: false, error: 'TEAM_MEMBER_NOT_FOUND' }, 404);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const value = teamMemberPayload(payload, mapTeamMember(row, true));
+  const duplicate = await env.HOTELS_DB.prepare('SELECT id FROM team_members WHERE public_slug=? AND id<>? LIMIT 1').bind(value.publicSlug, memberID).first();
+  if (duplicate) return json({ ok: false, error: 'PUBLIC_SLUG_TAKEN' }, 409);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    UPDATE team_members SET first_name=?, last_name=?, role_kind=?, role_title=?, phone_uz=?, phone_sa=?, telegram=?, whatsapp=?, instagram=?, bio=?, public_slug=?, public_visible=?, active=?, updated_at=? WHERE id=?
+  `).bind(value.firstName, value.lastName, row.is_owner ? 'owner' : value.roleKind, value.roleTitle, value.phoneUZ, value.phoneSA, value.telegram, value.whatsapp, value.instagram, value.bio, value.publicSlug, value.publicVisible ? 1 : 0, value.active ? 1 : 0, now, memberID).run();
+  return adminTeamMember(env, memberID);
+}
+
+async function deleteTeamMember(env, memberID) {
+  const row = await env.HOTELS_DB.prepare('SELECT is_owner FROM team_members WHERE id=?').bind(memberID).first();
+  if (!row) return json({ ok: true });
+  if (Number(row.is_owner || 0) === 1) return json({ ok: false, error: 'OWNER_CANNOT_BE_DELETED' }, 409);
+  await env.HOTELS_DB.prepare('DELETE FROM team_members WHERE id=?').bind(memberID).run();
+  return json({ ok: true });
+}
+
+async function publicTeam(env, parts) {
+  if (parts.length === 0) {
+    const result = await env.HOTELS_DB.prepare(`SELECT * FROM team_members WHERE active=1 AND public_visible=1 ORDER BY is_owner DESC, sort_order ASC, last_name COLLATE NOCASE, first_name COLLATE NOCASE`).all();
+    return json({ ok: true, members: (result.results || []).map(row => mapTeamMember(row, false)) }, 200, PUBLIC_CACHE_HEADERS);
+  }
+  const slug = cleanText(parts[0], 120);
+  if (!slug) return json({ ok: false, error: 'INVALID_PROFILE' }, 400);
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE public_slug=? AND active=1 AND public_visible=1 LIMIT 1').bind(slug).first();
+  if (!row) return json({ ok: false, error: 'PROFILE_NOT_FOUND' }, 404);
+  return json({ ok: true, member: mapTeamMember(row, false) }, 200, PUBLIC_CACHE_HEADERS);
+}
+
+async function fetchUpstreamBookings(request, env) {
+  const cookie = request.headers.get('cookie') || '';
+  const response = await fetch(env.BOOKINGS_ADMIN_URL || 'https://iumrah.app/api/admin/bookings', {
+    method: 'GET',
+    headers: {
+      'cookie': cookie,
+      'accept': 'application/json',
+      'user-agent': request.headers.get('user-agent') || 'iumrah-business'
+    },
+    redirect: 'manual'
+  });
+  if (!response.ok) throw new Error(`BOOKINGS_UPSTREAM_${response.status}`);
+  const payload = await response.json().catch(() => null);
+  return Array.isArray(payload?.bookings) ? payload.bookings : [];
+}
+
+function deepScalar(root, candidates) {
+  const wanted = new Set(candidates.map(value => value.toLowerCase()));
+  const queue = [{ value: root, depth: 0 }];
+  const seen = new Set();
+  while (queue.length) {
+    const { value, depth } = queue.shift();
+    if (!value || typeof value !== 'object' || depth > 4 || seen.has(value)) continue;
+    seen.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      if (wanted.has(key.toLowerCase()) && (typeof child === 'string' || typeof child === 'number')) {
+        const text = String(child).trim();
+        if (text) return text;
+      }
+    }
+    for (const child of Object.values(value)) {
+      if (child && typeof child === 'object') queue.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return '';
+}
+
+function bookingIdentity(raw, bookingID) {
+  const clientUserID = deepScalar(raw, ['clientUserID','client_user_id','userID','userId','profileID','profileId','accountID','accountId']);
+  const firstName = deepScalar(raw, ['firstName','first_name','givenName']);
+  const lastName = deepScalar(raw, ['lastName','last_name','familyName','surname']);
+  const explicitName = deepScalar(raw, ['clientName','customerName','travelerName','travellerName','fullName','displayName']);
+  const email = deepScalar(raw, ['email','emailAddress']);
+  const phone = deepScalar(raw, ['phone','phoneNumber','mobile','whatsapp']);
+  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim() || explicitName || `Паломник ${bookingID}`;
+  return { clientUserID, firstName, lastName, displayName, email, phone };
+}
+
+function extractPricingSnapshot(raw) {
+  const candidates = ['pricingSnapshot','pricing_snapshot','pricing','priceBreakdown','pricingBreakdown','costBreakdown','generationReport','packagePricing','quote'];
+  for (const key of candidates) {
+    if (raw && typeof raw === 'object' && raw[key] && typeof raw[key] === 'object') return raw[key];
+  }
+  return {};
+}
+
+function tripStatusFromBooking(raw) {
+  const rawStatus = String(raw?.status || '').toUpperCase();
+  const map = {
+    AVAILABILITY_CHECK: 'availability_check', PAYMENT_PENDING: 'payment_pending',
+    BOOKING_CONFIRMED: 'booking_confirmed', READY_TO_TRAVEL: 'ready_to_travel', COMPLETED: 'completed'
+  };
+  return map[rawStatus] || 'new';
+}
+
+async function ensurePilgrim(env, identity, bookingID) {
+  let row = null;
+  if (identity.clientUserID) row = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(identity.clientUserID).first();
+  if (!row && identity.email) row = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE LOWER(email)=LOWER(?) AND email<>'' LIMIT 1").bind(identity.email).first();
+  if (!row && identity.phone) row = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE phone=? AND phone<>'' LIMIT 1").bind(identity.phone).first();
+  if (!row) {
+    const fallbackUserID = identity.clientUserID || `legacy-booking:${bookingID}`;
+    const now = new Date().toISOString();
+    const result = await env.HOTELS_DB.prepare(`INSERT INTO pilgrims (client_user_id, first_name, last_name, display_name, phone, email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(fallbackUserID, identity.firstName, identity.lastName, identity.displayName, identity.phone, identity.email, now, now).run();
+    const id = Number(result?.meta?.last_row_id || 0);
+    row = id ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(id).first() : await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=?').bind(fallbackUserID).first();
+  } else {
+    const now = new Date().toISOString();
+    await env.HOTELS_DB.prepare(`UPDATE pilgrims SET first_name=CASE WHEN ?<>'' THEN ? ELSE first_name END, last_name=CASE WHEN ?<>'' THEN ? ELSE last_name END, display_name=CASE WHEN ?<>'' THEN ? ELSE display_name END, phone=CASE WHEN ?<>'' THEN ? ELSE phone END, email=CASE WHEN ?<>'' THEN ? ELSE email END, updated_at=? WHERE id=?`)
+      .bind(identity.firstName, identity.firstName, identity.lastName, identity.lastName, identity.displayName, identity.displayName, identity.phone, identity.phone, identity.email, identity.email, now, row.id).run();
+    row = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(row.id).first();
+  }
+  return row;
+}
+
+function pilgrimPublicID(id) {
+  return `PILGRIM-${String(Number(id || 0)).padStart(6, '0')}`;
+}
+
+function tripMap(row) {
+  if (!row) return null;
+  return {
+    tripID: row.id,
+    bookingID: row.booking_id,
+    pilgrimID: pilgrimPublicID(row.pilgrim_id),
+    status: row.status,
+    paymentStatus: row.payment_status || '',
+    confirmationNumber: row.confirmation_number || '',
+    internalNotes: row.internal_notes || '',
+    startDate: row.start_date || null,
+    endDate: row.end_date || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || null
+  };
+}
+
+async function syncBookingTrip(env, raw) {
+  const bookingID = cleanText(raw?.id, 180);
+  if (!bookingID) return null;
+  const identity = bookingIdentity(raw, bookingID);
+  const pilgrim = await ensurePilgrim(env, identity, bookingID);
+  if (!pilgrim) return null;
+  const existing = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  const now = new Date().toISOString();
+  const pricing = extractPricingSnapshot(raw);
+  const startDate = cleanText(raw?.startDate, 64);
+  const endDate = cleanText(raw?.endDate, 64);
+  if (!existing) {
+    const tripID = `trip-${crypto.randomUUID()}`;
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO pilgrim_trips (id, booking_id, pilgrim_id, client_user_id, status, start_date, end_date, booking_snapshot_json, pricing_snapshot_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(tripID, bookingID, pilgrim.id, identity.clientUserID || pilgrim.client_user_id || null, tripStatusFromBooking(raw), startDate, endDate, JSON.stringify(raw), JSON.stringify(pricing), now, now).run();
+  } else {
+    const previousBooking = parseJSONObject(existing.booking_snapshot_json);
+    const mergedBooking = { ...previousBooking, ...raw };
+    const hasPricing = pricing && typeof pricing === 'object' && Object.keys(pricing).length > 0;
+    const pricingJSON = hasPricing ? JSON.stringify(pricing) : (existing.pricing_snapshot_json || '{}');
+    await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET pilgrim_id=?, client_user_id=COALESCE(?, client_user_id), start_date=COALESCE(?, start_date), end_date=COALESCE(?, end_date), booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=? WHERE booking_id=?`)
+      .bind(pilgrim.id, identity.clientUserID || null, startDate, endDate, JSON.stringify(mergedBooking), pricingJSON, now, bookingID).run();
+  }
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
+  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
+    .bind(Number(stats?.count || 0), stats?.last_trip || null, now, pilgrim.id).run();
+  return { pilgrim, trip };
+}
+
+function augmentBooking(raw, linked) {
+  const identity = bookingIdentity(raw, raw?.id || '');
+  return {
+    ...raw,
+    clientName: identity.displayName,
+    pilgrimID: linked?.pilgrim ? pilgrimPublicID(linked.pilgrim.id) : null,
+    tripID: linked?.trip?.id || null,
+    operationStatus: linked?.trip?.status || tripStatusFromBooking(raw)
+  };
+}
+
+async function operationsBookings(request, env) {
+  let bookings;
+  try { bookings = await fetchUpstreamBookings(request, env); }
+  catch (error) { return json({ ok: false, error: String(error?.message || 'BOOKINGS_UNAVAILABLE') }, 502); }
+  const source = bookings.slice(0, 500);
+  const output = new Array(source.length);
+  const chunkSize = 8;
+  for (let offset = 0; offset < source.length; offset += chunkSize) {
+    const chunk = source.slice(offset, offset + chunkSize);
+    const linkedChunk = await Promise.all(chunk.map(raw => syncBookingTrip(env, raw).catch(error => {
+      console.warn('BOOKING_SYNC_FAILED', raw?.id, error);
+      return null;
+    })));
+    chunk.forEach((raw, index) => { output[offset + index] = augmentBooking(raw, linkedChunk[index]); });
+  }
+  return json({ bookings: output });
+}
+
+function humanizeFieldKey(value) {
+  return String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, char => char.toUpperCase());
+}
+
+function flattenPricingLines(value) {
+  const lines = [];
+  const currency = deepScalar(value, ['currency','currencyCode']) || 'USD';
+  const walk = (node, path = [], depth = 0) => {
+    if (depth > 5 || lines.length >= 120 || node == null) return;
+    if (typeof node === 'number' && Number.isFinite(node)) {
+      const key = path.join('.');
+      if (/(price|cost|fee|commission|margin|visa|hotel|flight|air|guide|transfer|transport|sim|support|total|amount|service)/i.test(key) && !/(count|guests|traveler|rooms|nights|days|year)/i.test(key)) {
+        lines.push({ id: key || `value-${lines.length}`, label: humanizeFieldKey(path[path.length - 1] || 'Amount'), group: humanizeFieldKey(path.slice(0, -1).join(' · ') || 'Pricing'), amount: node, currency });
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach((child, index) => walk(child, [...path, String(index + 1)], depth + 1));
+      return;
+    }
+    if (typeof node === 'object') Object.entries(node).forEach(([key, child]) => walk(child, [...path, key], depth + 1));
+  };
+  walk(value);
+  return lines;
+}
+
+function flattenRequestFields(raw) {
+  const fields = [];
+  const skip = /(^|\.)(pricing|priceBreakdown|pricingBreakdown|costBreakdown|generationReport|quote)(\.|$)/i;
+  const walk = (node, path = [], depth = 0) => {
+    if (depth > 4 || fields.length >= 120 || node == null) return;
+    if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') {
+      const keyPath = path.join('.');
+      if (!skip.test(keyPath) && String(node).trim() !== '') fields.push({ id: keyPath, label: humanizeFieldKey(path[path.length - 1] || 'Value'), group: humanizeFieldKey(path.slice(0, -1).join(' · ') || 'Booking'), value: String(node) });
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.slice(0, 20).forEach((child, index) => walk(child, [...path, String(index + 1)], depth + 1));
+      return;
+    }
+    if (typeof node === 'object') Object.entries(node).forEach(([key, child]) => walk(child, [...path, key], depth + 1));
+  };
+  walk(raw);
+  return fields;
+}
+
+async function rawBookingForDetail(request, env, bookingID) {
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  try {
+    const bookings = await fetchUpstreamBookings(request, env);
+    const raw = bookings.find(item => String(item?.id || '') === bookingID);
+    if (raw) return { raw, linked: await syncBookingTrip(env, raw) };
+  } catch (error) {
+    console.warn('BOOKING_DETAIL_UPSTREAM_FALLBACK', error);
+  }
+  if (trip) {
+    const raw = parseJSONObject(trip.booking_snapshot_json);
+    const pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
+    return { raw, linked: { trip, pilgrim } };
+  }
+  return null;
+}
+
+async function operationsBookingDetail(request, env, bookingID) {
+  const resolved = await rawBookingForDetail(request, env, bookingID);
+  if (!resolved) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  const pilgrim = trip ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first() : null;
+  const pricingSnapshot = trip ? parseJSONObject(trip.pricing_snapshot_json) : extractPricingSnapshot(resolved.raw);
+  let pricingLines = flattenPricingLines(pricingSnapshot);
+  if (!pricingLines.length) pricingLines = flattenPricingLines(resolved.raw);
+  const history = await env.HOTELS_DB.prepare('SELECT old_status, new_status, changed_by, created_at FROM booking_status_history WHERE booking_id=? ORDER BY created_at DESC LIMIT 50').bind(bookingID).all();
+  return json({
+    ok: true,
+    booking: augmentBooking(resolved.raw, { trip, pilgrim }),
+    operation: tripMap(trip),
+    pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
+    pricingLines,
+    requestFields: flattenRequestFields(resolved.raw),
+    statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at }))
+  });
+}
+
+async function updateOperationsBooking(request, env, bookingID, user) {
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 404);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const nextStatus = cleanText(payload?.status, 80) || trip.status;
+  if (!TRIP_STATUSES.has(nextStatus)) return json({ ok: false, error: 'INVALID_TRIP_STATUS' }, 400);
+  const paymentStatus = safeHumanText(payload?.paymentStatus ?? trip.payment_status ?? '', 160) || '';
+  const confirmationNumber = safeHumanText(payload?.confirmationNumber ?? trip.confirmation_number ?? '', 200) || '';
+  const internalNotes = safeHumanText(payload?.internalNotes ?? trip.internal_notes ?? '', 4000) || '';
+  const now = new Date().toISOString();
+  const completedAt = nextStatus === 'completed' ? (trip.completed_at || now) : null;
+  const statements = [env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET status=?, payment_status=?, confirmation_number=?, internal_notes=?, completed_at=?, updated_at=? WHERE booking_id=?`).bind(nextStatus, paymentStatus, confirmationNumber, internalNotes, completedAt, now, bookingID)];
+  if (nextStatus !== trip.status) {
+    statements.push(env.HOTELS_DB.prepare('INSERT INTO booking_status_history (id, booking_id, old_status, new_status, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(crypto.randomUUID(), bookingID, trip.status, nextStatus, cleanText(user?.login, 180), now));
+  }
+  await env.HOTELS_DB.batch(statements);
+  return operationsBookingDetail(request, env, bookingID);
+}
+
+async function listPilgrims(env, url) {
+  const archiveOnly = url.searchParams.get('archive') === '1';
+  const search = cleanText(url.searchParams.get('q'), 120);
+  const where = [];
+  const values = [];
+  if (archiveOnly) where.push("EXISTS (SELECT 1 FROM pilgrim_trips t WHERE t.pilgrim_id=p.id AND t.status='completed')");
+  if (search) {
+    where.push("(LOWER(p.display_name) LIKE LOWER(?) OR LOWER(p.email) LIKE LOWER(?) OR p.phone LIKE ?)");
+    const q = `%${search}%`; values.push(q,q,q);
+  }
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT p.*, (SELECT COUNT(*) FROM pilgrim_trips t WHERE t.pilgrim_id=p.id AND t.status='completed') AS completed_trips
+    FROM pilgrims p ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY COALESCE(p.last_trip_at,p.updated_at) DESC LIMIT 500
+  `).bind(...values).all();
+  return json({ ok: true, pilgrims: (result.results || []).map(row => ({ id: pilgrimPublicID(row.id), displayName: row.display_name || '', firstName: row.first_name || '', lastName: row.last_name || '', phone: row.phone || '', email: row.email || '', totalTrips: Number(row.total_trips || 0), completedTrips: Number(row.completed_trips || 0), lastTripAt: row.last_trip_at || null })) });
+}
+
+function parsePilgrimPublicID(value) {
+  const match = String(value || '').match(/^PILGRIM-(\d{1,12})$/i);
+  return match ? Number(match[1]) : null;
+}
+
+async function pilgrimDetail(env, publicID) {
+  const numericID = parsePilgrimPublicID(publicID);
+  if (!numericID) return json({ ok: false, error: 'INVALID_PILGRIM_ID' }, 400);
+  const pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(numericID).first();
+  if (!pilgrim) return json({ ok: false, error: 'PILGRIM_NOT_FOUND' }, 404);
+  const trips = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(numericID).all();
+  return json({ ok: true, pilgrim: { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0), lastTripAt: pilgrim.last_trip_at || null }, trips: (trips.results || []).map(tripMap) });
+}
+
+async function adminPrimaryHotels(env, url) {
+  const city = cleanText(url.searchParams.get('city'), 80);
+  const values = [];
+  const where = [];
+  if (city) { where.push('LOWER(p.city)=LOWER(?)'); values.push(city); }
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT p.city, p.star_category, p.position, h.id, h.name, h.stars, h.rating, h.review_count, h.status, h.lifecycle_state, h.updated_at,
+      (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id=h.id) AS image_count,
+      (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id=h.id) AS room_count,
+      (SELECT hi.id FROM hotel_images hi WHERE hi.hotel_id=h.id ORDER BY hi.is_cover DESC, hi.position ASC LIMIT 1) AS cover_image_id
+    FROM primary_hotels p JOIN hotels h ON h.id=p.hotel_id
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY p.city, p.star_category, p.position
+  `).bind(...values).all();
+  return json({ ok: true, assignments: (result.results || []).map(row => ({ city: row.city, stars: Number(row.star_category), position: Number(row.position), hotel: hotelSummary(row) })) });
+}
+
+async function savePrimaryHotels(request, env) {
+  const payload = await request.json().catch(() => null);
+  const city = safeHumanText(payload?.city, 80);
+  const stars = Number(payload?.stars);
+  const hotelIDs = Array.isArray(payload?.hotelIDs) ? [...new Set(payload.hotelIDs.map(value => safeID(value)).filter(Boolean))].slice(0,3) : [];
+  if (!city || !Number.isInteger(stars) || stars < 1 || stars > 5) return json({ ok: false, error: 'INVALID_PRIMARY_CATEGORY' }, 400);
+  const valid = [];
+  for (const id of hotelIDs) {
+    const hotel = await env.HOTELS_DB.prepare("SELECT id, city FROM hotels WHERE id=? AND status='published' LIMIT 1").bind(id).first();
+    if (!hotel) return json({ ok: false, error: `HOTEL_NOT_PUBLISHED:${id}` }, 409);
+    if (String(hotel.city || '').toLowerCase() !== city.toLowerCase()) return json({ ok: false, error: `HOTEL_CITY_MISMATCH:${id}` }, 409);
+    valid.push(id);
+  }
+  const statements = [env.HOTELS_DB.prepare('DELETE FROM primary_hotels WHERE LOWER(city)=LOWER(?) AND star_category=?').bind(city, stars)];
+  const now = new Date().toISOString();
+  valid.forEach((id, index) => statements.push(env.HOTELS_DB.prepare('INSERT INTO primary_hotels (city, star_category, position, hotel_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(city, stars, index + 1, id, now, now)));
+  await env.HOTELS_DB.batch(statements);
+  return adminPrimaryHotels(env, new URL(`https://iumrah.app/api/admin/hotels/operations/primary-hotels?city=${encodeURIComponent(city)}`));
+}
+
+async function publicPrimaryHotels(env, url) {
+  const city = safeHumanText(url.searchParams.get('city'), 80);
+  const stars = Number(url.searchParams.get('stars'));
+  if (!city || !Number.isInteger(stars) || stars < 1 || stars > 5) return json({ ok: false, error: 'CITY_AND_STARS_REQUIRED' }, 400);
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT p.position, h.id, h.name, h.city, h.stars, h.rating, h.review_count, h.status, h.lifecycle_state, h.updated_at,
+      (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id=h.id) AS image_count,
+      (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id=h.id) AS room_count,
+      (SELECT hi.id FROM hotel_images hi WHERE hi.hotel_id=h.id ORDER BY hi.is_cover DESC, hi.position ASC LIMIT 1) AS cover_image_id
+    FROM primary_hotels p JOIN hotels h ON h.id=p.hotel_id
+    WHERE LOWER(p.city)=LOWER(?) AND p.star_category=? AND h.status='published'
+    ORDER BY p.position ASC
+  `).bind(city, stars).all();
+  return json({ ok: true, city, stars, recommendationLabel: 'Рекомендует iumrah', hotels: (result.results || []).map(row => ({ ...hotelSummary(row), primaryPosition: Number(row.position) })) }, 200, PUBLIC_CACHE_HEADERS);
+}
+
+async function handleClientOperations(request, env, parts) {
+  if (parts[0] === 'trips') {
+    const auth = await requireClientSession(request, env);
+    if (!auth.ok) return auth.response;
+    if (parts.length === 2 && parts[1] === 'sync' && request.method === 'POST') return syncClientTrip(request, env, auth.user);
+    if (parts.length === 1 && request.method === 'GET') return listClientTrips(env, auth.user.id);
+    const bookingID = cleanText(parts[1], 180);
+    if (parts.length === 2 && bookingID && request.method === 'GET') {
+      const access = await authorizeClientTrip(env, bookingID, auth.user.id);
+      if (!access.ok) return access.response;
+      return json({ ok: true, trip: tripMap(access.trip) });
+    }
+    return methodNotAllowed();
+  }
+
+  if (parts[0] !== 'chats') return json({ ok: false, error: 'NOT_FOUND' }, 404);
+  const bookingID = cleanText(parts[1], 180);
+  if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
+  const auth = await requireClientBooking(request, env, bookingID);
+  if (!auth.ok) return auth.response;
+  if (parts.length === 3 && parts[2] === 'messages') {
+    if (request.method === 'GET') return chatMessages(env, bookingID, false);
+    if (request.method === 'POST') return sendClientChatMessage(request, env, bookingID, auth.user);
+  }
+  if (parts.length === 3 && parts[2] === 'attachments' && request.method === 'POST') return sendChatAttachment(request, env, bookingID, auth.user, false);
+  if (parts.length === 3 && parts[2] === 'read' && request.method === 'POST') return markClientChatRead(env, bookingID);
+  if (parts.length === 4 && parts[2] === 'media' && request.method === 'GET') return serveChatAttachment(env, bookingID, parts[3]);
+  return methodNotAllowed();
+}
+
+async function requireClientSession(request, env) {
+  const cookie = request.headers.get('cookie') || '';
+  const authorization = request.headers.get('authorization') || '';
+  if (!cookie && !authorization) return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
+  let response;
+  try {
+    response = await fetch(env.CLIENT_SESSION_URL || 'https://iumrah.app/api/auth/session', {
+      method: 'GET',
+      headers: { 'cookie': cookie, 'authorization': authorization, 'accept': 'application/json', 'user-agent': request.headers.get('user-agent') || 'iumrah-client' },
+      redirect: 'manual'
+    });
+  } catch {
+    return { ok: false, response: json({ ok: false, error: 'CLIENT_AUTH_UNAVAILABLE' }, 503) };
+  }
+  if (!response.ok) return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
+  const payload = await response.json().catch(() => null);
+  const user = payload?.user || payload?.profile || payload;
+  const userID = cleanText(user?.id || user?.userID || user?.userId, 180);
+  if (!userID) return { ok: false, response: json({ ok: false, error: 'CLIENT_ID_MISSING' }, 403) };
+  return { ok: true, user: { ...user, id: userID } };
+}
+
+async function authorizeClientTrip(env, bookingID, userID) {
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip || String(trip.client_user_id || '') !== userID) return { ok: false, response: json({ ok: false, error: 'BOOKING_ACCESS_DENIED' }, 403) };
+  return { ok: true, trip };
+}
+
+async function requireClientBooking(request, env, bookingID) {
+  const auth = await requireClientSession(request, env);
+  if (!auth.ok) return auth;
+  const access = await authorizeClientTrip(env, bookingID, auth.user.id);
+  if (!access.ok) return access;
+  return { ...auth, trip: access.trip };
+}
+
+async function listClientTrips(env, userID) {
+  const result = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE client_user_id=? ORDER BY created_at DESC LIMIT 200').bind(userID).all();
+  return json({ ok: true, trips: (result.results || []).map(tripMap) });
+}
+
+async function syncClientTrip(request, env, user) {
+  const parsed = await readJSON(request, 750_000);
+  if (!parsed.ok) return parsed.response;
+  const payload = parsed.value;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const bookingID = cleanText(payload.bookingID || payload.bookingId || payload?.bookingSnapshot?.id, 180);
+  if (!bookingID) return json({ ok: false, error: 'BOOKING_ID_REQUIRED' }, 400);
+  const clientUserID = cleanText(payload.clientUserID || payload.clientUserId || user.id, 180);
+  if (!clientUserID || clientUserID !== user.id) return json({ ok: false, error: 'CLIENT_ID_MISMATCH' }, 403);
+
+  const bookingSnapshot = payload.bookingSnapshot && typeof payload.bookingSnapshot === 'object' ? { ...payload.bookingSnapshot, id: bookingID, clientUserID } : { id: bookingID, clientUserID };
+  const pricingSnapshot = payload.pricingSnapshot && typeof payload.pricingSnapshot === 'object' ? payload.pricingSnapshot : {};
+  const identity = {
+    clientUserID,
+    firstName: safeHumanText(payload.firstName || user.firstName || user.first_name || '', 120) || '',
+    lastName: safeHumanText(payload.lastName || user.lastName || user.last_name || '', 120) || '',
+    displayName: safeHumanText(payload.displayName || user.displayName || user.name || '', 220) || '',
+    email: cleanText(payload.email || user.email, 220) || '',
+    phone: cleanText(payload.phone || user.phone, 100) || ''
+  };
+  if (!identity.displayName) identity.displayName = [identity.firstName, identity.lastName].filter(Boolean).join(' ').trim() || `Паломник ${bookingID}`;
+  const pilgrim = await ensurePilgrim(env, identity, bookingID);
+  const existing = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (existing && existing.client_user_id && String(existing.client_user_id) !== clientUserID && !String(existing.client_user_id).startsWith('legacy-booking:')) {
+    return json({ ok: false, error: 'BOOKING_ALREADY_OWNED' }, 409);
+  }
+  const now = new Date().toISOString();
+  const startDate = cleanText(payload.startDate || bookingSnapshot.startDate, 64);
+  const endDate = cleanText(payload.endDate || bookingSnapshot.endDate, 64);
+  if (!existing) {
+    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id, booking_id, pilgrim_id, client_user_id, status, start_date, end_date, booking_snapshot_json, pricing_snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)`)
+      .bind(`trip-${crypto.randomUUID()}`, bookingID, pilgrim.id, clientUserID, startDate, endDate, JSON.stringify(bookingSnapshot), JSON.stringify(pricingSnapshot), now, now).run();
+  } else {
+    const previousBooking = parseJSONObject(existing.booking_snapshot_json);
+    const previousPricing = parseJSONObject(existing.pricing_snapshot_json);
+    const mergedBooking = { ...previousBooking, ...bookingSnapshot };
+    const mergedPricing = Object.keys(pricingSnapshot).length ? { ...previousPricing, ...pricingSnapshot } : previousPricing;
+    await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET pilgrim_id=?, client_user_id=?, start_date=COALESCE(?, start_date), end_date=COALESCE(?, end_date), booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=? WHERE booking_id=?`)
+      .bind(pilgrim.id, clientUserID, startDate, endDate, JSON.stringify(mergedBooking), JSON.stringify(mergedPricing), now, bookingID).run();
+  }
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
+  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?').bind(Number(stats?.count || 0), stats?.last_trip || null, now, pilgrim.id).run();
+  return json({ ok: true, pilgrimID: pilgrimPublicID(pilgrim.id), trip: tripMap(trip) });
+}
+
+async function sendClientChatMessage(request, env, bookingID, user) {
+  const payload = await request.json().catch(() => null);
+  const body = safeHumanText(payload?.body, 4000);
+  if (!body) return json({ ok: false, error: 'EMPTY_MESSAGE' }, 400);
+  const clientMessageID = safeID(payload?.clientMessageID) || null;
+  if (clientMessageID) {
+    const existing = await env.HOTELS_DB.prepare('SELECT id FROM business_chat_messages WHERE booking_id=? AND client_message_id=? LIMIT 1').bind(bookingID, clientMessageID).first();
+    if (existing?.id) return chatMessageDetail(env, existing.id, 200, false);
+  }
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const senderName = safeHumanText(user?.displayName || user?.name || 'Паломник', 160) || 'Паломник';
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`INSERT INTO business_chat_threads (booking_id, created_at, updated_at, last_message_at, last_message_preview, last_sender_type, unread_for_staff) VALUES (?, ?, ?, ?, ?, 'client', 1) ON CONFLICT(booking_id) DO UPDATE SET updated_at=excluded.updated_at, last_message_at=excluded.last_message_at, last_message_preview=excluded.last_message_preview, last_sender_type='client', unread_for_staff=1`).bind(bookingID, now, now, now, body.slice(0,240)),
+    env.HOTELS_DB.prepare(`INSERT INTO business_chat_messages (id, booking_id, sender_type, sender_name, body, created_at, read_by_staff, client_message_id, message_type) VALUES (?, ?, 'client', ?, ?, ?, 0, ?, 'text')`).bind(id, bookingID, senderName, body, now, clientMessageID)
+  ]);
+  await sendStaffPush(env, senderName, body.slice(0, 180), { type: 'chat_message', bookingID }).catch(() => {});
+  return chatMessageDetail(env, id, 201, false);
+}
+
+async function markClientChatRead(env, bookingID) {
+  return json({ ok: true });
+}
+
+async function sendChatAttachment(request, env, bookingID, user, staff = true) {
+  const contentType = String(request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!contentType.startsWith('image/')) return json({ ok: false, error: 'IMAGE_REQUIRED' }, 415);
+  const sourceBytes = await request.arrayBuffer();
+  if (!sourceBytes.byteLength || sourceBytes.byteLength > 12_000_000) return json({ ok: false, error: 'IMAGE_TOO_LARGE' }, 413);
+  let transformed;
+  try { transformed = await optimizeHotelImageBytes(env, sourceBytes, { category: 'gallery', isCover: false, sourceContentType: contentType }); }
+  catch (error) { return json({ ok: false, error: String(error?.message || 'IMAGE_OPTIMIZATION_FAILED') }, 422); }
+  const attachmentID = crypto.randomUUID();
+  const extension = transformed.extension || 'webp';
+  const objectKey = `chat/${bookingID}/${attachmentID}.${extension}`;
+  await env.HOTELS_MEDIA.put(objectKey, transformed.bytes, { httpMetadata: { contentType: transformed.contentType } });
+  const now = new Date().toISOString();
+  const messageID = crypto.randomUUID();
+  const senderType = staff ? 'staff' : 'client';
+  const senderName = staff
+    ? await staffDisplayName(env, user)
+    : (safeHumanText(user?.displayName || user?.name || 'Паломник', 160) || 'Паломник');
+  const preview = 'Фотография';
+  try {
+    await env.HOTELS_DB.batch([
+      env.HOTELS_DB.prepare(`INSERT INTO business_chat_threads (booking_id, created_at, updated_at, last_message_at, last_message_preview, last_sender_type, unread_for_staff) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(booking_id) DO UPDATE SET updated_at=excluded.updated_at, last_message_at=excluded.last_message_at, last_message_preview=excluded.last_message_preview, last_sender_type=excluded.last_sender_type, unread_for_staff=excluded.unread_for_staff`).bind(bookingID, now, now, now, preview, senderType, staff ? 0 : 1),
+      env.HOTELS_DB.prepare('INSERT INTO business_chat_attachments (id, booking_id, object_key, content_type, byte_size, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(attachmentID, bookingID, objectKey, transformed.contentType, transformed.bytes.byteLength, transformed.width, transformed.height, now),
+      env.HOTELS_DB.prepare(`INSERT INTO business_chat_messages (id, booking_id, sender_type, sender_name, body, created_at, read_by_staff, message_type, attachment_id) VALUES (?, ?, ?, ?, '', ?, ?, 'image', ?)`).bind(messageID, bookingID, senderType, senderName, now, staff ? 1 : 0, attachmentID)
+    ]);
+  } catch (error) {
+    await env.HOTELS_MEDIA.delete(objectKey).catch(() => {});
+    throw error;
+  }
+  if (!staff) await sendStaffPush(env, senderName, 'Фотография', { type: 'chat_image', bookingID }).catch(() => {});
+  return chatMessageDetail(env, messageID, 201, staff);
+}
+
+async function serveChatAttachment(env, bookingID, attachmentID) {
+  const safeAttachmentID = safeID(attachmentID);
+  if (!safeAttachmentID) return json({ ok: false, error: 'INVALID_ATTACHMENT_ID' }, 400);
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM business_chat_attachments WHERE id=? AND booking_id=? LIMIT 1').bind(safeAttachmentID, bookingID).first();
+  if (!row) return json({ ok: false, error: 'ATTACHMENT_NOT_FOUND' }, 404);
+  const object = await env.HOTELS_MEDIA.get(row.object_key);
+  if (!object) return json({ ok: false, error: 'ATTACHMENT_NOT_FOUND' }, 404);
+  const headers = new Headers();
+  headers.set('content-type', row.content_type || 'image/webp');
+  headers.set('cache-control', 'private, max-age=3600');
+  return new Response(object.body, { status: 200, headers });
+}
+
 
 async function requireStaff(request, env) {
   const cookie = request.headers.get('cookie') || '';
@@ -2952,8 +3739,8 @@ function corsHeaders(request) {
   return {
     'access-control-allow-origin': allowed ? origin : 'https://iumrah.app',
     'access-control-allow-credentials': 'true',
-    'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
-    'access-control-allow-headers': 'Content-Type,Idempotency-Key,X-Iumrah-Allow-Possible-Duplicate,X-Iumrah-Source,X-Iumrah-Position,X-Iumrah-Cover,X-Iumrah-Category,X-Iumrah-Source-URL,X-Iumrah-Label,X-Iumrah-Room',
+    'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    'access-control-allow-headers': 'Content-Type,Authorization,Idempotency-Key,X-Iumrah-Allow-Possible-Duplicate,X-Iumrah-Source,X-Iumrah-Position,X-Iumrah-Cover,X-Iumrah-Category,X-Iumrah-Source-URL,X-Iumrah-Label,X-Iumrah-Room',
     'vary': 'Origin'
   };
 }

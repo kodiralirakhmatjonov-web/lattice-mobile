@@ -47,7 +47,7 @@ actor APIClient {
     }
 
     func bookings() async throws -> [BookingSummary] {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/bookings"))
+        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings"))
         try validate(response, data: data)
         return try decoder.decode(BookingsResponse.self, from: data).bookings
     }
@@ -56,6 +56,110 @@ actor APIClient {
         let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/chats"))
         try validate(response, data: data)
         return try decoder.decode(ChatsResponse.self, from: data).threads
+    }
+
+    func businessProfile() async throws -> BusinessTeamMember {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/me")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
+    }
+
+    func saveBusinessProfile(_ member: BusinessTeamMember) async throws -> BusinessTeamMember {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/me"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
+    }
+
+    func businessTeam() async throws -> [BusinessTeamMember] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamResponse.self, from: data).members
+    }
+
+    func createBusinessTeamMember(_ member: BusinessTeamMember) async throws -> BusinessTeamMember {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
+    }
+
+    func updateBusinessTeamMember(_ member: BusinessTeamMember) async throws -> BusinessTeamMember {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team/\(member.id)"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
+    }
+
+    func deleteBusinessTeamMember(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team/\(id)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+    }
+
+    func bookingDetail(id: String) async throws -> BookingDetailResponse {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BookingDetailResponse.self, from: data)
+    }
+
+    func updateBookingOperation(id: String, status: TripStatus, paymentStatus: String, confirmationNumber: String, internalNotes: String) async throws -> BookingDetailResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BookingOperationUpdatePayload(status: status.rawValue, paymentStatus: paymentStatus, confirmationNumber: confirmationNumber, internalNotes: internalNotes))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingDetailResponse.self, from: data)
+    }
+
+    func pilgrims(archiveOnly: Bool = false, query: String? = nil) async throws -> [PilgrimSummary] {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/pilgrims"), resolvingAgainstBaseURL: false)!
+        var items: [URLQueryItem] = []
+        if archiveOnly { items.append(URLQueryItem(name: "archive", value: "1")) }
+        if let query, !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
+        components.queryItems = items.isEmpty ? nil : items
+        let (data, response) = try await session.data(from: components.url!)
+        try validate(response, data: data)
+        return try decoder.decode(PilgrimsResponse.self, from: data).pilgrims
+    }
+
+    func pilgrimDetail(id: String) async throws -> PilgrimDetailResponse {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/pilgrims/\(id)")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(PilgrimDetailResponse.self, from: data)
+    }
+
+    func primaryHotels(city: String? = nil) async throws -> [PrimaryHotelAssignment] {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/primary-hotels"), resolvingAgainstBaseURL: false)!
+        if let city { components.queryItems = [URLQueryItem(name: "city", value: city)] }
+        let (data, response) = try await session.data(from: components.url!)
+        try validate(response, data: data)
+        return try decoder.decode(PrimaryHotelsResponse.self, from: data).assignments
+    }
+
+    func savePrimaryHotels(city: String, stars: Int, hotelIDs: [String]) async throws -> [PrimaryHotelAssignment] {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/primary-hotels"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(PrimaryHotelsUpdatePayload(city: city, stars: stars, hotelIDs: hotelIDs))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(PrimaryHotelsResponse.self, from: data).assignments
     }
 
     func businessChatThreads() async throws -> [BusinessChatThreadSummary] {
@@ -79,6 +183,17 @@ actor APIClient {
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try decoder.decode(BusinessChatMessageResponse.self, from: data).message
+    }
+
+    func sendBusinessChatImage(bookingID: String, data: Data) async throws -> BusinessChatMessage {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats/\(bookingID)/attachments"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 75
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let (responseData, response) = try await session.data(for: request)
+        try validate(response, data: responseData)
+        return try decoder.decode(BusinessChatMessageResponse.self, from: responseData).message
     }
 
     func markBusinessChatRead(bookingID: String) async throws {
