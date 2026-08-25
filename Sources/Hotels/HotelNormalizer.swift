@@ -66,6 +66,7 @@ enum HotelNormalizer {
 
         for item in metadata {
             guard let url = normalizedURL(item.url) else { continue }
+            guard imageBelongsToProperty(url, snapshot: snapshot) else { continue }
             let key = dedupeKey(url)
             guard seen.insert(key).inserted else { continue }
 
@@ -222,6 +223,16 @@ enum HotelNormalizer {
             )
         }
         return result
+    }
+
+    private static func imageBelongsToProperty(_ value: String, snapshot: ProviderSnapshot) -> Bool {
+        guard snapshot.provider.caseInsensitiveCompare("Expedia") == .orderedSame else { return true }
+        guard let propertyID = clean(snapshot.providerHotelID),
+              propertyID.range(of: #"^[0-9]{4,}$"#, options: .regularExpression) != nil,
+              let url = URL(string: value) else { return false }
+        let host = url.host?.lowercased() ?? ""
+        guard host.contains("trvl-media.com") else { return false }
+        return url.path.lowercased().contains("/\(propertyID.lowercased())/")
     }
 
     private static func normalizedURL(_ value: String) -> String? {

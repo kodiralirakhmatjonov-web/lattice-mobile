@@ -162,7 +162,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             let browserRooms = await recoverRoomsInBrowser(provider: provider, propertyURL: propertyURL)
             rooms = Self.mergeRooms(rooms, browserRooms)
             if rooms.count < 4,
-               let recovered = try? await APIClient.shared.recoverSourceRooms(sourceURL: propertyURL.absoluteString) {
+               let recovered = try? await APIClient.shared.recoverSourceRooms(sourceURL: propertyURL.absoluteString),
+               Self.isSameProperty(recovered.sourceURL, as: propertyURL, provider: provider) {
                 rooms = Self.mergeRooms(rooms, recovered.rooms)
             }
             candidate.rooms = rooms
@@ -266,28 +267,38 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         progress = 0.22
         status = "Собираем все фотографии именно этой карточки…"
 
-        _ = try? await webView.evaluateJavaScript(Self.initializeMediaCaptureScript(provider: provider))
-        await captureVisibleMedia(provider: provider)
+        _ = try? await webView.evaluateJavaScript(Self.initializeMediaCaptureScript(provider: provider, sourceURL: currentURL.absoluteString))
+        await captureVisibleMedia(provider: provider, sourceURL: currentURL)
 
-        let pageFractions: [Double] = [0.0, 0.12, 0.24, 0.38, 0.52, 0.68, 0.82, 0.94, 1.0]
+        // Warm the exact property page so lazy property sections are available, but do not
+        // harvest arbitrary page images while scrolling. Expedia places recommendations,
+        // nearby cards and ads on the same document; media is captured only from the exact
+        // property gallery / room section below.
+        let pageFractions: [Double] = [0.0, 0.18, 0.36, 0.54, 0.72, 0.88]
         for (index, fraction) in pageFractions.enumerated() {
             let script = "window.scrollTo(0, Math.max(0, (document.documentElement.scrollHeight - window.innerHeight) * \(fraction)));"
             _ = try? await webView.evaluateJavaScript(script)
             try? await Task.sleep(nanoseconds: 120_000_000)
-            await captureVisibleMedia(provider: provider)
-            progress = 0.22 + (Double(index + 1) / Double(pageFractions.count)) * 0.20
+            progress = 0.22 + (Double(index + 1) / Double(pageFractions.count)) * 0.16
         }
 
-        status = "Открываем полную галерею отеля…"
+        // Always return to the property hero before opening the main hotel gallery. This
+        // prevents a generic "View all photos" search from selecting a recommended hotel
+        // or a room card farther down the page.
+        _ = try? await webView.evaluateJavaScript("window.scrollTo(0, 0);")
+        try? await Task.sleep(nanoseconds: 220_000_000)
+        await captureVisibleMedia(provider: provider, sourceURL: currentURL)
+
+        status = "Открываем полную галерею именно этого отеля…"
         let openedGallery = ((try? await webView.evaluateJavaScript(Self.openGalleryScript())) as? Bool) == true
         if openedGallery {
             try? await Task.sleep(nanoseconds: 650_000_000)
-            await captureVisibleMedia(provider: provider)
+            await captureVisibleMedia(provider: provider, sourceURL: currentURL)
             let galleryFractions: [Double] = [0.0, 0.08, 0.16, 0.24, 0.32, 0.40, 0.48, 0.56, 0.64, 0.72, 0.80, 0.88, 0.94, 1.0]
             for (index, fraction) in galleryFractions.enumerated() {
                 _ = try? await webView.evaluateJavaScript(Self.scrollGalleryScript(fraction: fraction))
                 try? await Task.sleep(nanoseconds: 130_000_000)
-                await captureVisibleMedia(provider: provider)
+                await captureVisibleMedia(provider: provider, sourceURL: currentURL)
                 progress = 0.42 + (Double(index + 1) / Double(galleryFractions.count)) * 0.24
             }
             _ = try? await webView.evaluateJavaScript(Self.closeGalleryScript())
@@ -305,7 +316,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         for fraction in [0.0, 0.30, 0.62, 1.0] {
             _ = try? await webView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
             try? await Task.sleep(nanoseconds: 260_000_000)
-            await captureVisibleMedia(provider: provider)
+            await captureVisibleMedia(provider: provider, sourceURL: currentURL)
         }
 
         stage = .extracting
@@ -319,6 +330,20 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 throw APIError.server("EMPTY_HOTEL_EXTRACT")
             }
             let snapshot = try JSONDecoder().decode(ProviderSnapshot.self, from: data)
+
+            // URL identity is authoritative. Expedia embeds recommendation hotels in the same
+            // page/application state, so a mismatching property ID must fail closed rather
+            // than create a mixed hotel object.
+            if provider == .expedia, let expectedID = Self.propertyID(from: currentURL, provider: provider) {
+                guard snapshot.providerHotelID == expectedID else {
+                    throw APIError.server("SOURCE_PROPERTY_ID_MISMATCH: ожидали Expedia property \(expectedID), получили \(snapshot.providerHotelID ?? "нет ID").")
+                }
+                if let canonical = snapshot.canonicalURL, !canonical.isEmpty,
+                   !Self.isSameProperty(canonical, as: currentURL, provider: provider) {
+                    throw APIError.server("SOURCE_CANONICAL_PROPERTY_MISMATCH")
+                }
+            }
+
             guard let name = snapshot.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
                 throw APIError.server("Не удалось прочитать название отеля с этой страницы.")
             }
@@ -351,7 +376,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 status = "Проверяем номера вторым способом…"
                 progress = 0.91
                 if let recovered = try? await APIClient.shared.recoverSourceRooms(sourceURL: currentURL.absoluteString),
-                   !recovered.rooms.isEmpty {
+                   !recovered.rooms.isEmpty,
+                   Self.isSameProperty(recovered.sourceURL, as: currentURL, provider: provider) {
                     candidate.rooms = Self.mergeRooms(candidate.rooms, recovered.rooms)
                 }
             }
@@ -387,8 +413,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
     }
 
-    private func captureVisibleMedia(provider: Provider) async {
-        _ = try? await webView.evaluateJavaScript(Self.captureVisibleMediaScript(provider: provider))
+    private func captureVisibleMedia(provider: Provider, sourceURL: URL) async {
+        _ = try? await webView.evaluateJavaScript(Self.captureVisibleMediaScript(provider: provider, sourceURL: sourceURL.absoluteString))
     }
 
     private static func mergeRooms(_ primary: [HotelRoomDraft], _ recovered: [HotelRoomDraft]) -> [HotelRoomDraft] {
@@ -454,11 +480,15 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             }
 
             guard let pageURL = roomWebView.url, provider.isProviderContentURL(pageURL) else { continue }
+            guard Self.isSameProperty(pageURL, as: propertyURL, provider: provider) else { continue }
             if await detectVerification(in: roomWebView) { continue }
             let raw = try? await roomWebView.evaluateJavaScript(Self.extractionScript(provider: provider, sourceURL: propertyURL.absoluteString))
             guard let json = raw as? String, let data = json.data(using: .utf8),
                   let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
                   !Self.isChallengeIdentity(snapshot.name) else { continue }
+            if provider == .expedia,
+               let expectedID = Self.propertyID(from: propertyURL, provider: provider),
+               snapshot.providerHotelID != expectedID { continue }
             let roomDraft = HotelNormalizer.makeDraft(snapshot: snapshot)
             recovered = Self.mergeRooms(recovered, roomDraft.rooms)
         }
@@ -677,46 +707,125 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         return components.url
     }
 
+    private static func propertyID(from url: URL, provider: Provider) -> String? {
+        guard provider == .expedia else { return nil }
+        if let explicit = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { ["expediaPropertyId", "propertyId"].contains($0.name) })?.value,
+           explicit.range(of: #"^[0-9]{4,}$"#, options: .regularExpression) != nil {
+            return explicit
+        }
+
+        let path = url.path
+        guard let regex = try? NSRegularExpression(pattern: #"\.h([0-9]{4,})\.Hotel-Information"#, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: path, range: NSRange(path.startIndex..., in: path)),
+              let range = Range(match.range(at: 1), in: path) else { return nil }
+        return String(path[range])
+    }
+
+    private static func isSameProperty(_ candidateURL: URL, as expectedURL: URL, provider: Provider) -> Bool {
+        guard provider == .expedia else { return provider.isProviderContentURL(candidateURL) }
+        guard let expectedID = propertyID(from: expectedURL, provider: provider) else { return false }
+        return propertyID(from: candidateURL, provider: provider) == expectedID
+    }
+
+    private static func isSameProperty(_ candidateURLString: String, as expectedURL: URL, provider: Provider) -> Bool {
+        guard let candidateURL = URL(string: candidateURLString) else { return false }
+        return isSameProperty(candidateURL, as: expectedURL, provider: provider)
+    }
+
     private static func providerPhotoPredicate(_ provider: Provider) -> String {
         switch provider {
         case .booking:
             return "host.endsWith('bstatic.com') && path.includes('/xdata/images/hotel/')"
         case .expedia:
-            return "(host.includes('trvl-media.com') || host.includes('expedia.com')) && (path.includes('/lodging/') || path.includes('/hotelimages/'))"
+            // Expedia property photos encode the exact lodging property ID in the path.
+            return "host.includes('trvl-media.com') && path.includes('/lodging/')"
         }
     }
 
-    private static func initializeMediaCaptureScript(provider: Provider) -> String {
+    private static func initializeMediaCaptureScript(provider: Provider, sourceURL: String) -> String {
         let predicate = providerPhotoPredicate(provider)
+        let escapedSource = sourceURL
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
         return """
         (() => {
-          window.__iumrahHotelMedia = window.__iumrahHotelMedia || {};
-          window.__iumrahProviderName = '\(provider.rawValue)';
+          const provider = '\(provider.rawValue)';
+          const sourceURL = '\(escapedSource)';
+          const propertyIDFromURL = raw => {
+            try {
+              const u = new URL(String(raw || ''), location.href);
+              const explicit = u.searchParams.get('expediaPropertyId') || u.searchParams.get('propertyId');
+              if (explicit && /^[0-9]{4,}$/.test(explicit)) return explicit;
+              const match = u.pathname.match(/\\.h([0-9]{4,})\\.Hotel-Information/i);
+              return match ? match[1] : null;
+            } catch (_) { return null; }
+          };
+          const expectedPropertyID = provider === 'Expedia'
+            ? (propertyIDFromURL(location.href) || propertyIDFromURL(sourceURL))
+            : null;
+
+          // A new import owns a fresh media store. Never carry media across an Expedia SPA
+          // navigation or a reused importer slot.
+          window.__iumrahHotelMedia = {};
+          window.__iumrahProviderName = provider;
+          window.__iumrahExpectedPropertyID = expectedPropertyID;
+          window.__iumrahMediaAnchor = `${provider}|${expectedPropertyID || location.pathname}`;
           window.__iumrahIsHotelPhoto = raw => {
             try {
               const u = new URL(String(raw || ''), location.href);
               const host = u.hostname.toLowerCase();
               const path = u.pathname.toLowerCase();
-              return \(predicate);
+              const baseAllowed = \(predicate);
+              if (!baseAllowed) return false;
+              if (provider === 'Expedia') {
+                if (!expectedPropertyID) return false;
+                return path.includes(`/${expectedPropertyID}/`);
+              }
+              return true;
             } catch (_) { return false; }
           };
-          return true;
+          return { expectedPropertyID, anchor: window.__iumrahMediaAnchor };
         })();
         """
     }
 
-    private static func captureVisibleMediaScript(provider: Provider) -> String {
+    private static func captureVisibleMediaScript(provider: Provider, sourceURL: String) -> String {
         let predicate = providerPhotoPredicate(provider)
+        let escapedSource = sourceURL
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
         return """
         (() => {
+          const provider = '\(provider.rawValue)';
+          const sourceURL = '\(escapedSource)';
           window.__iumrahHotelMedia = window.__iumrahHotelMedia || {};
           const clean = s => String(s || '').replace(/\\s+/g, ' ').trim();
+          const propertyIDFromURL = raw => {
+            try {
+              const u = new URL(String(raw || ''), location.href);
+              const explicit = u.searchParams.get('expediaPropertyId') || u.searchParams.get('propertyId');
+              if (explicit && /^[0-9]{4,}$/.test(explicit)) return explicit;
+              const match = u.pathname.match(/\\.h([0-9]{4,})\\.Hotel-Information/i);
+              return match ? match[1] : null;
+            } catch (_) { return null; }
+          };
+          const expectedPropertyID = window.__iumrahExpectedPropertyID
+            || (provider === 'Expedia' ? (propertyIDFromURL(location.href) || propertyIDFromURL(sourceURL)) : null);
           const isAllowed = raw => {
             try {
               const u = new URL(String(raw || ''), location.href);
               const host = u.hostname.toLowerCase();
               const path = u.pathname.toLowerCase();
-              return \(predicate);
+              const baseAllowed = \(predicate);
+              if (!baseAllowed) return false;
+              if (provider === 'Expedia') {
+                if (!expectedPropertyID) return false;
+                // Hard property boundary. Expedia photos from another hotel have another
+                // lodging property ID segment and are rejected even if they are on this page.
+                return path.includes(`/${expectedPropertyID}/`);
+              }
+              return true;
             } catch (_) { return false; }
           };
           const normalize = raw => {
@@ -749,19 +858,24 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           };
           const isBlockedContext = img => {
             let container = img;
-            for (let depth = 0; container && depth < 8; depth += 1, container = container.parentElement) {
+            for (let depth = 0; container && depth < 10; depth += 1, container = container.parentElement) {
               const marker = clean(`${container.getAttribute?.('data-testid') || ''} ${container.getAttribute?.('data-stid') || ''} ${typeof container.className === 'string' ? container.className : ''}`).toLowerCase();
-              if (/(recommend|similar|related|search-result|property-card|other-property|nearby-property|cross-sell|upsell)/i.test(marker)) return true;
+              if (/(recommend|similar|related|search-result|property-card|other-property|nearby-property|cross-sell|upsell|sponsored|advert)/i.test(marker)) return true;
               if (/^(SECTION|ARTICLE|LI)$/.test(container.tagName || '')) {
                 const heading = clean(container.querySelector?.('h1,h2,h3,h4,[role="heading"]')?.innerText || '').toLowerCase();
-                if (/(similar properties|you may also like|other properties|recommended|more places to stay|popular properties nearby)/i.test(heading)) return true;
+                if (/(similar properties|you may also like|other properties|recommended|more places to stay|popular properties nearby|sponsored)/i.test(heading)) return true;
               }
             }
             const link = img.closest('a[href*="/hotel/"],a[href*="Hotel-Information"],a[href*="hotel-information"]');
             if (link) {
               try {
                 const target = new URL(link.href, location.href);
-                if (target.pathname !== location.pathname && !location.pathname.includes(target.pathname) && !target.pathname.includes(location.pathname)) return true;
+                if (provider === 'Expedia' && expectedPropertyID) {
+                  const linkedPropertyID = propertyIDFromURL(target.href);
+                  if (linkedPropertyID && linkedPropertyID !== expectedPropertyID) return true;
+                } else if (target.pathname !== location.pathname && !location.pathname.includes(target.pathname) && !target.pathname.includes(location.pathname)) {
+                  return true;
+                }
               } catch (_) {}
             }
             return false;
@@ -796,16 +910,40 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     private static func openGalleryScript() -> String {
         """
         (() => {
-          const text = el => String(el.innerText || el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-          const nodes = [...document.querySelectorAll('button,a,[role="button"]')];
-          const preferred = nodes.filter(el => {
+          const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+          const text = el => clean(`${el.innerText || ''} ${el.getAttribute?.('aria-label') || ''}`).toLowerCase();
+          const headings = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')];
+          const roomHeading = headings.find(el => /room options|available rooms|choose your room|rooms and rates|room types/i.test(clean(el.innerText || el.textContent || '')));
+          const roomTop = roomHeading ? roomHeading.getBoundingClientRect().top + window.scrollY : Number.POSITIVE_INFINITY;
+
+          const blocked = el => {
             const t = text(el);
-            const marker = `${el.getAttribute('data-testid') || ''} ${el.getAttribute('data-stid') || ''}`.toLowerCase();
-            return marker.includes('gallery') || marker.includes('photo') || /all photos|show all photos|view all photos|see all photos|все фото|все фотографии/.test(t);
-          });
-          const target = preferred.find(el => el.offsetParent !== null) || preferred[0];
+            if (/view all photos for|more details for|view prices for/i.test(t)) return true;
+            let node = el;
+            for (let depth = 0; node && depth < 9; depth += 1, node = node.parentElement) {
+              const marker = clean(`${node.getAttribute?.('data-testid') || ''} ${node.getAttribute?.('data-stid') || ''} ${typeof node.className === 'string' ? node.className : ''}`).toLowerCase();
+              if (/(recommend|similar|related|property-card|other-property|cross-sell|upsell|room-card)/i.test(marker)) return true;
+              const heading = clean(node.querySelector?.('h1,h2,h3,h4,[role="heading"]')?.innerText || '').toLowerCase();
+              if (/(you may also like|similar properties|recommended|more places to stay)/i.test(heading)) return true;
+            }
+            return false;
+          };
+
+          const candidates = [...document.querySelectorAll('button,a,[role="button"]')]
+            .filter(el => {
+              if (blocked(el)) return false;
+              const marker = `${el.getAttribute('data-testid') || ''} ${el.getAttribute('data-stid') || ''}`.toLowerCase();
+              const t = text(el);
+              const photoSignal = marker.includes('gallery') || marker.includes('photo') || /all photos|show all photos|see all photos|photo gallery|^\\d+\\+$/.test(t);
+              if (!photoSignal) return false;
+              const top = el.getBoundingClientRect().top + window.scrollY;
+              return top < roomTop;
+            })
+            .sort((a, b) => (a.getBoundingClientRect().top + window.scrollY) - (b.getBoundingClientRect().top + window.scrollY));
+
+          const target = candidates.find(el => el.offsetParent !== null) || candidates[0];
           if (!target) return false;
-          try { target.click(); return true; } catch (_) { return false; }
+          try { target.scrollIntoView({ block: 'center' }); target.click(); return true; } catch (_) { return false; }
         })();
         """
     }
@@ -926,41 +1064,109 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           try { walkJSON(window.__iumrahJSONResponses || []); } catch (_) {}
           const typeText = value => Array.isArray(value) ? value.join(' ') : String(value || '');
           const visibleH1 = clean(document.querySelector('h1')?.innerText || '');
-          const canonicalHint = document.querySelector('link[rel=\\"canonical\\"]')?.href || sourceURL;
-          const hotelScore = candidate => {
-            if (!candidate || typeof candidate !== 'object') return -999;
-            const type = typeText(candidate['@type'] || candidate.__typename || candidate.type);
-            const candidateName = clean(candidate.name || candidate.propertyName || candidate.title || '');
-            const hasAddress = !!(candidate.address || candidate.location?.address);
-            const hasGeo = !!(candidate.geo || candidate.coordinates || candidate.latitude || candidate.longitude);
-            const hasHotelType = /hotel|lodgingbusiness|resort|accommodation|property/i.test(type);
-            let score = hasHotelType ? 12 : 0;
-            if (candidateName) score += 2;
-            if (visibleH1 && candidateName && lower(visibleH1).includes(lower(candidateName).slice(0, 28))) score += 12;
-            if (candidateName && visibleH1 && lower(candidateName).includes(lower(visibleH1).slice(0, 28))) score += 9;
-            if (hasAddress) score += 5;
-            if (hasGeo) score += 4;
-            if (candidate.aggregateRating || candidate.reviewsSummary) score += 3;
-            const rawURL = clean(candidate.url || candidate.canonicalUrl || candidate.webUrl || '');
-            if (rawURL && canonicalHint && (rawURL.includes(location.pathname) || canonicalHint.includes(rawURL))) score += 5;
-            if (/recommend|similar|searchresult/i.test(type)) score -= 15;
-            return score;
-          };
-          const hotel = allJSON.reduce((best, item) => hotelScore(item) > hotelScore(best) ? item : best, {}) || {};
-          const canonicalURL = (() => {
-            try {
-              const raw = document.querySelector('link[rel=\\"canonical\\"]')?.href || hotel.url || hotel.canonicalUrl || sourceURL;
-              return raw ? new URL(String(raw), location.href).toString() : sourceURL;
-            } catch (_) { return sourceURL; }
-          })();
+          const canonicalHint = document.querySelector('link[rel=\"canonical\"]')?.href || location.href || sourceURL;
           const identifierValue = candidate => {
             if (candidate == null) return null;
             if (typeof candidate === 'string' || typeof candidate === 'number') return clean(candidate) || null;
             if (typeof candidate === 'object') return clean(candidate.value || candidate.id || candidate.name || candidate['@id'] || '') || null;
             return null;
           };
+          const propertyIDFromURL = raw => {
+            try {
+              const u = new URL(String(raw || ''), location.href);
+              const explicit = u.searchParams.get('expediaPropertyId') || u.searchParams.get('propertyId');
+              if (explicit && /^[0-9]{4,}$/.test(explicit)) return explicit;
+              const match = u.pathname.match(/\\.h([0-9]{4,})\\.Hotel-Information/i);
+              return match ? match[1] : null;
+            } catch (_) { return null; }
+          };
+          const expectedPropertyID = provider === 'Expedia'
+            ? (propertyIDFromURL(location.href) || propertyIDFromURL(canonicalHint) || propertyIDFromURL(sourceURL))
+            : null;
+          const candidatePropertyID = candidate => {
+            if (!candidate || typeof candidate !== 'object') return null;
+            const direct = identifierValue(candidate.expediaPropertyId)
+              || identifierValue(candidate.propertyId)
+              || identifierValue(candidate.propertyID)
+              || identifierValue(candidate.hotelId)
+              || identifierValue(candidate.hotelID)
+              || identifierValue(candidate.lodgingId)
+              || identifierValue(candidate.lodgingID)
+              || identifierValue(candidate.identifier);
+            if (direct && /^[0-9]{4,}$/.test(direct)) return direct;
+            const rawURL = clean(candidate.url || candidate.canonicalUrl || candidate.canonicalURL || candidate.webUrl || candidate.href || '');
+            return propertyIDFromURL(rawURL);
+          };
+          const sameIdentityName = (a, b) => {
+            const normalize = value => lower(value).replace(/[^a-z0-9\\u0400-\\u04ff\\u0600-\\u06ff]+/g, ' ').replace(/\\s+/g, ' ').trim();
+            const aa = normalize(a);
+            const bb = normalize(b);
+            if (!aa || !bb) return false;
+            if (aa === bb) return true;
+            const short = aa.length < bb.length ? aa : bb;
+            const long = aa.length < bb.length ? bb : aa;
+            return short.length >= 12 && long.includes(short);
+          };
+          const hotelScore = candidate => {
+            if (!candidate || typeof candidate !== 'object') return -9999;
+            const type = typeText(candidate['@type'] || candidate.__typename || candidate.type);
+            const candidateName = clean(candidate.name || candidate.propertyName || candidate.title || '');
+            const candidateID = candidatePropertyID(candidate);
+            const rawURL = clean(candidate.url || candidate.canonicalUrl || candidate.canonicalURL || candidate.webUrl || '');
+            const rawURLID = propertyIDFromURL(rawURL);
+
+            // Expedia pages contain full recommendation/search trees for other hotels. Any
+            // explicit property identity that disagrees with the exact .h<id> URL is rejected.
+            if (expectedPropertyID && candidateID && candidateID !== expectedPropertyID) return -9999;
+            if (expectedPropertyID && rawURLID && rawURLID !== expectedPropertyID) return -9999;
+
+            const hasAddress = !!(candidate.address || candidate.location?.address);
+            const hasGeo = !!(candidate.geo || candidate.coordinates || candidate.latitude || candidate.longitude);
+            const hasHotelType = /hotel|lodgingbusiness|resort|accommodation|property/i.test(type);
+            let score = hasHotelType ? 12 : 0;
+            if (candidateID && expectedPropertyID && candidateID === expectedPropertyID) score += 140;
+            if (rawURLID && expectedPropertyID && rawURLID === expectedPropertyID) score += 100;
+            if (candidateName) score += 2;
+            if (visibleH1 && candidateName && sameIdentityName(visibleH1, candidateName)) score += 45;
+            if (hasAddress) score += 5;
+            if (hasGeo) score += 4;
+            if (candidate.aggregateRating || candidate.reviewsSummary) score += 3;
+            if (rawURL && canonicalHint && (rawURL.includes(location.pathname) || canonicalHint.includes(rawURL))) score += 8;
+            if (/recommend|similar|searchresult|crosssell|upsell/i.test(type)) score -= 80;
+            return score;
+          };
+          const bestHotel = allJSON.reduce((best, item) => hotelScore(item) > hotelScore(best) ? item : best, {}) || {};
+          const bestHotelID = candidatePropertyID(bestHotel);
+          const bestHotelName = clean(bestHotel.name || bestHotel.propertyName || bestHotel.title || '');
+          const identitySafe = !expectedPropertyID
+            || bestHotelID === expectedPropertyID
+            || (!bestHotelID && sameIdentityName(bestHotelName, visibleH1));
+          const hotel = identitySafe ? bestHotel : {};
+
+          const canonicalURL = (() => {
+            const choices = [
+              document.querySelector('link[rel=\"canonical\"]')?.href,
+              location.href,
+              hotel.url,
+              hotel.canonicalUrl,
+              hotel.canonicalURL,
+              sourceURL
+            ].filter(Boolean);
+            for (const raw of choices) {
+              try {
+                const absolute = new URL(String(raw), location.href).toString();
+                if (!expectedPropertyID || propertyIDFromURL(absolute) === expectedPropertyID) return absolute;
+              } catch (_) {}
+            }
+            return sourceURL;
+          })();
           const providerHotelID = (() => {
-            const direct = identifierValue(hotel.identifier) || identifierValue(hotel.propertyId) || identifierValue(hotel.propertyID) || identifierValue(hotel.hotelId) || identifierValue(hotel.hotelID) || identifierValue(hotel.id);
+            if (expectedPropertyID) return expectedPropertyID;
+            const direct = identifierValue(hotel.propertyId)
+              || identifierValue(hotel.propertyID)
+              || identifierValue(hotel.hotelId)
+              || identifierValue(hotel.hotelID)
+              || identifierValue(hotel.identifier);
             if (direct && direct.length >= 3 && direct.length <= 140) return direct;
             const raw = `${canonicalURL} ${sourceURL}`;
             const patterns = [/(?:hotelid|hotel_id|propertyid|property_id)[=/:.-]+([0-9A-Za-z_-]{4,})/i, /\\.h([0-9]{4,})\\./i, /\\/hotel\\/[^/]+\\/([^/?#]+?)(?:\\.html)?(?:[?#]|$)/i];
@@ -968,11 +1174,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             return null;
           })();
 
+          // Visible property identity wins. Embedded app-state is used only to enrich the
+          // same URL-anchored hotel, never to rename the requested property.
           const titleCandidates = [
-            hotel.name,
+            visibleH1,
             document.querySelector('[data-testid="title"]')?.innerText,
-            document.querySelector('h1')?.innerText,
             meta('og:title','property'),
+            hotel.name,
             document.title
           ];
           let name = titleCandidates.map(clean).find(Boolean) || null;
@@ -1350,10 +1558,16 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             }
           }
 
-          // Expedia can keep actual sellable room types in GraphQL/application state
-          // before the room cards are rendered. Only consume objects with explicit room signals.
+          // Embedded app-state contains recommendation trees too. For Expedia, structured
+          // room objects are accepted only when the object itself carries the exact property
+          // ID from the requested .h<id> URL. Unscoped JSON is never allowed to invent rooms.
           for (const item of allJSON) {
             if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+            if (provider === 'Expedia') {
+              if (!expectedPropertyID) continue;
+              const itemPropertyID = candidatePropertyID(item);
+              if (itemPropertyID !== expectedPropertyID) continue;
+            }
             const type = lower(typeText(item['@type'] || item.__typename || item.type || item.contentType || ''));
             const keys = Object.keys(item).join(' ').toLowerCase();
             const roomSignal = /room|suite|unit|accommodation/.test(type) ||
@@ -1556,7 +1770,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
               const u = new URL(String(raw || ''), location.href);
               const host = u.hostname.toLowerCase();
               const path = u.pathname.toLowerCase();
-              return \(predicate);
+              const baseAllowed = \(predicate);
+              if (!baseAllowed) return false;
+              if (provider === 'Expedia') {
+                if (!expectedPropertyID) return false;
+                return path.includes(`/${expectedPropertyID}/`);
+              }
+              return true;
             } catch (_) { return false; }
           };
           for (const item of captured) {
