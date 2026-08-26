@@ -126,6 +126,45 @@ actor APIClient {
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
 
+    func deleteBooking(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        _ = try? decoder.decode(BookingDeleteResponse.self, from: data)
+    }
+
+    func verifyFlight(number: String, dateLocal: String, force: Bool = false) async throws -> FlightVerificationResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/flight-verify"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(FlightVerificationPayload(flightNumber: number, dateLocal: dateLocal, force: force))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(FlightVerificationResponse.self, from: data)
+    }
+
+    func saveVerifiedFlight(bookingID: String, direction: BookingFlightDirection, verificationKey: String, candidateID: String) async throws -> BookingFlight {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/flights/\(direction.rawValue)"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(SaveVerifiedFlightPayload(verificationKey: verificationKey, candidateID: candidateID))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingFlightResponse.self, from: data).flight
+    }
+
+    func updateBookingAssignment(bookingID: String, makkahHotelID: String?, madinahHotelID: String?, guideID: String?) async throws -> BookingAssignment {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/assignments"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BookingAssignmentPayload(makkahHotelID: makkahHotelID, madinahHotelID: madinahHotelID, guideID: guideID))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingAssignmentResponse.self, from: data).assignment
+    }
+
     func pilgrims(archiveOnly: Bool = false, query: String? = nil) async throws -> [PilgrimSummary] {
         var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/pilgrims"), resolvingAgainstBaseURL: false)!
         var items: [URLQueryItem] = []

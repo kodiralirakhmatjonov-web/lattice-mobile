@@ -399,12 +399,21 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     return methodNotAllowed();
   }
 
+  if (parts[0] === 'flight-verify') {
+    if (parts.length !== 1 || request.method !== 'POST') return methodNotAllowed();
+    return verifyBusinessFlight(request, env);
+  }
+
   if (parts[0] === 'bookings') {
     if (parts.length === 1 && request.method === 'GET') return operationsBookings(request, env);
     const bookingID = cleanText(parts[1], 180);
     if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
     if (parts.length === 2 && request.method === 'GET') return operationsBookingDetail(request, env, bookingID);
     if (parts.length === 2 && request.method === 'PATCH') return updateOperationsBooking(request, env, bookingID, user);
+    if (parts.length === 2 && request.method === 'DELETE') return deleteOperationsBooking(request, env, bookingID, user);
+    if (parts.length === 3 && parts[2] === 'assignments' && request.method === 'PATCH') return updateBookingAssignments(request, env, bookingID);
+    if (parts.length === 4 && parts[2] === 'flights' && request.method === 'PUT') return saveVerifiedBookingFlight(request, env, bookingID, parts[3]);
+    if (parts.length === 4 && parts[2] === 'flights' && request.method === 'DELETE') return deleteBookingFlight(env, bookingID, parts[3]);
     return methodNotAllowed();
   }
 
@@ -424,6 +433,322 @@ async function handleBusinessOperations(request, env, url, parts, user) {
   }
 
   return json({ ok: false, error: 'NOT_FOUND' }, 404);
+}
+
+
+const FLIGHT_DIRECTIONS = new Set(['outbound','return']);
+
+function normalizedFlightNumber(value) {
+  const text = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!/^[A-Z0-9]{2,4}\d{1,4}[A-Z]?$/.test(text)) return '';
+  return text;
+}
+
+function validLocalDate(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return '';
+  const parsed = Date.parse(`${text}T00:00:00Z`);
+  return Number.isFinite(parsed) ? text : '';
+}
+
+function movementTime(movement, key, utc = false) {
+  if (!movement || typeof movement !== 'object') return '';
+  const legacyKey = `${key}${utc ? 'Utc' : 'Local'}`;
+  const legacy = movement[legacyKey];
+  if (typeof legacy === 'string' && legacy.trim()) return legacy.trim();
+  const structured = movement[key];
+  if (structured && typeof structured === 'object') {
+    const value = structured[utc ? 'utc' : 'local'];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function airportFromMovement(movement) {
+  const airport = movement?.airport && typeof movement.airport === 'object' ? movement.airport : {};
+  return {
+    iata: cleanText(airport.iata, 12) || '',
+    icao: cleanText(airport.icao, 12) || '',
+    name: safeHumanText(airport.name || airport.shortName || airport.municipalityName || '', 240) || ''
+  };
+}
+
+function normalizedAeroCandidate(item, index) {
+  const departure = item?.departure && typeof item.departure === 'object' ? item.departure : {};
+  const arrival = item?.arrival && typeof item.arrival === 'object' ? item.arrival : {};
+  const depAirport = airportFromMovement(departure);
+  const arrAirport = airportFromMovement(arrival);
+  return {
+    id: `candidate-${index + 1}`,
+    flightNumber: safeHumanText(item?.number || '', 40) || '',
+    callSign: safeHumanText(item?.callSign || '', 40) || '',
+    airlineName: safeHumanText(item?.airline?.name || '', 180) || '',
+    airlineIATA: cleanText(item?.airline?.iata, 12) || '',
+    airlineICAO: cleanText(item?.airline?.icao, 12) || '',
+    departureAirportIATA: depAirport.iata,
+    departureAirportICAO: depAirport.icao,
+    departureAirportName: depAirport.name,
+    arrivalAirportIATA: arrAirport.iata,
+    arrivalAirportICAO: arrAirport.icao,
+    arrivalAirportName: arrAirport.name,
+    scheduledDepartureLocal: movementTime(departure, 'scheduledTime', false),
+    scheduledDepartureUTC: movementTime(departure, 'scheduledTime', true),
+    scheduledArrivalLocal: movementTime(arrival, 'scheduledTime', false),
+    scheduledArrivalUTC: movementTime(arrival, 'scheduledTime', true),
+    departureTerminal: safeHumanText(departure.terminal || '', 40) || '',
+    arrivalTerminal: safeHumanText(arrival.terminal || '', 40) || '',
+    departureGate: safeHumanText(departure.gate || '', 40) || '',
+    arrivalGate: safeHumanText(arrival.gate || '', 40) || '',
+    status: safeHumanText(item?.status || '', 80) || '',
+    lastUpdatedUTC: cleanText(item?.lastUpdatedUtc || item?.lastUpdatedUTC || '', 80) || ''
+  };
+}
+
+function flightCacheTTL(dateLocal) {
+  const target = Date.parse(`${dateLocal}T00:00:00Z`);
+  const delta = Math.abs(target - Date.now());
+  return delta <= 2 * 86400_000 ? 5 * 60_000 : 6 * 60 * 60_000;
+}
+
+async function verifyFlightWithAeroDataBox(env, flightNumber, dateLocal, force = false) {
+  const normalized = normalizedFlightNumber(flightNumber);
+  const date = validLocalDate(dateLocal);
+  if (!normalized) return { ok: false, response: json({ ok: false, error: 'INVALID_FLIGHT_NUMBER' }, 400) };
+  if (!date) return { ok: false, response: json({ ok: false, error: 'INVALID_FLIGHT_DATE' }, 400) };
+  const cacheKey = `${normalized}|${date}`;
+  const now = new Date();
+  if (!force) {
+    const cached = await env.HOTELS_DB.prepare('SELECT * FROM flight_verification_cache WHERE cache_key=? LIMIT 1').bind(cacheKey).first();
+    if (cached && Date.parse(cached.expires_at) > now.getTime()) {
+      return { ok: true, cacheKey, cached: true, checkedAt: cached.checked_at, candidates: parseJSONArray(cached.candidates_json) };
+    }
+  }
+  const apiKey = String(env.AERODATABOX_RAPIDAPI_KEY || '').trim();
+  if (!apiKey) return { ok: false, response: json({ ok: false, error: 'AERODATABOX_NOT_CONFIGURED' }, 503) };
+  const endpoint = `https://aerodatabox.p.rapidapi.com/flights/number/${encodeURIComponent(normalized)}/${encodeURIComponent(date)}?withAircraftImage=false&withLocation=false&dateLocalRole=Departure`;
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json',
+        'X-RapidAPI-Key': apiKey,
+        'X-RapidAPI-Host': 'aerodatabox.p.rapidapi.com'
+      }
+    });
+  } catch (error) {
+    console.error('AERODATABOX_NETWORK_ERROR', error);
+    return { ok: false, response: json({ ok: false, error: 'FLIGHT_PROVIDER_UNAVAILABLE' }, 502) };
+  }
+  if (response.status === 429) return { ok: false, response: json({ ok: false, error: 'AERODATABOX_QUOTA_EXCEEDED' }, 429) };
+  if (response.status === 401 || response.status === 403) return { ok: false, response: json({ ok: false, error: 'AERODATABOX_AUTH_FAILED' }, 502) };
+  if (!response.ok) {
+    const body = (await response.text().catch(() => '')).slice(0, 500);
+    console.warn('AERODATABOX_HTTP_ERROR', response.status, body);
+    return { ok: false, response: json({ ok: false, error: `AERODATABOX_HTTP_${response.status}` }, 502) };
+  }
+  const payload = await response.json().catch(() => null);
+  const items = Array.isArray(payload) ? payload : [];
+  const candidates = items
+    .filter(item => normalizedFlightNumber(item?.number || '') === normalized)
+    .slice(0, 8)
+    .map((item, index) => normalizedAeroCandidate(item, index));
+  const checkedAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + flightCacheTTL(date)).toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO flight_verification_cache (cache_key, flight_number, date_local, candidates_json, checked_at, expires_at, provider)
+    VALUES (?, ?, ?, ?, ?, ?, 'aerodatabox')
+    ON CONFLICT(cache_key) DO UPDATE SET candidates_json=excluded.candidates_json, checked_at=excluded.checked_at, expires_at=excluded.expires_at, provider='aerodatabox'
+  `).bind(cacheKey, normalized, date, JSON.stringify(candidates), checkedAt, expiresAt).run();
+  await env.HOTELS_DB.prepare("DELETE FROM flight_verification_cache WHERE julianday(expires_at) < julianday('now','-7 days')").run().catch(() => {});
+  return { ok: true, cacheKey, cached: false, checkedAt, candidates };
+}
+
+async function verifyBusinessFlight(request, env) {
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const result = await verifyFlightWithAeroDataBox(env, payload.flightNumber, payload.dateLocal, payload.force === true);
+  if (!result.ok) return result.response;
+  if (!result.candidates.length) return json({ ok: false, error: 'FLIGHT_NOT_FOUND', flightNumber: normalizedFlightNumber(payload.flightNumber), dateLocal: validLocalDate(payload.dateLocal) }, 404);
+  return json({ ok: true, provider: 'AeroDataBox', verificationKey: result.cacheKey, cached: result.cached, checkedAt: result.checkedAt, candidates: result.candidates });
+}
+
+function mapTripFlight(row) {
+  if (!row) return null;
+  return {
+    direction: row.direction,
+    flightNumber: row.flight_number || '',
+    callSign: row.call_sign || '',
+    airlineName: row.airline_name || '',
+    airlineIATA: row.airline_iata || '',
+    airlineICAO: row.airline_icao || '',
+    departureAirportIATA: row.departure_airport_iata || '',
+    departureAirportICAO: row.departure_airport_icao || '',
+    departureAirportName: row.departure_airport_name || '',
+    arrivalAirportIATA: row.arrival_airport_iata || '',
+    arrivalAirportICAO: row.arrival_airport_icao || '',
+    arrivalAirportName: row.arrival_airport_name || '',
+    scheduledDepartureLocal: row.scheduled_departure_local || '',
+    scheduledDepartureUTC: row.scheduled_departure_utc || '',
+    scheduledArrivalLocal: row.scheduled_arrival_local || '',
+    scheduledArrivalUTC: row.scheduled_arrival_utc || '',
+    departureTerminal: row.departure_terminal || '',
+    arrivalTerminal: row.arrival_terminal || '',
+    departureGate: row.departure_gate || '',
+    arrivalGate: row.arrival_gate || '',
+    status: row.status || '',
+    verificationProvider: row.verification_provider || 'aerodatabox',
+    verifiedAt: row.verified_at || null,
+    lastCheckedAt: row.last_checked_at || null
+  };
+}
+
+async function saveVerifiedBookingFlight(request, env, bookingID, directionRaw) {
+  const direction = String(directionRaw || '').toLowerCase();
+  if (!FLIGHT_DIRECTIONS.has(direction)) return json({ ok: false, error: 'INVALID_FLIGHT_DIRECTION' }, 400);
+  const trip = await env.HOTELS_DB.prepare('SELECT id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 404);
+  const payload = await request.json().catch(() => null);
+  const verificationKey = cleanText(payload?.verificationKey, 120);
+  const candidateID = cleanText(payload?.candidateID, 80);
+  if (!verificationKey || !candidateID) return json({ ok: false, error: 'VERIFICATION_REQUIRED' }, 400);
+  const cached = await env.HOTELS_DB.prepare('SELECT * FROM flight_verification_cache WHERE cache_key=? LIMIT 1').bind(verificationKey).first();
+  if (!cached || Date.now() - Date.parse(cached.checked_at) > 24 * 60 * 60_000) return json({ ok: false, error: 'FLIGHT_VERIFICATION_EXPIRED' }, 409);
+  const candidates = parseJSONArray(cached.candidates_json);
+  const candidate = candidates.find(item => item?.id === candidateID);
+  if (!candidate) return json({ ok: false, error: 'FLIGHT_CANDIDATE_NOT_FOUND' }, 404);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO trip_flights (
+      booking_id, direction, flight_number, call_sign, airline_name, airline_iata, airline_icao,
+      departure_airport_iata, departure_airport_icao, departure_airport_name,
+      arrival_airport_iata, arrival_airport_icao, arrival_airport_name,
+      scheduled_departure_local, scheduled_departure_utc, scheduled_arrival_local, scheduled_arrival_utc,
+      departure_terminal, arrival_terminal, departure_gate, arrival_gate, status,
+      verification_provider, verification_key, verified_at, last_checked_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'aerodatabox', ?, ?, ?, ?, ?)
+    ON CONFLICT(booking_id, direction) DO UPDATE SET
+      flight_number=excluded.flight_number, call_sign=excluded.call_sign, airline_name=excluded.airline_name,
+      airline_iata=excluded.airline_iata, airline_icao=excluded.airline_icao,
+      departure_airport_iata=excluded.departure_airport_iata, departure_airport_icao=excluded.departure_airport_icao,
+      departure_airport_name=excluded.departure_airport_name, arrival_airport_iata=excluded.arrival_airport_iata,
+      arrival_airport_icao=excluded.arrival_airport_icao, arrival_airport_name=excluded.arrival_airport_name,
+      scheduled_departure_local=excluded.scheduled_departure_local, scheduled_departure_utc=excluded.scheduled_departure_utc,
+      scheduled_arrival_local=excluded.scheduled_arrival_local, scheduled_arrival_utc=excluded.scheduled_arrival_utc,
+      departure_terminal=excluded.departure_terminal, arrival_terminal=excluded.arrival_terminal,
+      departure_gate=excluded.departure_gate, arrival_gate=excluded.arrival_gate, status=excluded.status,
+      verification_provider='aerodatabox', verification_key=excluded.verification_key,
+      verified_at=excluded.verified_at, last_checked_at=excluded.last_checked_at, updated_at=excluded.updated_at
+  `).bind(
+    bookingID, direction, candidate.flightNumber || '', candidate.callSign || '', candidate.airlineName || '', candidate.airlineIATA || '', candidate.airlineICAO || '',
+    candidate.departureAirportIATA || '', candidate.departureAirportICAO || '', candidate.departureAirportName || '',
+    candidate.arrivalAirportIATA || '', candidate.arrivalAirportICAO || '', candidate.arrivalAirportName || '',
+    candidate.scheduledDepartureLocal || '', candidate.scheduledDepartureUTC || '', candidate.scheduledArrivalLocal || '', candidate.scheduledArrivalUTC || '',
+    candidate.departureTerminal || '', candidate.arrivalTerminal || '', candidate.departureGate || '', candidate.arrivalGate || '', candidate.status || '',
+    verificationKey, now, now, now, now
+  ).run();
+  return json({ ok: true, flight: mapTripFlight(await env.HOTELS_DB.prepare('SELECT * FROM trip_flights WHERE booking_id=? AND direction=?').bind(bookingID, direction).first()) });
+}
+
+async function deleteBookingFlight(env, bookingID, directionRaw) {
+  const direction = String(directionRaw || '').toLowerCase();
+  if (!FLIGHT_DIRECTIONS.has(direction)) return json({ ok: false, error: 'INVALID_FLIGHT_DIRECTION' }, 400);
+  await env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=? AND direction=?').bind(bookingID, direction).run();
+  return json({ ok: true });
+}
+
+async function assignmentHotelSummary(env, hotelID) {
+  if (!hotelID) return null;
+  return hotelSummary(await summaryRow(env, hotelID));
+}
+
+async function bookingAssignmentDetail(env, bookingID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM trip_assignments WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  const primaryGuide = await env.HOTELS_DB.prepare("SELECT * FROM team_members WHERE role_kind='guide' AND active=1 ORDER BY sort_order ASC, created_at ASC LIMIT 1").first();
+  if (!row) {
+    return { makkahHotelID: null, madinahHotelID: null, guideID: primaryGuide?.id || null, makkahHotel: null, madinahHotel: null, guide: primaryGuide ? mapTeamMember(primaryGuide, true) : null, guideIsPrimary: !!primaryGuide };
+  }
+  const guide = row.guide_team_member_id
+    ? await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE id=? LIMIT 1').bind(row.guide_team_member_id).first()
+    : primaryGuide;
+  return {
+    makkahHotelID: row.makkah_hotel_id || null,
+    madinahHotelID: row.madinah_hotel_id || null,
+    guideID: guide?.id || null,
+    makkahHotel: await assignmentHotelSummary(env, row.makkah_hotel_id),
+    madinahHotel: await assignmentHotelSummary(env, row.madinah_hotel_id),
+    guide: guide ? mapTeamMember(guide, true) : null,
+    guideIsPrimary: !row.guide_team_member_id && !!primaryGuide
+  };
+}
+
+async function updateBookingAssignments(request, env, bookingID) {
+  const trip = await env.HOTELS_DB.prepare('SELECT id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 404);
+  const payload = await request.json().catch(() => null);
+  if (!payload || typeof payload !== 'object') return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const current = await env.HOTELS_DB.prepare('SELECT * FROM trip_assignments WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  const makkahID = payload.makkahHotelID === null ? null : (cleanText(payload.makkahHotelID, 180) || current?.makkah_hotel_id || null);
+  const madinahID = payload.madinahHotelID === null ? null : (cleanText(payload.madinahHotelID, 180) || current?.madinah_hotel_id || null);
+  const guideID = payload.guideID === null ? null : (cleanText(payload.guideID, 180) || current?.guide_team_member_id || null);
+  for (const [id, city] of [[makkahID, 'Makkah'], [madinahID, 'Madinah']]) {
+    if (!id) continue;
+    const hotel = await env.HOTELS_DB.prepare("SELECT id, city, status FROM hotels WHERE id=? AND status='published' LIMIT 1").bind(id).first();
+    if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_AVAILABLE', hotelID: id }, 409);
+    if (hotel.city && String(hotel.city).toLowerCase() !== city.toLowerCase()) return json({ ok: false, error: 'HOTEL_CITY_MISMATCH', hotelID: id, expectedCity: city }, 409);
+  }
+  if (guideID) {
+    const guide = await env.HOTELS_DB.prepare("SELECT id FROM team_members WHERE id=? AND role_kind='guide' AND active=1 LIMIT 1").bind(guideID).first();
+    if (!guide) return json({ ok: false, error: 'GUIDE_NOT_AVAILABLE' }, 409);
+  }
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO trip_assignments (booking_id, makkah_hotel_id, madinah_hotel_id, guide_team_member_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(booking_id) DO UPDATE SET makkah_hotel_id=excluded.makkah_hotel_id, madinah_hotel_id=excluded.madinah_hotel_id, guide_team_member_id=excluded.guide_team_member_id, updated_at=excluded.updated_at
+  `).bind(bookingID, makkahID, madinahID, guideID, now, now).run();
+  return json({ ok: true, assignment: await bookingAssignmentDetail(env, bookingID) });
+}
+
+async function deleteOperationsBooking(request, env, bookingID, user) {
+  const cookie = request.headers.get('cookie') || '';
+  const base = String(env.BOOKINGS_ADMIN_URL || 'https://iumrah.app/api/admin/bookings').replace(/\/$/, '');
+  let upstream;
+  try {
+    upstream = await fetch(`${base}/${encodeURIComponent(bookingID)}`, {
+      method: 'DELETE',
+      headers: { 'cookie': cookie, 'accept': 'application/json', 'user-agent': request.headers.get('user-agent') || 'iumrah-business' },
+      redirect: 'manual'
+    });
+  } catch (error) {
+    console.error('BOOKING_DELETE_UPSTREAM_NETWORK', error);
+    return json({ ok: false, error: 'BOOKING_DELETE_UPSTREAM_UNAVAILABLE' }, 502);
+  }
+  if (!(upstream.ok || upstream.status === 404)) {
+    const detail = (await upstream.text().catch(() => '')).slice(0, 300);
+    console.warn('BOOKING_DELETE_UPSTREAM_FAILED', upstream.status, detail);
+    return json({ ok: false, error: upstream.status === 405 ? 'BOOKING_DELETE_UPSTREAM_NOT_SUPPORTED' : `BOOKING_DELETE_UPSTREAM_${upstream.status}` }, 502);
+  }
+  const trip = await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  const attachments = await env.HOTELS_DB.prepare('SELECT object_key FROM business_chat_attachments WHERE booking_id=?').bind(bookingID).all().catch(() => ({ results: [] }));
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare('DELETE FROM business_chat_messages WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM business_chat_attachments WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM business_chat_threads WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM booking_status_history WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM trip_assignments WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM pilgrim_trips WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('INSERT INTO deleted_bookings (booking_id, deleted_by, deleted_at) VALUES (?, ?, ?) ON CONFLICT(booking_id) DO UPDATE SET deleted_by=excluded.deleted_by, deleted_at=excluded.deleted_at').bind(bookingID, cleanText(user?.login, 180), now)
+  ]);
+  await Promise.allSettled((attachments.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
+  if (trip?.pilgrim_id) {
+    const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(trip.pilgrim_id).first();
+    if (Number(stats?.count || 0) === 0) await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).run();
+    else await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?').bind(Number(stats.count), stats.last_trip || null, now, trip.pilgrim_id).run();
+  }
+  return json({ ok: true, deletedBookingID: bookingID });
 }
 
 function teamMemberPayload(payload, defaults = {}) {
@@ -634,8 +959,9 @@ function extractPricingSnapshot(raw) {
 function tripStatusFromBooking(raw) {
   const rawStatus = String(raw?.status || '').toUpperCase();
   const map = {
-    AVAILABILITY_CHECK: 'availability_check', PAYMENT_PENDING: 'payment_pending',
-    BOOKING_CONFIRMED: 'booking_confirmed', READY_TO_TRAVEL: 'ready_to_travel', COMPLETED: 'completed'
+    NEW: 'new', AVAILABILITY_CHECK: 'availability_check', PAYMENT_PENDING: 'payment_pending', PAID: 'paid',
+    BOOKING_CONFIRMED: 'booking_confirmed', DOCUMENTS_READY: 'documents_ready', READY_TO_TRAVEL: 'ready_to_travel',
+    IN_TRIP: 'in_trip', COMPLETED: 'completed', CANCELLED: 'cancelled'
   };
   return map[rawStatus] || 'new';
 }
@@ -686,6 +1012,8 @@ function tripMap(row) {
 async function syncBookingTrip(env, raw) {
   const bookingID = cleanText(raw?.id, 180);
   if (!bookingID) return null;
+  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  if (deleted) return { deleted: true, pilgrim: null, trip: null };
   const identity = bookingIdentity(raw, bookingID);
   const pilgrim = await ensurePilgrim(env, identity, bookingID);
   if (!pilgrim) return null;
@@ -730,7 +1058,9 @@ async function operationsBookings(request, env) {
   let bookings;
   try { bookings = await fetchUpstreamBookings(request, env); }
   catch (error) { return json({ ok: false, error: String(error?.message || 'BOOKINGS_UNAVAILABLE') }, 502); }
-  const source = bookings.slice(0, 500);
+  const deletedRows = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings').all().catch(() => ({ results: [] }));
+  const deletedIDs = new Set((deletedRows.results || []).map(row => String(row.booking_id || '')));
+  const source = bookings.filter(item => !deletedIDs.has(String(item?.id || ''))).slice(0, 500);
   const output = new Array(source.length);
   const chunkSize = 8;
   for (let offset = 0; offset < source.length; offset += chunkSize) {
@@ -813,6 +1143,8 @@ async function rawBookingForDetail(request, env, bookingID) {
 }
 
 async function operationsBookingDetail(request, env, bookingID) {
+  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  if (deleted) return json({ ok: false, error: 'BOOKING_DELETED' }, 404);
   const resolved = await rawBookingForDetail(request, env, bookingID);
   if (!resolved) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
   const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
@@ -820,7 +1152,11 @@ async function operationsBookingDetail(request, env, bookingID) {
   const pricingSnapshot = trip ? parseJSONObject(trip.pricing_snapshot_json) : extractPricingSnapshot(resolved.raw);
   let pricingLines = flattenPricingLines(pricingSnapshot);
   if (!pricingLines.length) pricingLines = flattenPricingLines(resolved.raw);
-  const history = await env.HOTELS_DB.prepare('SELECT old_status, new_status, changed_by, created_at FROM booking_status_history WHERE booking_id=? ORDER BY created_at DESC LIMIT 50').bind(bookingID).all();
+  const [history, flightRows, assignment] = await Promise.all([
+    env.HOTELS_DB.prepare('SELECT old_status, new_status, changed_by, created_at FROM booking_status_history WHERE booking_id=? ORDER BY created_at DESC LIMIT 50').bind(bookingID).all(),
+    env.HOTELS_DB.prepare("SELECT * FROM trip_flights WHERE booking_id=? ORDER BY CASE direction WHEN 'outbound' THEN 0 ELSE 1 END").bind(bookingID).all(),
+    bookingAssignmentDetail(env, bookingID)
+  ]);
   return json({
     ok: true,
     booking: augmentBooking(resolved.raw, { trip, pilgrim }),
@@ -828,7 +1164,9 @@ async function operationsBookingDetail(request, env, bookingID) {
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
     requestFields: flattenRequestFields(resolved.raw),
-    statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at }))
+    statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
+    flights: (flightRows.results || []).map(mapTripFlight),
+    assignment
   });
 }
 
@@ -1015,6 +1353,8 @@ async function syncClientTrip(request, env, user) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return json({ ok: false, error: 'INVALID_JSON' }, 400);
   const bookingID = cleanText(payload.bookingID || payload.bookingId || payload?.bookingSnapshot?.id, 180);
   if (!bookingID) return json({ ok: false, error: 'BOOKING_ID_REQUIRED' }, 400);
+  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  if (deleted) return json({ ok: false, error: 'BOOKING_DELETED' }, 410);
   const clientUserID = cleanText(payload.clientUserID || payload.clientUserId || user.id, 180);
   if (!clientUserID || clientUserID !== user.id) return json({ ok: false, error: 'CLIENT_ID_MISMATCH' }, 403);
 

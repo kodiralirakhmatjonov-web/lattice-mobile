@@ -27,11 +27,16 @@ struct OverviewView: View {
     private func operationalStatus(_ booking: BookingSummary) -> TripStatus {
         if let raw = booking.operationStatus, let value = TripStatus(rawValue: raw) { return value }
         switch booking.status {
+        case .new: return .new
         case .availabilityCheck: return .availabilityCheck
         case .paymentPending: return .paymentPending
+        case .paid: return .paid
         case .bookingConfirmed: return .bookingConfirmed
+        case .documentsReady: return .documentsReady
         case .readyToTravel: return .readyToTravel
+        case .inTrip: return .inTrip
         case .completed: return .completed
+        case .cancelled: return .cancelled
         }
     }
 

@@ -19,19 +19,29 @@ struct LoginResponse: Codable {
 }
 
 enum BookingStatus: String, Codable {
+    case new = "NEW"
     case availabilityCheck = "AVAILABILITY_CHECK"
     case paymentPending = "PAYMENT_PENDING"
+    case paid = "PAID"
     case bookingConfirmed = "BOOKING_CONFIRMED"
+    case documentsReady = "DOCUMENTS_READY"
     case readyToTravel = "READY_TO_TRAVEL"
+    case inTrip = "IN_TRIP"
     case completed = "COMPLETED"
+    case cancelled = "CANCELLED"
 
     var shortLabel: String {
         switch self {
+        case .new: return "Новая"
         case .availabilityCheck: return "Наличие"
         case .paymentPending: return "Оплата"
+        case .paid: return "Оплачено"
         case .bookingConfirmed: return "Бронь"
+        case .documentsReady: return "Документы"
         case .readyToTravel: return "Поездка"
+        case .inTrip: return "В поездке"
         case .completed: return "Готово"
+        case .cancelled: return "Отменено"
         }
     }
 }

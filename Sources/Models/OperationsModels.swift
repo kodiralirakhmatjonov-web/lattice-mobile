@@ -155,6 +155,8 @@ struct BookingDetailResponse: Codable {
     let pricingLines: [BookingPricingLine]
     let requestFields: [BookingRequestField]
     let statusHistory: [BookingStatusHistoryItem]
+    let flights: [BookingFlight]?
+    let assignment: BookingAssignment?
 }
 
 struct BookingOperationUpdatePayload: Encodable {
@@ -177,3 +179,115 @@ struct PrimaryHotelAssignment: Codable, Identifiable {
 
 struct PrimaryHotelsResponse: Codable { let ok: Bool; let assignments: [PrimaryHotelAssignment] }
 struct PrimaryHotelsUpdatePayload: Encodable { let city: String; let stars: Int; let hotelIDs: [String] }
+
+enum BookingFlightDirection: String, Codable, CaseIterable, Identifiable {
+    case outbound
+    case `return`
+
+    var id: String { rawValue }
+    var title: String { self == .outbound ? "Рейс туда" : "Рейс обратно" }
+}
+
+struct BookingFlight: Codable, Identifiable, Hashable {
+    var id: String { direction }
+    let direction: String
+    let flightNumber: String
+    let callSign: String
+    let airlineName: String
+    let airlineIATA: String
+    let airlineICAO: String
+    let departureAirportIATA: String
+    let departureAirportICAO: String
+    let departureAirportName: String
+    let arrivalAirportIATA: String
+    let arrivalAirportICAO: String
+    let arrivalAirportName: String
+    let scheduledDepartureLocal: String
+    let scheduledDepartureUTC: String
+    let scheduledArrivalLocal: String
+    let scheduledArrivalUTC: String
+    let departureTerminal: String
+    let arrivalTerminal: String
+    let departureGate: String
+    let arrivalGate: String
+    let status: String
+    let verificationProvider: String
+    let verifiedAt: String?
+    let lastCheckedAt: String?
+}
+
+struct FlightVerificationCandidate: Codable, Identifiable, Hashable {
+    let id: String
+    let flightNumber: String
+    let callSign: String
+    let airlineName: String
+    let airlineIATA: String
+    let airlineICAO: String
+    let departureAirportIATA: String
+    let departureAirportICAO: String
+    let departureAirportName: String
+    let arrivalAirportIATA: String
+    let arrivalAirportICAO: String
+    let arrivalAirportName: String
+    let scheduledDepartureLocal: String
+    let scheduledDepartureUTC: String
+    let scheduledArrivalLocal: String
+    let scheduledArrivalUTC: String
+    let departureTerminal: String
+    let arrivalTerminal: String
+    let departureGate: String
+    let arrivalGate: String
+    let status: String
+    let lastUpdatedUTC: String
+}
+
+struct FlightVerificationResponse: Codable {
+    let ok: Bool
+    let provider: String
+    let verificationKey: String
+    let cached: Bool
+    let checkedAt: String
+    let candidates: [FlightVerificationCandidate]
+}
+
+struct FlightVerificationPayload: Encodable {
+    let flightNumber: String
+    let dateLocal: String
+    let force: Bool
+}
+
+struct SaveVerifiedFlightPayload: Encodable {
+    let verificationKey: String
+    let candidateID: String
+}
+
+struct BookingFlightResponse: Codable {
+    let ok: Bool
+    let flight: BookingFlight
+}
+
+struct BookingAssignment: Codable {
+    let makkahHotelID: String?
+    let madinahHotelID: String?
+    let guideID: String?
+    let makkahHotel: HotelListItem?
+    let madinahHotel: HotelListItem?
+    let guide: BusinessTeamMember?
+    let guideIsPrimary: Bool
+}
+
+struct BookingAssignmentPayload: Encodable {
+    let makkahHotelID: String?
+    let madinahHotelID: String?
+    let guideID: String?
+}
+
+struct BookingAssignmentResponse: Codable {
+    let ok: Bool
+    let assignment: BookingAssignment
+}
+
+struct BookingDeleteResponse: Codable {
+    let ok: Bool
+    let deletedBookingID: String
+}
