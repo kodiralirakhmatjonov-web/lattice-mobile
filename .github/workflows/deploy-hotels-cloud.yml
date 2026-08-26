@@ -17,6 +17,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
       AERODATABOX_RAPIDAPI_KEY: ${{ secrets.AERODATABOX_RAPIDAPI_KEY }}
+      APNS_KEY_ID: ${{ secrets.APNS_KEY_ID }}
+      APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
       D1_NAME: iumrah-hotels
       R2_NAME: iumrah-hotels-media
 
@@ -32,7 +34,7 @@ jobs:
       - name: Verify Cloudflare secrets
         run: |
           set -euo pipefail
-          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID AERODATABOX_RAPIDAPI_KEY; do
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID AERODATABOX_RAPIDAPI_KEY APNS_KEY_ID APNS_PRIVATE_KEY; do
             if [ -z "${!name}" ]; then
               echo "Missing GitHub secret: $name"
               exit 1
@@ -110,10 +112,12 @@ jobs:
       - name: Deploy Worker routes
         run: npx wrangler deploy --config wrangler.generated.jsonc
 
-      - name: Sync AeroDataBox Worker secret
+      - name: Sync Worker secrets
         run: |
           set -euo pipefail
           printf '%s' "$AERODATABOX_RAPIDAPI_KEY" | npx wrangler secret put AERODATABOX_RAPIDAPI_KEY --config wrangler.generated.jsonc
+          printf '%s' "$APNS_KEY_ID" | npx wrangler secret put APNS_KEY_ID --config wrangler.generated.jsonc
+          printf '%s' "$APNS_PRIVATE_KEY" | npx wrangler secret put APNS_PRIVATE_KEY --config wrangler.generated.jsonc
 
       - name: Verify public Hotels Cloud
         working-directory: ${{ github.workspace }}
