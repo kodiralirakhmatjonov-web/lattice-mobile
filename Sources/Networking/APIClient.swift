@@ -52,12 +52,6 @@ actor APIClient {
         return try decoder.decode(BookingsResponse.self, from: data).bookings
     }
 
-    func chats() async throws -> [ChatThread] {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/chats"))
-        try validate(response, data: data)
-        return try decoder.decode(ChatsResponse.self, from: data).threads
-    }
-
     func businessProfile() async throws -> BusinessTeamMember {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/me")
         let (data, response) = try await session.data(from: url)
@@ -97,6 +91,26 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
+    }
+
+    func uploadBusinessTeamPhoto(memberID: String, imageData: Data) async throws -> BusinessTeamMember {
+        let optimized = try ImageOptimizer.jpegData(from: imageData, maxDimension: 1200, quality: 0.80, targetBytes: 500_000)
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team/\(memberID)/photo"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 75
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        request.httpBody = optimized
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
+    }
+
+    func deleteBusinessTeamPhoto(memberID: String) async throws -> BusinessTeamMember {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team/\(memberID)/photo"))
+        request.httpMethod = "DELETE"
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member

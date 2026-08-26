@@ -44,8 +44,16 @@ enum BusinessNotifications {
         await MainActor.run {
             UIApplication.shared.registerForRemoteNotifications()
         }
-        if let token = UserDefaults.standard.string(forKey: "iumrah.push.deviceToken"), !token.isEmpty {
-            _ = try? await APIClient.shared.registerPushDevice(token: token, environment: "production")
+        await registerCurrentDeviceIfPossible()
+    }
+
+    static func registerCurrentDeviceIfPossible() async {
+        guard let token = UserDefaults.standard.string(forKey: "iumrah.push.deviceToken"), !token.isEmpty else { return }
+        do {
+            _ = try await APIClient.shared.registerPushDevice(token: token, environment: "production")
+            UserDefaults.standard.removeObject(forKey: "iumrah.push.lastRegistrationError")
+        } catch {
+            UserDefaults.standard.set(error.localizedDescription, forKey: "iumrah.push.lastRegistrationError")
         }
     }
 

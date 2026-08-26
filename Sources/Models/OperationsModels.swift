@@ -50,13 +50,14 @@ struct BusinessTeamMember: Codable, Identifiable, Hashable {
     var publicVisible: Bool
     var active: Bool
     var isOwner: Bool
+    var photoURL: String?
 
     static var emptyGuide: BusinessTeamMember {
         BusinessTeamMember(
             id: "new", staffLogin: nil, firstName: "", lastName: "", displayName: "",
             roleKind: "guide", roleTitle: "Гид iumrah", phoneUZ: "", phoneSA: "",
             telegram: "", whatsapp: "", instagram: "", bio: "", publicSlug: "",
-            publicVisible: true, active: true, isOwner: false
+            publicVisible: true, active: true, isOwner: false, photoURL: nil
         )
     }
 }

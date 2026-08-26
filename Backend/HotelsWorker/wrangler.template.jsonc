@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "iumrah-hotels-api",
   "main": "src/index.js",
-  "compatibility_date": "2026-08-23",
+  "compatibility_date": "2026-08-26",
   "workers_dev": true,
   "routes": [
     {
@@ -20,6 +20,11 @@
       "database_name": "iumrah-hotels",
       "database_id": "__D1_DATABASE_ID__",
       "migrations_dir": "migrations"
+    },
+    {
+      "binding": "BOOKINGS_DB",
+      "database_name": "__BOOKINGS_D1_DATABASE_NAME__",
+      "database_id": "__BOOKINGS_D1_DATABASE_ID__"
     }
   ],
   "r2_buckets": [
@@ -45,5 +50,10 @@
   },
   "images": {
     "binding": "IMAGES"
+  },
+  "triggers": {
+    "crons": [
+      "*/1 * * * *"
+    ]
   }
 }

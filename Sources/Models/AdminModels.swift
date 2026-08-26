@@ -82,7 +82,6 @@ struct ChatThread: Codable, Identifiable {
     let unreadForStaff: Bool
 }
 
-struct ChatsResponse: Codable { let threads: [ChatThread] }
 
 struct BusinessChatThreadSummary: Codable, Identifiable, Hashable {
     var id: String { bookingID }

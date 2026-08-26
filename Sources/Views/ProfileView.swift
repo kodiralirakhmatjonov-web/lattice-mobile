@@ -1,9 +1,11 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var member: BusinessTeamMember?
+    @State private var pendingPhotoData: Data?
     @State private var loading = true
     @State private var saving = false
     @State private var errorMessage: String?
@@ -11,7 +13,7 @@ struct ProfileView: View {
     var body: some View {
         Group {
             if let member {
-                TeamMemberForm(member: binding(for: member), ownerMode: true)
+                TeamMemberForm(member: binding(for: member), pendingPhotoData: $pendingPhotoData, ownerMode: true)
             } else if loading {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -45,15 +47,24 @@ struct ProfileView: View {
     @MainActor private func save() async {
         guard let member else { return }
         saving = true
-        do { self.member = try await APIClient.shared.saveBusinessProfile(member); errorMessage = nil }
-        catch { errorMessage = error.localizedDescription }
+        do {
+            var saved = try await APIClient.shared.saveBusinessProfile(member)
+            if let pendingPhotoData {
+                saved = try await APIClient.shared.uploadBusinessTeamPhoto(memberID: saved.id, imageData: pendingPhotoData)
+                self.pendingPhotoData = nil
+            }
+            self.member = saved
+            errorMessage = nil
+        } catch { errorMessage = error.localizedDescription }
         saving = false
     }
 }
 
 struct TeamMemberForm: View {
     @Binding var member: BusinessTeamMember
+    @Binding var pendingPhotoData: Data?
     var ownerMode = false
+    @State private var selectedPhoto: PhotosPickerItem?
 
     var body: some View {
         ScrollView {
@@ -65,11 +76,20 @@ struct TeamMemberForm: View {
             .padding(18)
         }
         .scrollDismissesKeyboard(.interactively)
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    await MainActor.run { pendingPhotoData = data }
+                }
+            }
+        }
     }
 
     private var identityCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionTitle("Основное", icon: "person.text.rectangle")
+            photoEditor
             field("Имя", text: $member.firstName)
             field("Фамилия", text: $member.lastName)
             if !ownerMode {
@@ -90,6 +110,53 @@ struct TeamMemberForm: View {
             }
         }
         .padding(17).businessCard(radius: 26)
+    }
+
+    private var photoEditor: some View {
+        HStack(spacing: 14) {
+            avatar
+                .frame(width: 76, height: 76)
+                .clipShape(Circle())
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Фотография сотрудника").font(.subheadline.weight(.semibold))
+                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                    Label(pendingPhotoData == nil && member.photoURL == nil ? "Добавить фото" : "Изменить фото", systemImage: "photo")
+                        .font(.subheadline.weight(.semibold))
+                }
+                if pendingPhotoData != nil {
+                    Text("Фото загрузится после сохранения.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder private var avatar: some View {
+        if let pendingPhotoData, let image = UIImage(data: pendingPhotoData) {
+            Image(uiImage: image).resizable().scaledToFill()
+        } else if let url = teamPhotoURL(member.photoURL) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image): image.resizable().scaledToFill()
+                default: avatarPlaceholder
+                }
+            }
+        } else {
+            avatarPlaceholder
+        }
+    }
+
+    private var avatarPlaceholder: some View {
+        ZStack {
+            Circle().fill(BusinessDesign.secondarySurface)
+            Image(systemName: "person.crop.circle.fill").font(.system(size: 38)).foregroundStyle(.secondary)
+        }
+    }
+
+    private func teamPhotoURL(_ raw: String?) -> URL? {
+        guard let raw, !raw.isEmpty else { return nil }
+        if let absolute = URL(string: raw), absolute.scheme != nil { return absolute }
+        return URL(string: raw, relativeTo: AppConfig.apiBaseURL)?.absoluteURL
     }
 
     private var contactsCard: some View {

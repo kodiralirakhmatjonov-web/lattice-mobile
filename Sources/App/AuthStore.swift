@@ -16,6 +16,7 @@ final class AuthStore: ObservableObject {
         do {
             user = try await APIClient.shared.sessionUser()
             state = .signedIn
+            await BusinessNotifications.registerCurrentDeviceIfPossible()
         } catch {
             state = .signedOut
         }
@@ -26,6 +27,7 @@ final class AuthStore: ObservableObject {
         do {
             user = try await APIClient.shared.login(login: login, password: password)
             state = .signedIn
+            await BusinessNotifications.registerCurrentDeviceIfPossible()
         } catch {
             errorMessage = error.localizedDescription
             state = .signedOut
