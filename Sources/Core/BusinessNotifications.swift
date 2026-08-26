@@ -49,12 +49,7 @@ enum BusinessNotifications {
 
     static func registerCurrentDeviceIfPossible() async {
         guard let token = UserDefaults.standard.string(forKey: "iumrah.push.deviceToken"), !token.isEmpty else { return }
-        do {
-            _ = try await APIClient.shared.registerPushDevice(token: token, environment: "production")
-            UserDefaults.standard.removeObject(forKey: "iumrah.push.lastRegistrationError")
-        } catch {
-            UserDefaults.standard.set(error.localizedDescription, forKey: "iumrah.push.lastRegistrationError")
-        }
+        _ = try? await APIClient.shared.registerPushDevice(token: token, environment: "production")
     }
 
     static func hotelImportStarted(_ job: HotelImportJob) async {

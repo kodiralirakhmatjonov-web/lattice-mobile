@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "iumrah-hotels-api",
   "main": "src/index.js",
-  "compatibility_date": "2026-08-26",
+  "compatibility_date": "2026-08-23",
   "workers_dev": true,
   "routes": [
     {
@@ -20,11 +20,6 @@
       "database_name": "iumrah-hotels",
       "database_id": "__D1_DATABASE_ID__",
       "migrations_dir": "migrations"
-    },
-    {
-      "binding": "BOOKINGS_DB",
-      "database_name": "__BOOKINGS_D1_DATABASE_NAME__",
-      "database_id": "__BOOKINGS_D1_DATABASE_ID__"
     }
   ],
   "r2_buckets": [
@@ -44,16 +39,13 @@
     }
   ],
   "vars": {
+    "APPLE_TEAM_ID": "2DQ678JTNG",
     "AUTH_SESSION_URL": "https://iumrah.app/api/auth/staff/session",
     "BOOKINGS_ADMIN_URL": "https://iumrah.app/api/admin/bookings",
+    "BOOKINGS_PUBLIC_URL": "https://iumrah.app/api/bookings",
     "CLIENT_SESSION_URL": "https://iumrah.app/api/auth/session"
   },
   "images": {
     "binding": "IMAGES"
-  },
-  "triggers": {
-    "crons": [
-      "*/1 * * * *"
-    ]
   }
 }
