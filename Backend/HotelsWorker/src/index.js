@@ -775,6 +775,23 @@ async function bookingAssignmentDetail(env, bookingID) {
   };
 }
 
+async function clientBookingAssignmentDetail(env, bookingID) {
+  const detail = await bookingAssignmentDetail(env, bookingID);
+  const guide = detail?.guide;
+  return {
+    guide: guide ? {
+      id: String(guide.id || ''),
+      displayName: String(guide.displayName || ''),
+      roleTitle: String(guide.roleTitle || ''),
+      phoneUZ: String(guide.phoneUZ || ''),
+      phoneSA: String(guide.phoneSA || ''),
+      telegram: String(guide.telegram || ''),
+      whatsapp: String(guide.whatsapp || ''),
+      bio: String(guide.bio || '')
+    } : null
+  };
+}
+
 async function updateBookingAssignments(request, env, bookingID) {
   const trip = await env.HOTELS_DB.prepare('SELECT id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 404);
@@ -1660,7 +1677,7 @@ async function handleClientOperations(request, env, parts) {
     if (parts.length === 2 && bookingID && request.method === 'GET') {
       const auth = await requireClientBooking(request, env, bookingID);
       if (!auth.ok) return auth.response;
-      return json({ ok: true, trip: tripMap(auth.trip) });
+      return json({ ok: true, trip: tripMap(auth.trip), assignment: await clientBookingAssignmentDetail(env, bookingID) });
     }
     return methodNotAllowed();
   }
@@ -1964,7 +1981,7 @@ async function syncClientIdentityByBookingToken(request, env, bookingID, auth) {
     .bind(Number(stats?.count || 0), stats?.last_trip || null, now, canonical.id).run();
 
   trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  return json({ ok: true, pilgrimID: pilgrimPublicID(canonical.id), trip: tripMap(trip) });
+  return json({ ok: true, pilgrimID: pilgrimPublicID(canonical.id), trip: tripMap(trip), assignment: await clientBookingAssignmentDetail(env, bookingID) });
 }
 
 async function sendClientChatMessage(request, env, bookingID, user) {
