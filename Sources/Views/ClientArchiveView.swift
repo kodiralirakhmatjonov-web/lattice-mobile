@@ -70,9 +70,9 @@ private struct PilgrimDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(18).businessCard(radius: 28)
 
                     Text("Поездки").font(.title2.bold())
-                    ForEach(detail.trips, id: \.tripID) { trip in
+                    ForEach(Array(detail.trips.enumerated()), id: \.element.tripID) { index, trip in
                         VStack(alignment: .leading, spacing: 7) {
-                            HStack { Text(trip.bookingID).font(.headline); Spacer(); Text(trip.tripStatus.title).font(.caption.bold()) }
+                            HStack { Text("Поездка \(detail.trips.count - index)").font(.headline); Spacer(); Text(trip.tripStatus.title).font(.caption.bold()) }
                             Text([trip.startDate, trip.endDate].compactMap { $0 }.joined(separator: " – ")).font(.caption).foregroundStyle(.secondary)
                             if !trip.confirmationNumber.isEmpty { Text("Подтверждение: \(trip.confirmationNumber)").font(.caption) }
                         }

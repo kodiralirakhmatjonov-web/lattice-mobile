@@ -150,7 +150,7 @@ private struct ThreadCard: View {
                     .font(.subheadline).foregroundStyle(thread.unreadForStaff ? .primary : .secondary)
                     .fontWeight(thread.unreadForStaff ? .semibold : .regular).lineLimit(2)
                 HStack(spacing: 5) {
-                    Text(thread.booking.pilgrimID ?? thread.booking.id).monospaced()
+                    Text(thread.booking.pilgrimID.map { "ID \($0)" } ?? "ID —").monospaced()
                     Text("·")
                     Text("\(thread.booking.originCode) → \(thread.booking.outboundDestination)")
                     if thread.unreadForStaff { Spacer(); Circle().fill(.black).frame(width: 8, height: 8) }
@@ -177,8 +177,8 @@ private struct NewChatBookingPicker: View {
         List(bookings) { booking in
             NavigationLink { ChatConversationView(booking: booking) } label: {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(booking.clientName ?? booking.id).font(.subheadline.bold())
-                    Text("\(booking.pilgrimID ?? booking.id) · \(booking.originCode) → \(booking.outboundDestination) · \(booking.startDate)")
+                    Text(booking.clientName ?? "Паломник").font(.subheadline.bold())
+                    Text("\(booking.pilgrimID.map { "ID \($0)" } ?? "ID —") · \(booking.originCode) → \(booking.outboundDestination) · \(booking.startDate)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -221,7 +221,7 @@ struct ChatConversationView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { composer }
-        .navigationTitle(booking.clientName ?? "Чат")
+        .navigationTitle(booking.clientName ?? "Паломник")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -237,7 +237,7 @@ struct ChatConversationView: View {
             HStack(spacing: 11) {
                 ZStack { Circle().fill(.black); Image(systemName: "suitcase.rolling.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white) }.frame(width: 36, height: 36)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(booking.pilgrimID ?? booking.id) · \(booking.travelerCount) чел.").font(.caption.bold())
+                    Text("\(booking.pilgrimID.map { "ID \($0)" } ?? "ID —") · \(booking.travelerCount) чел.").font(.caption.bold())
                     Text("\(booking.startDate) – \(booking.endDate)").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
@@ -251,8 +251,11 @@ struct ChatConversationView: View {
         HStack(alignment: .bottom, spacing: 8) {
             if message.isStaff { Spacer(minLength: 64) }
             VStack(alignment: message.isStaff ? .trailing : .leading, spacing: 4) {
-                if !message.isStaff, let sender = message.senderName, !sender.isEmpty {
-                    Text(sender).font(.caption2.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 4)
+                if !message.isStaff {
+                    Text(booking.clientName ?? "Паломник")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
                 }
                 if message.isImage, let url = AppConfig.absoluteURL(message.attachmentURL) {
                     AsyncImage(url: url) { phase in

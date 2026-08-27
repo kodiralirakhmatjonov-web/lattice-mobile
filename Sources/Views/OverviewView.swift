@@ -131,9 +131,9 @@ struct BookingRow: View {
                 Spacer()
                 Text(booking.totalUsd, format: .currency(code: "USD").precision(.fractionLength(0))).font(.headline)
             }
-            Text(booking.clientName ?? booking.id).font(.subheadline.bold())
+            Text(booking.clientName ?? "Паломник").font(.subheadline.bold())
             if let pilgrimID = booking.pilgrimID {
-                Text("\(pilgrimID) · \(booking.id)").font(.caption2.monospaced()).foregroundStyle(.secondary)
+                Text("ID \(pilgrimID)").font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
             HStack {
                 Label("\(booking.originCode) → \(booking.outboundDestination)", systemImage: "airplane")

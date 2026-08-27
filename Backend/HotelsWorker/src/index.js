@@ -803,9 +803,42 @@ async function updateBookingAssignments(request, env, bookingID) {
   return json({ ok: true, assignment: await bookingAssignmentDetail(env, bookingID) });
 }
 
+async function purgeOperationalBooking(env, bookingID) {
+  const trip = await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const attachments = await env.HOTELS_DB.prepare('SELECT object_key FROM business_chat_attachments WHERE booking_id=?').bind(bookingID).all().catch(() => ({ results: [] }));
+  const now = new Date().toISOString();
+
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare('DELETE FROM client_push_subscriptions WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM business_chat_messages WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM business_chat_attachments WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM business_chat_threads WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM booking_status_history WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM trip_assignments WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM pilgrim_trips WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM deleted_bookings WHERE booking_id=?').bind(bookingID)
+  ]);
+
+  await Promise.allSettled((attachments.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
+
+  if (trip?.pilgrim_id) {
+    const pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(trip.pilgrim_id).first().catch(() => null);
+    const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(trip.pilgrim_id).first();
+    const count = Number(stats?.count || 0);
+    if (count === 0 && pilgrim && String(pilgrim.client_user_id || '').startsWith('legacy-booking:') && !String(pilgrim.first_name || '').trim() && !String(pilgrim.last_name || '').trim()) {
+      await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).run();
+    } else {
+      // The pilgrim identity is permanent. Deleting one trip must never recycle its six-digit iumrah ID.
+      await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
+        .bind(count, stats?.last_trip || null, now, trip.pilgrim_id).run();
+    }
+  }
+}
+
 async function deleteOperationsBooking(request, env, bookingID, user) {
   const cookie = request.headers.get('cookie') || '';
-  const base = String(env.BOOKINGS_ADMIN_URL || 'https://iumrah.app/api/admin/bookings').replace(/\/$/, '');
+  const base = String(env.PACKAGE_ADMIN_URL || 'https://iumrah.app/api/admin/package/booking').replace(/\/$/, '');
   let upstream;
   try {
     upstream = await fetch(`${base}/${encodeURIComponent(bookingID)}`, {
@@ -817,31 +850,42 @@ async function deleteOperationsBooking(request, env, bookingID, user) {
     console.error('BOOKING_DELETE_UPSTREAM_NETWORK', error);
     return json({ ok: false, error: 'BOOKING_DELETE_UPSTREAM_UNAVAILABLE' }, 502);
   }
-  if (!(upstream.ok || upstream.status === 404)) {
+  if (!upstream.ok) {
     const detail = (await upstream.text().catch(() => '')).slice(0, 300);
     console.warn('BOOKING_DELETE_UPSTREAM_FAILED', upstream.status, detail);
-    return json({ ok: false, error: upstream.status === 405 ? 'BOOKING_DELETE_UPSTREAM_NOT_SUPPORTED' : `BOOKING_DELETE_UPSTREAM_${upstream.status}` }, 502);
+    return json({ ok: false, error: `BOOKING_DELETE_UPSTREAM_${upstream.status}` }, 502);
   }
-  const trip = await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  const attachments = await env.HOTELS_DB.prepare('SELECT object_key FROM business_chat_attachments WHERE booking_id=?').bind(bookingID).all().catch(() => ({ results: [] }));
-  const now = new Date().toISOString();
-  await env.HOTELS_DB.batch([
-    env.HOTELS_DB.prepare('DELETE FROM business_chat_messages WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM business_chat_attachments WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM business_chat_threads WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM booking_status_history WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM trip_assignments WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM pilgrim_trips WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('INSERT INTO deleted_bookings (booking_id, deleted_by, deleted_at) VALUES (?, ?, ?) ON CONFLICT(booking_id) DO UPDATE SET deleted_by=excluded.deleted_by, deleted_at=excluded.deleted_at').bind(bookingID, cleanText(user?.login, 180), now)
-  ]);
-  await Promise.allSettled((attachments.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
-  if (trip?.pilgrim_id) {
-    const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(trip.pilgrim_id).first();
-    if (Number(stats?.count || 0) === 0) await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).run();
-    else await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?').bind(Number(stats.count), stats.last_trip || null, now, trip.pilgrim_id).run();
+
+  await purgeOperationalBooking(env, bookingID);
+  return json({ ok: true, deletedBookingID: bookingID, deletedBy: cleanText(user?.login, 180) || null });
+}
+
+async function deleteClientBooking(request, env, bookingID, auth) {
+  const token = cleanText(request.headers.get('x-booking-token'), 1024);
+  if (!token) return json({ ok: false, error: 'UNAUTHORIZED' }, 401);
+  const base = String(env.PACKAGE_PUBLIC_BOOKING_URL || 'https://iumrah.app/api/package/booking').replace(/\/$/, '');
+  let upstream;
+  try {
+    upstream = await fetch(`${base}/${encodeURIComponent(bookingID)}`, {
+      method: 'DELETE',
+      headers: {
+        'x-booking-token': token,
+        'accept': 'application/json',
+        'user-agent': request.headers.get('user-agent') || 'iumrah-client'
+      },
+      redirect: 'manual'
+    });
+  } catch (error) {
+    console.error('CLIENT_BOOKING_DELETE_UPSTREAM_NETWORK', bookingID, error);
+    return json({ ok: false, error: 'BOOKING_DELETE_UPSTREAM_UNAVAILABLE' }, 502);
   }
-  return json({ ok: true, deletedBookingID: bookingID });
+  if (!upstream.ok) {
+    const payload = await upstream.json().catch(() => null);
+    const error = cleanText(payload?.error, 160) || `BOOKING_DELETE_UPSTREAM_${upstream.status}`;
+    return json({ ok: false, error }, upstream.status === 404 ? 404 : 502);
+  }
+  await purgeOperationalBooking(env, bookingID);
+  return json({ ok: true, deleted: true, pilgrimID: auth?.trip?.pilgrim_id ? pilgrimPublicID(auth.trip.pilgrim_id) : null });
 }
 
 function teamMemberPayload(payload, defaults = {}) {
@@ -1037,7 +1081,7 @@ function bookingIdentity(raw, bookingID) {
   const explicitName = deepScalar(raw, ['clientName','customerName','travelerName','travellerName','fullName','displayName']);
   const email = deepScalar(raw, ['email','emailAddress']);
   const phone = deepScalar(raw, ['phone','phoneNumber','mobile','whatsapp']);
-  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim() || explicitName || `Паломник ${bookingID}`;
+  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim() || explicitName || '';
   return { clientUserID, firstName, lastName, displayName, email, phone };
 }
 
@@ -1068,7 +1112,7 @@ async function ensurePilgrim(env, identity, bookingID) {
     const fallbackUserID = identity.clientUserID || `legacy-booking:${bookingID}`;
     const now = new Date().toISOString();
     const result = await env.HOTELS_DB.prepare(`INSERT INTO pilgrims (client_user_id, first_name, last_name, display_name, phone, email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(fallbackUserID, identity.firstName, identity.lastName, identity.displayName, identity.phone, identity.email, now, now).run();
+      .bind(fallbackUserID, identity.firstName, identity.lastName, identity.displayName || 'Паломник', identity.phone, identity.email, now, now).run();
     const id = Number(result?.meta?.last_row_id || 0);
     row = id ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(id).first() : await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=?').bind(fallbackUserID).first();
   } else {
@@ -1081,7 +1125,7 @@ async function ensurePilgrim(env, identity, bookingID) {
 }
 
 function pilgrimPublicID(id) {
-  return `PILGRIM-${String(Number(id || 0)).padStart(6, '0')}`;
+  return String(Number(id || 0)).padStart(6, '0');
 }
 
 function tripMap(row) {
@@ -1136,11 +1180,28 @@ async function syncBookingTrip(env, raw) {
   return { pilgrim, trip };
 }
 
+function canonicalPilgrimName(pilgrim, identity = null) {
+  const firstName = safeHumanText(pilgrim?.first_name || identity?.firstName || '', 120) || '';
+  const lastName = safeHumanText(pilgrim?.last_name || identity?.lastName || '', 120) || '';
+  return [firstName, lastName].filter(Boolean).join(' ').trim()
+    || safeHumanText(pilgrim?.display_name || identity?.displayName || '', 220)
+    || 'Паломник';
+}
+
+async function bookingPilgrimName(env, bookingID, fallback = '') {
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT p.first_name, p.last_name, p.display_name
+    FROM pilgrim_trips t JOIN pilgrims p ON p.id=t.pilgrim_id
+    WHERE t.booking_id=? LIMIT 1
+  `).bind(bookingID).first().catch(() => null);
+  return canonicalPilgrimName(row, { displayName: fallback });
+}
+
 function augmentBooking(raw, linked) {
   const identity = bookingIdentity(raw, raw?.id || '');
   return {
     ...raw,
-    clientName: identity.displayName,
+    clientName: canonicalPilgrimName(linked?.pilgrim, identity),
     pilgrimID: linked?.pilgrim ? pilgrimPublicID(linked.pilgrim.id) : null,
     tripID: linked?.trip?.id || null,
     operationStatus: linked?.trip?.status || tripStatusFromBooking(raw)
@@ -1293,8 +1354,8 @@ async function listPilgrims(env, url) {
   const values = [];
   if (archiveOnly) where.push("EXISTS (SELECT 1 FROM pilgrim_trips t WHERE t.pilgrim_id=p.id AND t.status='completed')");
   if (search) {
-    where.push("(LOWER(p.display_name) LIKE LOWER(?) OR LOWER(p.email) LIKE LOWER(?) OR p.phone LIKE ?)");
-    const q = `%${search}%`; values.push(q,q,q);
+    where.push("(LOWER(p.display_name) LIKE LOWER(?) OR LOWER(p.email) LIKE LOWER(?) OR p.phone LIKE ? OR printf('%06d', p.id) LIKE ?)");
+    const q = `%${search}%`; values.push(q,q,q,q);
   }
   const result = await env.HOTELS_DB.prepare(`
     SELECT p.*, (SELECT COUNT(*) FROM pilgrim_trips t WHERE t.pilgrim_id=p.id AND t.status='completed') AS completed_trips
@@ -1305,7 +1366,8 @@ async function listPilgrims(env, url) {
 }
 
 function parsePilgrimPublicID(value) {
-  const match = String(value || '').match(/^PILGRIM-(\d{1,12})$/i);
+  const text = String(value || '').trim();
+  const match = text.match(/^(?:PILGRIM-)?(\d{1,12})$/i);
   return match ? Number(match[1]) : null;
 }
 
@@ -1384,10 +1446,26 @@ async function handleClientOperations(request, env, parts) {
       return listClientTrips(env, auth.user.id);
     }
     const bookingID = cleanText(parts[1], 180);
+    if (parts.length === 3 && bookingID && parts[2] === 'sync' && request.method === 'POST') {
+      const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
+      if (!auth.ok) return auth.response;
+      return syncClientIdentityByBookingToken(request, env, bookingID, auth);
+    }
     if (parts.length === 2 && bookingID && request.method === 'GET') {
       const auth = await requireClientBooking(request, env, bookingID);
       if (!auth.ok) return auth.response;
       return json({ ok: true, trip: tripMap(auth.trip) });
+    }
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'bookings') {
+    const bookingID = cleanText(parts[1], 180);
+    if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
+    if (parts.length === 2 && request.method === 'DELETE') {
+      const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
+      if (!auth.ok) return auth.response;
+      return deleteClientBooking(request, env, bookingID, auth);
     }
     return methodNotAllowed();
   }
@@ -1575,7 +1653,7 @@ async function syncClientTrip(request, env, user) {
     email: cleanText(payload.email || user.email, 220) || '',
     phone: cleanText(payload.phone || user.phone, 100) || ''
   };
-  if (!identity.displayName) identity.displayName = [identity.firstName, identity.lastName].filter(Boolean).join(' ').trim() || `Паломник ${bookingID}`;
+  if (!identity.displayName) identity.displayName = [identity.firstName, identity.lastName].filter(Boolean).join(' ').trim();
   const pilgrim = await ensurePilgrim(env, identity, bookingID);
   const existing = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   if (existing && existing.client_user_id && String(existing.client_user_id) !== clientUserID && !String(existing.client_user_id).startsWith('legacy-booking:')) {
@@ -1601,6 +1679,75 @@ async function syncClientTrip(request, env, user) {
   return json({ ok: true, pilgrimID: pilgrimPublicID(pilgrim.id), trip: tripMap(trip) });
 }
 
+async function syncClientIdentityByBookingToken(request, env, bookingID, auth) {
+  const payload = await request.json().catch(() => null);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+
+  const clientUserID = cleanText(payload.clientUserID || payload.clientUserId, 180);
+  const firstName = safeHumanText(payload.firstName || '', 120) || '';
+  const lastName = safeHumanText(payload.lastName || '', 120) || '';
+  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim();
+  if (!clientUserID) return json({ ok: false, error: 'CLIENT_ID_REQUIRED' }, 400);
+  if (!firstName || !lastName) return json({ ok: false, error: 'PILGRIM_NAME_REQUIRED' }, 400);
+
+  // Make sure the technical trip exists, but bind its permanent person identity
+  // independently from the upstream booking code.
+  let linked = await syncBookingTrip(env, auth.booking).catch(() => null);
+  let trip = linked?.trip || await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 409);
+
+  let currentPilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(trip.pilgrim_id).first().catch(() => null);
+  let canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(clientUserID).first().catch(() => null);
+  const now = new Date().toISOString();
+  const phone = cleanText(payload.whatsapp || payload.phone || auth.user?.phone, 100) || '';
+  const email = cleanText(payload.email || auth.user?.email, 220) || '';
+
+  if (!canonical && currentPilgrim) {
+    const currentOwner = String(currentPilgrim.client_user_id || '');
+    if (!currentOwner || currentOwner.startsWith('legacy-booking:') || currentOwner.startsWith('booking-token:')) {
+      try {
+        await env.HOTELS_DB.prepare(`UPDATE pilgrims SET client_user_id=?, first_name=?, last_name=?, display_name=?, phone=CASE WHEN ?<>'' THEN ? ELSE phone END, email=CASE WHEN ?<>'' THEN ? ELSE email END, updated_at=? WHERE id=?`)
+          .bind(clientUserID, firstName, lastName, displayName, phone, phone, email, email, now, currentPilgrim.id).run();
+        canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(currentPilgrim.id).first();
+      } catch (error) {
+        canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(clientUserID).first().catch(() => null);
+        if (!canonical) throw error;
+      }
+    }
+  }
+
+  if (!canonical) {
+    canonical = await ensurePilgrim(env, { clientUserID, firstName, lastName, displayName, phone, email }, bookingID);
+  }
+  if (!canonical) return json({ ok: false, error: 'PILGRIM_SYNC_FAILED' }, 500);
+
+  await env.HOTELS_DB.prepare(`UPDATE pilgrims SET first_name=?, last_name=?, display_name=?, phone=CASE WHEN ?<>'' THEN ? ELSE phone END, email=CASE WHEN ?<>'' THEN ? ELSE email END, updated_at=? WHERE id=?`)
+    .bind(firstName, lastName, displayName, phone, phone, email, email, now, canonical.id).run();
+
+  const oldPilgrimID = Number(trip.pilgrim_id || 0);
+  const canonicalClientUserID = cleanText(canonical.client_user_id, 180) || clientUserID;
+  await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?, client_user_id=?, updated_at=? WHERE booking_id=?')
+    .bind(canonical.id, canonicalClientUserID, now, bookingID).run();
+
+  if (oldPilgrimID && oldPilgrimID !== Number(canonical.id)) {
+    const old = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(oldPilgrimID).first().catch(() => null);
+    const oldStats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(oldPilgrimID).first();
+    if (Number(oldStats?.count || 0) === 0 && old && String(old.client_user_id || '').startsWith('legacy-booking:')) {
+      await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(oldPilgrimID).run().catch(() => {});
+    } else if (old) {
+      await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
+        .bind(Number(oldStats?.count || 0), oldStats?.last_trip || null, now, oldPilgrimID).run().catch(() => {});
+    }
+  }
+
+  const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(canonical.id).first();
+  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
+    .bind(Number(stats?.count || 0), stats?.last_trip || null, now, canonical.id).run();
+
+  trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  return json({ ok: true, pilgrimID: pilgrimPublicID(canonical.id), trip: tripMap(trip) });
+}
+
 async function sendClientChatMessage(request, env, bookingID, user) {
   const payload = await request.json().catch(() => null);
   const body = safeHumanText(payload?.body, 4000);
@@ -1612,7 +1759,7 @@ async function sendClientChatMessage(request, env, bookingID, user) {
   }
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const senderName = safeHumanText(user?.displayName || user?.name || 'Паломник', 160) || 'Паломник';
+  const senderName = await bookingPilgrimName(env, bookingID, safeHumanText(user?.displayName || user?.name || '', 160) || '');
   try {
     // Keep these writes sequential. Besides producing clearer diagnostics, this makes
     // the parent thread unquestionably visible before the FK-constrained message write.
@@ -1655,7 +1802,7 @@ async function sendChatAttachment(request, env, bookingID, user, staff = true) {
   const senderType = staff ? 'staff' : 'client';
   const senderName = staff
     ? await staffDisplayName(env, user)
-    : (safeHumanText(user?.displayName || user?.name || 'Паломник', 160) || 'Паломник');
+    : await bookingPilgrimName(env, bookingID, safeHumanText(user?.displayName || user?.name || '', 160) || '');
   const preview = 'Фотография';
   try {
     await env.HOTELS_DB.batch([

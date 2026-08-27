@@ -36,7 +36,6 @@ struct BookingDetailView: View {
                     guideCard(detail)
                     tripCard(detail.booking)
                     pricingCard(detail)
-                    technicalCard(detail)
                 }
                 .padding(.horizontal, 18)
                 .padding(.bottom, 34)
@@ -111,7 +110,7 @@ struct BookingDetailView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(detail.booking.clientName ?? detail.pilgrim?.displayName ?? "Паломник")
                         .font(.system(size: 30, weight: .bold, design: .rounded)).tracking(-1)
-                    Text(detail.pilgrim?.id ?? detail.booking.pilgrimID ?? bookingID)
+                    Text((detail.pilgrim?.id ?? detail.booking.pilgrimID).map { "ID \($0)" } ?? "ID —")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
                 Spacer()
