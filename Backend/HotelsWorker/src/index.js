@@ -1402,7 +1402,10 @@ async function handleClientOperations(request, env, parts) {
   if (parts[0] !== 'chats') return json({ ok: false, error: 'NOT_FOUND' }, 404);
   const bookingID = cleanText(parts[1], 180);
   if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
-  const auth = await requireClientBooking(request, env, bookingID);
+  // Chat access is authenticated by the booking access token itself. Do not make
+  // messaging depend on the operational pilgrim-trip mirror: a temporary sync/data
+  // issue must never prevent a pilgrim from contacting iumrah Care.
+  const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
   if (!auth.ok) return auth.response;
   if (parts.length === 3 && parts[2] === 'messages') {
     if (request.method === 'GET') return chatMessages(env, bookingID, false);
@@ -1421,7 +1424,9 @@ async function registerClientPushDevice(request, env) {
   if (!bookingID) return json({ ok: false, error: 'BOOKING_ID_REQUIRED' }, 400);
   if (!token || !/^[0-9a-f]{32,256}$/.test(token)) return json({ ok: false, error: 'INVALID_DEVICE_TOKEN' }, 400);
 
-  const auth = await requireClientBooking(request, env, bookingID);
+  // A valid booking token is sufficient to subscribe this device. The subscription
+  // intentionally does not depend on the operational trip mirror (migration 0011).
+  const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
   if (!auth.ok) return auth.response;
 
   const environment = payload?.environment === 'development' ? 'development' : 'production';
@@ -1446,7 +1451,7 @@ async function registerClientPushDevice(request, env) {
   return json({ ok: true, ready: apnsConfigured(env), bookingID });
 }
 
-async function requireBookingToken(request, env, bookingID) {
+async function requireBookingToken(request, env, bookingID, options = {}) {
   const bookingToken = cleanText(request.headers.get('x-booking-token'), 1024);
   if (!bookingToken) return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
   const base = String(env.BOOKINGS_PUBLIC_URL || 'https://iumrah.app/api/bookings').replace(/\/$/, '');
@@ -1461,7 +1466,8 @@ async function requireBookingToken(request, env, bookingID) {
       },
       redirect: 'manual'
     });
-  } catch {
+  } catch (error) {
+    console.warn('CLIENT_BOOKING_AUTH_UNAVAILABLE', bookingID, error);
     return { ok: false, response: json({ ok: false, error: 'BOOKING_AUTH_UNAVAILABLE' }, 503) };
   }
   if (response.status === 404) return { ok: false, response: json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404) };
@@ -1471,25 +1477,36 @@ async function requireBookingToken(request, env, bookingID) {
   const resolvedID = cleanText(booking?.id, 180);
   if (!booking || resolvedID !== bookingID) return { ok: false, response: json({ ok: false, error: 'BOOKING_ACCESS_DENIED' }, 403) };
 
-  const linked = await syncBookingTrip(env, booking);
-  if (linked?.deleted) return { ok: false, response: json({ ok: false, error: 'BOOKING_DELETED' }, 410) };
-  const trip = linked?.trip || await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  if (!trip) return { ok: false, response: json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 409) };
-
   const identity = bookingIdentity(booking, bookingID);
-  return {
-    ok: true,
-    booking,
-    trip,
-    user: {
-      id: identity.clientUserID || `booking-token:${bookingID}`,
-      displayName: identity.displayName,
-      firstName: identity.firstName,
-      lastName: identity.lastName,
-      email: identity.email,
-      phone: identity.phone
-    }
+  const user = {
+    id: identity.clientUserID || `booking-token:${bookingID}`,
+    displayName: identity.displayName,
+    firstName: identity.firstName,
+    lastName: identity.lastName,
+    email: identity.email,
+    phone: identity.phone
   };
+
+  // Keep the operational mirror up to date when possible, but do not couple chat/push
+  // availability to it. The upstream booking token is the authorization boundary.
+  let linked = null;
+  try {
+    linked = await syncBookingTrip(env, booking);
+  } catch (error) {
+    console.error('CLIENT_BOOKING_SYNC_FAILED', bookingID, error);
+    if (options.syncTrip !== false) {
+      return { ok: false, response: json({ ok: false, error: 'BOOKING_SYNC_FAILED' }, 503) };
+    }
+  }
+
+  if (linked?.deleted) return { ok: false, response: json({ ok: false, error: 'BOOKING_DELETED' }, 410) };
+  let trip = linked?.trip || null;
+  if (!trip && options.syncTrip !== false) {
+    trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+    if (!trip) return { ok: false, response: json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 409) };
+  }
+
+  return { ok: true, booking, trip, user };
 }
 
 async function requireClientSession(request, env) {
@@ -1520,9 +1537,9 @@ async function authorizeClientTrip(env, bookingID, userID) {
   return { ok: true, trip };
 }
 
-async function requireClientBooking(request, env, bookingID) {
+async function requireClientBooking(request, env, bookingID, options = {}) {
   const bookingToken = cleanText(request.headers.get('x-booking-token'), 1024);
-  if (bookingToken) return requireBookingToken(request, env, bookingID);
+  if (bookingToken) return requireBookingToken(request, env, bookingID, options);
 
   const auth = await requireClientSession(request, env);
   if (!auth.ok) return auth;
@@ -1596,10 +1613,23 @@ async function sendClientChatMessage(request, env, bookingID, user) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const senderName = safeHumanText(user?.displayName || user?.name || 'Паломник', 160) || 'Паломник';
-  await env.HOTELS_DB.batch([
-    env.HOTELS_DB.prepare(`INSERT INTO business_chat_threads (booking_id, created_at, updated_at, last_message_at, last_message_preview, last_sender_type, unread_for_staff) VALUES (?, ?, ?, ?, ?, 'client', 1) ON CONFLICT(booking_id) DO UPDATE SET updated_at=excluded.updated_at, last_message_at=excluded.last_message_at, last_message_preview=excluded.last_message_preview, last_sender_type='client', unread_for_staff=1`).bind(bookingID, now, now, now, body.slice(0,240)),
-    env.HOTELS_DB.prepare(`INSERT INTO business_chat_messages (id, booking_id, sender_type, sender_name, body, created_at, read_by_staff, client_message_id, message_type) VALUES (?, ?, 'client', ?, ?, ?, 0, ?, 'text')`).bind(id, bookingID, senderName, body, now, clientMessageID)
-  ]);
+  try {
+    // Keep these writes sequential. Besides producing clearer diagnostics, this makes
+    // the parent thread unquestionably visible before the FK-constrained message write.
+    await env.HOTELS_DB.prepare(`INSERT INTO business_chat_threads (booking_id, created_at, updated_at, last_message_at, last_message_preview, last_sender_type, unread_for_staff) VALUES (?, ?, ?, ?, ?, 'client', 1) ON CONFLICT(booking_id) DO UPDATE SET updated_at=excluded.updated_at, last_message_at=excluded.last_message_at, last_message_preview=excluded.last_message_preview, last_sender_type='client', unread_for_staff=1`)
+      .bind(bookingID, now, now, now, body.slice(0,240)).run();
+    await env.HOTELS_DB.prepare(`INSERT INTO business_chat_messages (id, booking_id, sender_type, sender_name, body, created_at, read_by_staff, client_message_id, message_type) VALUES (?, ?, 'client', ?, ?, ?, 0, ?, 'text')`)
+      .bind(id, bookingID, senderName, body, now, clientMessageID).run();
+  } catch (error) {
+    // If the client retried after a network timeout, return the already-created message.
+    if (clientMessageID) {
+      const existing = await env.HOTELS_DB.prepare('SELECT id FROM business_chat_messages WHERE booking_id=? AND client_message_id=? LIMIT 1')
+        .bind(bookingID, clientMessageID).first().catch(() => null);
+      if (existing?.id) return chatMessageDetail(env, existing.id, 200, false);
+    }
+    console.error('CLIENT_CHAT_WRITE_FAILED', bookingID, error);
+    return json({ ok: false, error: 'CHAT_MESSAGE_WRITE_FAILED' }, 500);
+  }
   await sendStaffPush(env, senderName, body.slice(0, 180), { type: 'chat_message', bookingID }).catch(() => {});
   return chatMessageDetail(env, id, 201, false);
 }
