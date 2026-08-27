@@ -1,4 +1,6 @@
+import Foundation
 import SwiftUI
+import UIKit
 
 @MainActor
 final class OverviewStore: ObservableObject {
@@ -77,7 +79,7 @@ struct OverviewView: View {
                         NavigationLink {
                             BookingDetailView(bookingID: booking.id)
                         } label: {
-                            BookingRow(booking: booking)
+                            BookingRow(booking: booking, showsChevron: false)
                         }
                         .buttonStyle(.plain)
                     }
@@ -99,6 +101,9 @@ struct OverviewView: View {
             }
         }
         .task { await store.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("iumrah.business.bookingOperationsChanged"))) { _ in
+            Task { await store.reload() }
+        }
         .refreshable { await store.reload() }
     }
 }
@@ -120,28 +125,80 @@ private struct StatCard: View {
 
 struct BookingRow: View {
     let booking: BookingSummary
+    var showsChevron = false
+
     private var statusLabel: String {
         if let raw = booking.operationStatus, let status = TripStatus(rawValue: raw) { return status.title }
         return booking.status.shortLabel
     }
+
+    private var displayName: String {
+        let value = booking.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty || value == "Паломник" ? "Имя не синхронизировано" : value
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text(statusLabel).font(.caption2.bold()).lineLimit(1).padding(.horizontal, 9).frame(height: 25).background(BusinessDesign.softOrange, in: Capsule()).foregroundStyle(BusinessDesign.accent)
-                Spacer()
-                Text(booking.totalUsd, format: .currency(code: "USD").precision(.fractionLength(0))).font(.headline)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text(statusLabel)
+                        .font(.caption2.bold())
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .frame(height: 27)
+                        .background(BusinessDesign.secondarySurface, in: Capsule())
+                    Spacer(minLength: 8)
+                    Text(booking.totalUsd, format: .currency(code: "USD").precision(.fractionLength(0)))
+                        .font(.title3.bold())
+                        .monospacedDigit()
+                }
+
+                Text(displayName)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+
+                HStack(spacing: 8) {
+                    if let pilgrimID = booking.pilgrimID, !pilgrimID.isEmpty {
+                        HStack(spacing: 5) {
+                            Text("ID \(pilgrimID)")
+                                .monospaced()
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .background(Color.black.opacity(0.055), in: Capsule())
+                        .textSelection(.enabled)
+                        .contextMenu {
+                            Button {
+                                UIPasteboard.general.string = pilgrimID
+                            } label: {
+                                Label("Копировать ID", systemImage: "doc.on.doc")
+                            }
+                        }
+                    }
+
+                    Label("\(booking.originCode) → \(booking.outboundDestination)", systemImage: "airplane")
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Label("\(booking.travelerCount)", systemImage: "person.2.fill")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-            Text(booking.clientName ?? "Паломник").font(.subheadline.bold())
-            if let pilgrimID = booking.pilgrimID {
-                Text("ID \(pilgrimID)").font(.caption2.monospaced()).foregroundStyle(.secondary)
+
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 22)
             }
-            HStack {
-                Label("\(booking.originCode) → \(booking.outboundDestination)", systemImage: "airplane")
-                Spacer()
-                Label("\(booking.travelerCount)", systemImage: "person.2.fill")
-            }
-            .font(.caption).foregroundStyle(.secondary)
         }
-        .padding(14).background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(BusinessDesign.line, lineWidth: 1))
     }
 }

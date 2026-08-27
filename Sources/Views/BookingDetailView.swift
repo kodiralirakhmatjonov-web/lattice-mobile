@@ -1,4 +1,6 @@
+import Foundation
 import SwiftUI
+import UIKit
 
 struct BookingDetailView: View {
     let bookingID: String
@@ -108,10 +110,24 @@ struct BookingDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(detail.booking.clientName ?? detail.pilgrim?.displayName ?? "Паломник")
+                    Text((detail.booking.clientName?.isEmpty == false ? detail.booking.clientName : detail.pilgrim?.displayName) ?? "Имя не синхронизировано")
                         .font(.system(size: 30, weight: .bold, design: .rounded)).tracking(-1)
-                    Text((detail.pilgrim?.id ?? detail.booking.pilgrimID).map { "ID \($0)" } ?? "ID —")
-                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                    if let pilgrimID = detail.pilgrim?.id ?? detail.booking.pilgrimID {
+                        HStack(spacing: 5) {
+                            Text("ID \(pilgrimID)").monospaced()
+                            Image(systemName: "doc.on.doc").font(.system(size: 10, weight: .semibold))
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .contextMenu {
+                            Button { UIPasteboard.general.string = pilgrimID } label: {
+                                Label("Копировать ID", systemImage: "doc.on.doc")
+                            }
+                        }
+                    } else {
+                        Text("ID —").font(.caption.monospaced()).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 Text(detail.booking.totalUsd, format: .currency(code: "USD").precision(.fractionLength(0)))
@@ -430,7 +446,15 @@ struct BookingDetailView: View {
     @MainActor private func save() async {
         saving = true
         do {
-            detail = try await APIClient.shared.updateBookingOperation(id: bookingID, status: status, paymentStatus: paymentStatus, confirmationNumber: confirmationNumber, internalNotes: internalNotes)
+            let updated = try await APIClient.shared.updateBookingOperation(id: bookingID, status: status, paymentStatus: paymentStatus, confirmationNumber: confirmationNumber, internalNotes: internalNotes)
+            detail = updated
+            if let operation = updated.operation {
+                status = operation.tripStatus
+                paymentStatus = operation.paymentStatus
+                confirmationNumber = operation.confirmationNumber
+                internalNotes = operation.internalNotes
+            }
+            NotificationCenter.default.post(name: Notification.Name("iumrah.business.bookingOperationsChanged"), object: bookingID)
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
         saving = false

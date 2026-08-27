@@ -18,7 +18,7 @@ struct LoginResponse: Codable {
     let error: String?
 }
 
-enum BookingStatus: String, Codable {
+enum BookingStatus: String, Codable, Hashable {
     case new = "NEW"
     case availabilityCheck = "AVAILABILITY_CHECK"
     case paymentPending = "PAYMENT_PENDING"
@@ -46,7 +46,7 @@ enum BookingStatus: String, Codable {
     }
 }
 
-struct BookingSummary: Codable, Identifiable {
+struct BookingSummary: Codable, Identifiable, Hashable {
     let id: String
     let status: BookingStatus
     let createdAt: String
@@ -82,6 +82,7 @@ struct ChatThread: Codable, Identifiable {
     let unreadForStaff: Bool
 }
 
+struct ChatsResponse: Codable { let threads: [ChatThread] }
 
 struct BusinessChatThreadSummary: Codable, Identifiable, Hashable {
     var id: String { bookingID }

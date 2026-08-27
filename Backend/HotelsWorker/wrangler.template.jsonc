@@ -20,6 +20,11 @@
       "database_name": "iumrah-hotels",
       "database_id": "__D1_DATABASE_ID__",
       "migrations_dir": "migrations"
+    },
+    {
+      "binding": "BOOKINGS_DB",
+      "database_name": "__BOOKING_D1_DATABASE_NAME__",
+      "database_id": "__BOOKING_D1_DATABASE_ID__"
     }
   ],
   "r2_buckets": [
@@ -43,8 +48,6 @@
     "AUTH_SESSION_URL": "https://iumrah.app/api/auth/staff/session",
     "BOOKINGS_ADMIN_URL": "https://iumrah.app/api/admin/bookings",
     "BOOKINGS_PUBLIC_URL": "https://iumrah.app/api/bookings",
-    "PACKAGE_ADMIN_URL": "https://iumrah.app/api/admin/package/booking",
-    "PACKAGE_PUBLIC_BOOKING_URL": "https://iumrah.app/api/package/booking",
     "CLIENT_SESSION_URL": "https://iumrah.app/api/auth/session"
   },
   "images": {

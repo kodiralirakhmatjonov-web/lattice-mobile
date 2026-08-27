@@ -1,58 +1,129 @@
 import fs from 'node:fs';
 
-const [hotelDatabaseId, zoneId] = process.argv.slice(2);
-const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+const [hotelDatabaseID, zoneID] = process.argv.slice(2);
+const accountID = process.env.CLOUDFLARE_ACCOUNT_ID;
 const apiToken = process.env.CLOUDFLARE_API_TOKEN;
 
-if (!hotelDatabaseId || !zoneId || !accountId || !apiToken) {
-  console.error('Usage: node scripts/render-config.mjs <HOTELS_D1_DATABASE_ID> <ZONE_ID> with CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN');
+if (!hotelDatabaseID || !zoneID || !accountID || !apiToken) {
+  console.error('Usage: node scripts/render-config.mjs <HOTEL_D1_DATABASE_ID> <ZONE_ID> with CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN');
   process.exit(1);
 }
 
 const headers = {
   Authorization: `Bearer ${apiToken}`,
-  'Content-Type': 'application/json'
+  'Content-Type': 'application/json',
 };
 
-async function findBookingsDatabase() {
-  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database?per_page=100`, { headers });
-  if (!response.ok) throw new Error(`Unable to list D1 databases (${response.status})`);
+async function d1Query(databaseID, sql, params = []) {
+  const response = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountID}/d1/database/${databaseID}/query`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ sql, params }),
+    },
+  );
+  if (!response.ok) throw new Error(`D1 query failed for ${databaseID} (${response.status})`);
   const payload = await response.json();
-  const databases = Array.isArray(payload.result) ? payload.result : [];
-
-  databases.sort((a, b) => (/iumrah/i.test(String(a?.name || '')) ? 0 : 1) - (/iumrah/i.test(String(b?.name || '')) ? 0 : 1));
-
-  for (const database of databases) {
-    const id = String(database?.uuid || database?.id || '');
-    if (!id || id === hotelDatabaseId) continue;
-    try {
-      const query = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${id}/query`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ sql: "SELECT name FROM sqlite_master WHERE type='table' AND name='bookings' LIMIT 1" })
-      });
-      if (!query.ok) continue;
-      const result = await query.json();
-      const batches = Array.isArray(result.result) ? result.result : [];
-      const found = batches.some(batch => Array.isArray(batch?.results) && batch.results.some(row => row?.name === 'bookings'));
-      if (found) return { id, name: String(database?.name || 'iumrah-bookings') };
-    } catch {
-      // Keep scanning existing D1 databases; never create or guess a bookings DB.
-    }
-  }
-  throw new Error('No existing D1 database containing the bookings table was found. Refusing to deploy with a guessed booking store.');
+  if (payload?.success === false) throw new Error(`D1 query rejected for ${databaseID}`);
+  return payload?.result?.[0]?.results ?? [];
 }
 
-const bookings = await findBookingsDatabase();
-console.log(`Using existing bookings D1: ${bookings.name} (${bookings.id})`);
+async function operationalBookingIDs() {
+  try {
+    const rows = await d1Query(
+      hotelDatabaseID,
+      `SELECT booking_id
+       FROM pilgrim_trips
+       WHERE booking_id IS NOT NULL AND booking_id <> ''
+       ORDER BY COALESCE(updated_at, created_at) DESC
+       LIMIT 25`,
+    );
+    return [...new Set(rows.map(row => String(row?.booking_id || '').trim()).filter(Boolean))];
+  } catch (error) {
+    console.warn(`Could not read operational booking IDs from HOTELS_DB: ${error?.message || error}`);
+    return [];
+  }
+}
 
+async function findBookingDatabase() {
+  const listResponse = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${accountID}/d1/database?per_page=100`,
+    { headers },
+  );
+  if (!listResponse.ok) throw new Error(`Unable to list D1 databases (${listResponse.status})`);
+  const listPayload = await listResponse.json();
+  const databases = Array.isArray(listPayload.result) ? listPayload.result : [];
+  const knownBookingIDs = await operationalBookingIDs();
+  const candidates = [];
+
+  for (const database of databases) {
+    const id = database.uuid ?? database.id;
+    if (!id || String(id) === String(hotelDatabaseID)) continue;
+    try {
+      const rows = await d1Query(
+        id,
+        `SELECT
+           (SELECT COUNT(*) FROM bookings) AS booking_count,
+           (SELECT MAX(COALESCE(updated_at, created_at, '')) FROM bookings) AS newest_booking,
+           (SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name IN ('id','access_token_hash','payload_json','status')) AS required_columns`,
+      );
+      const row = rows[0];
+      if (!row || Number(row.required_columns ?? 0) !== 4) continue;
+
+      let overlapCount = 0;
+      if (knownBookingIDs.length) {
+        const placeholders = knownBookingIDs.map(() => '?').join(',');
+        const overlapRows = await d1Query(
+          id,
+          `SELECT COUNT(*) AS overlap_count FROM bookings WHERE id IN (${placeholders})`,
+          knownBookingIDs,
+        );
+        overlapCount = Number(overlapRows?.[0]?.overlap_count ?? 0);
+      }
+
+      candidates.push({
+        id: String(id),
+        name: String(database.name ?? 'iumrah-bookings'),
+        bookingCount: Number(row.booking_count ?? 0),
+        newestBooking: String(row.newest_booking ?? ''),
+        overlapCount,
+      });
+    } catch {
+      // Not the live bookings database. Keep scanning.
+    }
+  }
+
+  if (!candidates.length) {
+    throw new Error('No existing D1 database with the production bookings schema (id/access_token_hash/payload_json/status) was found.');
+  }
+
+  candidates.sort((a, b) => {
+    if (knownBookingIDs.length && b.overlapCount !== a.overlapCount) return b.overlapCount - a.overlapCount;
+    const byNewest = b.newestBooking.localeCompare(a.newestBooking);
+    if (byNewest !== 0) return byNewest;
+    return b.bookingCount - a.bookingCount;
+  });
+
+  const selected = candidates[0];
+  if (knownBookingIDs.length && selected.overlapCount === 0) {
+    throw new Error(`No bookings D1 overlaps the ${knownBookingIDs.length} operational booking IDs already stored in iumrah-hotels. Refusing to bind an unrelated database.`);
+  }
+
+  console.log(`Operational booking IDs used for D1 verification: ${knownBookingIDs.length}`);
+  console.log('Bookings D1 candidates:', candidates.map(item => `${item.name}:overlap=${item.overlapCount}:count=${item.bookingCount}:newest=${item.newestBooking}`).join(', '));
+  console.log(`Using bookings D1: ${selected.name} (${selected.id})`);
+  return selected;
+}
+
+const bookingDatabase = await findBookingDatabase();
 const template = fs.readFileSync(new URL('../wrangler.template.jsonc', import.meta.url), 'utf8');
 const rendered = template
-  .replaceAll('__D1_DATABASE_ID__', hotelDatabaseId)
-  .replaceAll('__BOOKINGS_D1_DATABASE_ID__', bookings.id)
-  .replaceAll('__BOOKINGS_D1_DATABASE_NAME__', bookings.name.replaceAll('"', '\\"'))
-  .replaceAll('__ZONE_ID__', zoneId);
+  .replaceAll('__D1_DATABASE_ID__', hotelDatabaseID)
+  .replaceAll('__BOOKING_D1_DATABASE_ID__', bookingDatabase.id)
+  .replaceAll('__BOOKING_D1_DATABASE_NAME__', bookingDatabase.name.replaceAll('"', '\\"'))
+  .replaceAll('__ZONE_ID__', zoneID);
 
 JSON.parse(rendered);
 fs.writeFileSync(new URL('../wrangler.generated.jsonc', import.meta.url), rendered);
-console.log('Generated wrangler.generated.jsonc with HOTELS_DB + BOOKINGS_DB bindings');
+console.log('Generated wrangler.generated.jsonc with HOTELS_DB + verified BOOKINGS_DB bindings');

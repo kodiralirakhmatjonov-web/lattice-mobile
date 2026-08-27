@@ -3,6 +3,12 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
+
+private func businessPilgrimName(_ booking: BookingSummary) -> String {
+    let value = booking.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return value.isEmpty || value == "Паломник" ? "Имя не синхронизировано" : value
+}
+
 private enum ChatFilter: String, CaseIterable, Identifiable {
     case new = "Новые"
     case active = "В процессе"
@@ -65,6 +71,9 @@ struct ChatsView: View {
         }
         .overlay { if loading { ProgressView() } }
         .task { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("iumrah.business.bookingOperationsChanged"))) { _ in
+            Task { await load() }
+        }
         .refreshable { await load() }
     }
 
@@ -141,7 +150,7 @@ private struct ThreadCard: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text(thread.booking.clientName ?? "Паломник")
+                    Text(businessPilgrimName(thread.booking))
                         .font(.subheadline.bold()).lineLimit(1)
                     Spacer(minLength: 8)
                     Text(chatTime(thread.lastMessageAt)).font(.caption2).foregroundStyle(.tertiary)
@@ -166,7 +175,7 @@ private struct ThreadCard: View {
     }
 
     private var initials: String {
-        let name = thread.booking.clientName ?? "P"
+        let name = businessPilgrimName(thread.booking)
         return name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
     }
 }
@@ -177,7 +186,7 @@ private struct NewChatBookingPicker: View {
         List(bookings) { booking in
             NavigationLink { ChatConversationView(booking: booking) } label: {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(booking.clientName ?? "Паломник").font(.subheadline.bold())
+                    Text(businessPilgrimName(booking)).font(.subheadline.bold())
                     Text("\(booking.pilgrimID.map { "ID \($0)" } ?? "ID —") · \(booking.originCode) → \(booking.outboundDestination) · \(booking.startDate)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -221,7 +230,7 @@ struct ChatConversationView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { composer }
-        .navigationTitle(booking.clientName ?? "Паломник")
+        .navigationTitle(businessPilgrimName(booking))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -252,7 +261,7 @@ struct ChatConversationView: View {
             if message.isStaff { Spacer(minLength: 64) }
             VStack(alignment: message.isStaff ? .trailing : .leading, spacing: 4) {
                 if !message.isStaff {
-                    Text(booking.clientName ?? "Паломник")
+                    Text(businessPilgrimName(booking))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 4)

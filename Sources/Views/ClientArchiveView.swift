@@ -82,7 +82,7 @@ private struct PilgrimDetailView: View {
                 .padding(18)
             } else if loading { ProgressView().padding(.top, 60) }
         }
-        .background(Color.white).navigationTitle("Паломник").navigationBarTitleDisplayMode(.inline)
+        .background(Color.white).navigationTitle(detail?.pilgrim.displayName ?? "Клиент").navigationBarTitleDisplayMode(.inline)
         .task { detail = try? await APIClient.shared.pilgrimDetail(id: pilgrimID); loading = false }
     }
 }

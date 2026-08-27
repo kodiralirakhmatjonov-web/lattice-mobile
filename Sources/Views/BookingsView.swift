@@ -1,4 +1,7 @@
+import Foundation
 import SwiftUI
+
+private let bookingOperationsChangedNotification = Notification.Name("iumrah.business.bookingOperationsChanged")
 
 private enum BookingListFilter: String, CaseIterable, Identifiable {
     case all, new, availability, payment, paid, confirmed, documents, ready, inTrip, completed, cancelled
@@ -44,6 +47,7 @@ struct BookingsView: View {
     @State private var error: String?
     @State private var filter: BookingListFilter = .all
     @State private var bookingPendingDelete: BookingSummary?
+    @State private var selectedBooking: BookingSummary?
 
     private var filteredBookings: [BookingSummary] {
         bookings.filter { filter.matches(operationalStatus($0)) }
@@ -74,28 +78,28 @@ struct BookingsView: View {
             }
 
             ForEach(filteredBookings) { booking in
-                NavigationLink {
-                    BookingDetailView(bookingID: booking.id)
-                } label: {
-                    BookingRow(booking: booking)
-                }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 7, leading: 18, bottom: 7, trailing: 18))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
-                        bookingPendingDelete = booking
-                    } label: {
-                        Label("Удалить", systemImage: "trash")
+                BookingRow(booking: booking, showsChevron: true)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedBooking = booking }
+                    .listRowInsets(EdgeInsets(top: 7, leading: 18, bottom: 7, trailing: 18))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            bookingPendingDelete = booking
+                        } label: {
+                            Label("Удалить", systemImage: "trash")
+                        }
                     }
-                }
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(BusinessDesign.background)
         .navigationTitle("Бронирования")
+        .navigationDestination(item: $selectedBooking) { booking in
+            BookingDetailView(bookingID: booking.id)
+        }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
             ToolbarItem(placement: .principal) {
@@ -111,6 +115,9 @@ struct BookingsView: View {
             }
         }
         .task { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: bookingOperationsChangedNotification)) { _ in
+            Task { await load() }
+        }
         .refreshable { await load() }
         .alert("Удалить бронирование?", isPresented: Binding(
             get: { bookingPendingDelete != nil },
@@ -123,7 +130,7 @@ struct BookingsView: View {
                 Task { await delete(booking) }
             }
         } message: {
-            Text("Бронирование, его операционные данные и связанный чат будут удалены из iumrah Business. Действие нельзя отменить.")
+            Text("Бронирование будет полностью удалено из основной базы, iumrah Business, чата и связанных операционных данных. Действие нельзя отменить.")
         }
     }
 
@@ -175,7 +182,7 @@ struct BookingsView: View {
     }
 
     @MainActor private func load() async {
-        loading = true
+        if bookings.isEmpty { loading = true }
         error = nil
         do { bookings = try await APIClient.shared.bookings() }
         catch { self.error = error.localizedDescription }
@@ -188,6 +195,7 @@ struct BookingsView: View {
         do {
             try await APIClient.shared.deleteBooking(id: booking.id)
             withAnimation(.snappy) { bookings.removeAll { $0.id == booking.id } }
+            NotificationCenter.default.post(name: bookingOperationsChangedNotification, object: booking.id)
         } catch {
             self.error = error.localizedDescription
         }
