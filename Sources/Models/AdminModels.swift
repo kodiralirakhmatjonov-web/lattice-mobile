@@ -81,6 +81,8 @@ struct BookingSummary: Codable, Identifiable, Hashable {
     let madinahHotel: String
     let clientName: String?
     let pilgrimID: String?
+    let bookingNumber: Int?
+    let bookingDisplayNumber: String?
     let tripID: String?
     let operationStatus: String?
 }

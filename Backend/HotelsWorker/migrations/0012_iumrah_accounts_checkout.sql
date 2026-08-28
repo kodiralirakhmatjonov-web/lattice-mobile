@@ -126,7 +126,7 @@ CREATE TABLE iumrah_accounts (
   pilgrim_id INTEGER PRIMARY KEY,
   password_salt TEXT NOT NULL,
   password_hash TEXT NOT NULL,
-  password_iterations INTEGER NOT NULL DEFAULT 210000,
+  password_iterations INTEGER NOT NULL DEFAULT 100000,
   activated_at TEXT NOT NULL,
   password_updated_at TEXT NOT NULL,
   failed_attempts INTEGER NOT NULL DEFAULT 0,

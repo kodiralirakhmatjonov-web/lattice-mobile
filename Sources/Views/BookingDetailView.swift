@@ -115,22 +115,23 @@ struct BookingDetailView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text((detail.booking.clientName?.isEmpty == false ? detail.booking.clientName : detail.pilgrim?.displayName) ?? "Имя не синхронизировано")
                         .font(.system(size: 30, weight: .bold, design: .rounded)).tracking(-1)
-                    if let pilgrimID = detail.pilgrim?.id ?? detail.booking.pilgrimID {
-                        HStack(spacing: 5) {
-                            Text("ID \(pilgrimID)").monospaced()
-                            Image(systemName: "doc.on.doc").font(.system(size: 10, weight: .semibold))
+                    HStack(spacing: 10) {
+                        if let pilgrimID = detail.pilgrim?.id ?? detail.booking.pilgrimID {
+                            Label("Iumrah ID \(pilgrimID)", systemImage: "person.text.rectangle")
+                                .contextMenu {
+                                    Button { UIPasteboard.general.string = pilgrimID } label: { Label("Копировать Iumrah ID", systemImage: "doc.on.doc") }
+                                }
                         }
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .contextMenu {
-                            Button { UIPasteboard.general.string = pilgrimID } label: {
-                                Label("Копировать ID", systemImage: "doc.on.doc")
-                            }
+                        if let bookingNumber = detail.operation?.bookingDisplayNumber ?? detail.booking.bookingDisplayNumber {
+                            Label("Бронь \(bookingNumber)", systemImage: "number")
+                                .contextMenu {
+                                    Button { UIPasteboard.general.string = bookingNumber } label: { Label("Копировать номер брони", systemImage: "doc.on.doc") }
+                                }
                         }
-                    } else {
-                        Text("ID —").font(.caption.monospaced()).foregroundStyle(.secondary)
                     }
+                    .font(.caption.monospaced().weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 }
                 Spacer()
                 Text(detail.booking.totalUsd, format: .currency(code: "USD").precision(.fractionLength(0)))
@@ -366,10 +367,12 @@ struct BookingDetailView: View {
 
             if showPricing {
                 Divider().padding(.vertical, 14)
-                if detail.pricingLines.isEmpty {
+                if let report = detail.pricingReport {
+                    pricingReportView(report)
+                } else if detail.pricingLines.isEmpty {
                     detailRow("Итого клиенту", detail.booking.totalUsd.formatted(.currency(code: "USD")))
                     detailRow("На паломника", detail.booking.perPilgrimUsd.formatted(.currency(code: "USD")))
-                    Text("Для этой старой заявки клиентский генератор ещё не передал детальный pricingSnapshot. После подключения клиентского repo здесь появятся себестоимость, комиссии и маржа по каждому компоненту.")
+                    Text("Для этого старого бронирования генератор ещё не передал детальный pricingSnapshot. Для новых пакетов здесь сохраняется полный отчёт Package Engine: себестоимость, наценка, комиссия и итог по каждому компоненту.")
                         .font(.caption).foregroundStyle(.secondary).padding(.top, 10)
                 } else {
                     let groups = groupedPricing(detail.pricingLines)
@@ -393,6 +396,108 @@ struct BookingDetailView: View {
         .padding(18).businessCard(radius: 28)
     }
 
+    @ViewBuilder
+    private func pricingReportView(_ report: BookingPricingReport) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let selection = report.selection {
+                Text("ЧТО ВЫБРАЛ ГЕНЕРАТОР").font(.caption2.bold()).tracking(1.2).foregroundStyle(.secondary)
+                if let flight = selection.outbound { pricingSelectionRow(icon: "airplane.departure", title: "Перелёт туда", name: "\(flight.airline) · \(flight.flightNumbers)", subtitle: "\(flight.origin) → \(flight.destination)") }
+                if let flight = selection.inbound { pricingSelectionRow(icon: "airplane.arrival", title: "Перелёт обратно", name: "\(flight.airline) · \(flight.flightNumbers)", subtitle: "\(flight.origin) → \(flight.destination)") }
+                if let hotel = selection.makkahHotel { pricingSelectionRow(icon: "building.2.fill", title: "Отель Мекки", name: hotel.hotelName, subtitle: [hotel.roomName, hotel.roomCategory].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")) }
+                if let hotel = selection.madinahHotel { pricingSelectionRow(icon: "moon.stars.fill", title: "Отель Медины", name: hotel.hotelName, subtitle: [hotel.roomName, hotel.roomCategory].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")) }
+                Divider()
+            }
+
+            Text("ИСТОЧНИКИ ЦЕНЫ").font(.caption2.bold()).tracking(1.2).foregroundStyle(.secondary)
+            fareAuditRow("Перелёт туда", report.selectedPricingInputs.outbound, currency: report.currency)
+            fareAuditRow("Перелёт обратно", report.selectedPricingInputs.inbound, currency: report.currency)
+            hotelAuditRow("Отель Мекки", report.selectedPricingInputs.makkahHotel, currency: report.currency)
+            if let madinah = report.selectedPricingInputs.madinahHotel { hotelAuditRow("Отель Медины", madinah, currency: report.currency) }
+
+            Divider()
+            Text("СЕБЕСТОИМОСТЬ КОМПОНЕНТОВ").font(.caption2.bold()).tracking(1.2).foregroundStyle(.secondary)
+            ForEach(report.components) { component in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(component.label).font(.subheadline)
+                    Spacer(minLength: 10)
+                    Text(component.supplierCostUsd, format: .currency(code: report.currency).precision(.fractionLength(0...2))).font(.subheadline.bold()).monospacedDigit()
+                }
+            }
+
+            Divider()
+            pricingTotalRow("Себестоимость", report.totals.supplierCostUsd, currency: report.currency)
+            pricingTotalRow("Наценка 50%", report.totals.markupAmountUsd, currency: report.currency)
+            pricingTotalRow("После наценки", report.totals.subtotalAfterMarkupUsd, currency: report.currency)
+            pricingTotalRow("Комиссия 2%", report.totals.paymentFeeAmountUsd, currency: report.currency)
+            pricingTotalRow("Расчёт до округления", report.totals.calculatedSellingPriceUsd, currency: report.currency)
+            if abs(report.totals.roundingDifferenceUsd) > 0.001 { pricingTotalRow("Округление", report.totals.roundingDifferenceUsd, currency: report.currency) }
+            pricingTotalRow("ИТОГО КЛИЕНТУ", report.totals.publicTotalUsd, currency: report.currency, emphasized: true)
+            pricingTotalRow("На паломника", report.totals.publicPricePerPilgrimUsd, currency: report.currency, emphasized: true)
+
+            HStack {
+                Text("Quote \(report.quoteId.prefix(8)) · \(report.pricingVersion)").font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                Spacer()
+                Text("Маржа ≈ \(report.totals.estimatedProfitUsd, format: .currency(code: report.currency).precision(.fractionLength(0...2)))").font(.caption.bold()).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func fareAuditRow(_ title: String, _ fare: BookingPricingFare, currency: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Text(fare.normalizedGroupUsd, format: .currency(code: currency).precision(.fractionLength(0...2)))
+                    .font(.subheadline.bold()).monospacedDigit()
+            }
+            Text("Провайдер: \(fare.providerId) · исходная цена \(fare.amount, format: .number.precision(.fractionLength(0...2))) \(fare.currency) · \(fare.fareScope)")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("Кандидат: \(fare.candidateId) · дата \(fare.travelDate)")
+                .font(.caption2.monospaced()).foregroundStyle(.tertiary).lineLimit(2)
+        }
+        .padding(12)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func hotelAuditRow(_ title: String, _ hotel: BookingPricingHotelInput, currency: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Text(hotel.amountUsd, format: .currency(code: currency).precision(.fractionLength(0...2)))
+                    .font(.subheadline.bold()).monospacedDigit()
+            }
+            Text("Ставка: \(hotel.unit) · ночей: \(hotel.nights) · режим: \(hotel.pricingMode ?? "—")")
+                .font(.caption).foregroundStyle(.secondary)
+            if let hotelId = hotel.hotelId {
+                Text("hotel \(hotelId)" + (hotel.roomId.map { " · room \($0)" } ?? ""))
+                    .font(.caption2.monospaced()).foregroundStyle(.tertiary).lineLimit(2)
+            }
+        }
+        .padding(12)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func pricingSelectionRow(icon: String, title: String, name: String, subtitle: String) -> some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: icon).font(.system(size: 15, weight: .semibold)).frame(width: 34, height: 34).background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.caption.bold()).foregroundStyle(.secondary)
+                Text(name).font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
+                if !subtitle.isEmpty { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func pricingTotalRow(_ title: String, _ amount: Double, currency: String, emphasized: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title).font(emphasized ? .headline : .subheadline).fontWeight(emphasized ? .bold : .regular)
+            Spacer(minLength: 10)
+            Text(amount, format: .currency(code: currency).precision(.fractionLength(0...2))).font(emphasized ? .headline : .subheadline).fontWeight(.bold).monospacedDigit()
+        }
+    }
+
     private func technicalCard(_ detail: BookingDetailResponse) -> some View {
         DisclosureGroup {
             VStack(spacing: 9) {
@@ -406,7 +511,7 @@ struct BookingDetailView: View {
             }
             .padding(.top, 12)
         } label: {
-            Label("Технические данные заявки", systemImage: "doc.text.magnifyingglass").font(.headline)
+            Label("Технические данные бронирования", systemImage: "doc.text.magnifyingglass").font(.headline)
         }
         .padding(18).businessCard(radius: 28)
     }

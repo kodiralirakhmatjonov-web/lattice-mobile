@@ -342,10 +342,10 @@ function clientNotificationCopy(localeRaw, type, value) {
   const lang = locale.startsWith('uz-cyrl') ? 'uz-cyrl' : locale.startsWith('uz') ? 'uz' : locale.startsWith('en') ? 'en' : 'ru';
   if (type === 'status') {
     const labels = {
-      ru: { availability_check:'Новая заявка · Проверка наличия', payment_pending:'Наличие подтверждено · Оплата и данные паломников', booking_confirmed:'Оплачено · Бронирование подтверждено', ready_to_travel:'Документы готовы · Готово к поездке', in_trip:'Паломник в поездке', completed:'Поездка завершена', cancelled:'Отменено' },
-      en: { availability_check:'New request · Availability check', payment_pending:'Availability confirmed · Payment & pilgrim details', booking_confirmed:'Paid · Booking confirmed', ready_to_travel:'Documents ready · Ready to travel', in_trip:'Pilgrim in trip', completed:'Trip completed', cancelled:'Cancelled' },
-      uz: { availability_check:'Yangi ariza · Mavjudlik tekshiruvi', payment_pending:'Mavjudlik tasdiqlandi · To‘lov va ziyoratchi ma’lumotlari', booking_confirmed:'To‘langan · Bron tasdiqlandi', ready_to_travel:'Hujjatlar tayyor · Safarga tayyor', in_trip:'Ziyoratchi safarda', completed:'Safar yakunlandi', cancelled:'Bekor qilindi' },
-      'uz-cyrl': { availability_check:'Янги ариза · Мавжудлик текшируви', payment_pending:'Мавжудлик тасдиқланди · Тўлов ва зиёратчи маълумотлари', booking_confirmed:'Тўланган · Брон тасдиқланди', ready_to_travel:'Ҳужжатлар тайёр · Сафарга тайёр', in_trip:'Зиёратчи сафарда', completed:'Сафар якунланди', cancelled:'Бекор қилинди' }
+      ru: { availability_check:'Новый пакет создан · Проверка наличия', payment_pending:'Наличие подтверждено · Оплата и данные паломников', booking_confirmed:'Оплачено · Бронирование подтверждено', ready_to_travel:'Документы готовы · Готово к поездке', in_trip:'Паломник в поездке', completed:'Поездка завершена', cancelled:'Отменено' },
+      en: { availability_check:'New package created · Availability check', payment_pending:'Availability confirmed · Payment & pilgrim details', booking_confirmed:'Paid · Booking confirmed', ready_to_travel:'Documents ready · Ready to travel', in_trip:'Pilgrim in trip', completed:'Trip completed', cancelled:'Cancelled' },
+      uz: { availability_check:'Yangi paket yaratildi · Mavjudlik tekshiruvi', payment_pending:'Mavjudlik tasdiqlandi · To‘lov va ziyoratchi ma’lumotlari', booking_confirmed:'To‘langan · Bron tasdiqlandi', ready_to_travel:'Hujjatlar tayyor · Safarga tayyor', in_trip:'Ziyoratchi safarda', completed:'Safar yakunlandi', cancelled:'Bekor qilindi' },
+      'uz-cyrl': { availability_check:'Янги пакет яратилди · Мавжудлик текшируви', payment_pending:'Мавжудлик тасдиқланди · Тўлов ва зиёратчи маълумотлари', booking_confirmed:'Тўланган · Брон тасдиқланди', ready_to_travel:'Ҳужжатлар тайёр · Сафарга тайёр', in_trip:'Зиёратчи сафарда', completed:'Сафар якунланди', cancelled:'Бекор қилинди' }
     };
     const titles = { ru:'Статус поездки обновлён', en:'Trip status updated', uz:'Safar holati yangilandi', 'uz-cyrl':'Сафар ҳолати янгиланди' };
     return { title: titles[lang], body: labels[lang][value] || String(value || '') };
@@ -975,7 +975,8 @@ function mapTeamMember(row, admin = true) {
     publicSlug: row.public_slug,
     publicVisible: Number(row.public_visible || 0) === 1,
     active: Number(row.active || 0) === 1,
-    isOwner: Number(row.is_owner || 0) === 1
+    isOwner: Number(row.is_owner || 0) === 1,
+    photoURL: row.photo_object_key ? `/api/catalog/hotels/team/${encodeURIComponent(row.public_slug)}/photo` : null
   };
   if (admin) base.staffLogin = row.staff_login || null;
   return base;
@@ -1071,6 +1072,15 @@ async function deleteTeamMember(env, memberID) {
 }
 
 async function publicTeam(env, parts) {
+  if (parts.length === 2 && parts[1] === 'photo') {
+    const slug = cleanText(parts[0], 120);
+    if (!slug) return json({ ok: false, error: 'INVALID_PROFILE' }, 400);
+    const row = await env.HOTELS_DB.prepare('SELECT photo_object_key,photo_content_type FROM team_members WHERE public_slug=? AND active=1 AND public_visible=1 LIMIT 1').bind(slug).first();
+    if (!row?.photo_object_key) return json({ ok: false, error: 'PHOTO_NOT_FOUND' }, 404);
+    const object = await env.HOTELS_MEDIA.get(row.photo_object_key);
+    if (!object) return json({ ok: false, error: 'PHOTO_NOT_FOUND' }, 404);
+    return new Response(object.body, { headers: { 'content-type': row.photo_content_type || 'image/jpeg', 'cache-control': 'public, max-age=3600' } });
+  }
   if (parts.length === 0) {
     const result = await env.HOTELS_DB.prepare(`SELECT * FROM team_members WHERE active=1 AND public_visible=1 ORDER BY is_owner DESC, sort_order ASC, last_name COLLATE NOCASE, first_name COLLATE NOCASE`).all();
     return json({ ok: true, members: (result.results || []).map(row => mapTeamMember(row, false)) }, 200, PUBLIC_CACHE_HEADERS);
@@ -1158,10 +1168,21 @@ async function createPilgrim(env, identity) {
 }
 
 function pilgrimPublicID(id) { return String(Number(id || 0)).padStart(6, '0'); }
+function bookingPublicNumber(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return `#${String(Math.trunc(number)).padStart(4, '0')}`;
+}
+async function allocateBookingNumber(env) {
+  const row = await env.HOTELS_DB.prepare('UPDATE booking_number_sequence SET next_number=next_number+1 WHERE id=1 RETURNING next_number-1 AS booking_number').first();
+  const number = Number(row?.booking_number || 0);
+  if (!number) throw new Error('BOOKING_NUMBER_ALLOCATION_FAILED');
+  return number;
+}
 
 function tripMap(row) {
   if (!row) return null;
-  return { tripID:row.id, bookingID:row.booking_id, pilgrimID:pilgrimPublicID(row.pilgrim_id), status:normalizedTripStatus(row.status), paymentStatus:row.payment_status||'', confirmationNumber:row.confirmation_number||'', internalNotes:row.internal_notes||'', startDate:row.start_date||null, endDate:row.end_date||null, createdAt:row.created_at, updatedAt:row.updated_at, completedAt:row.completed_at||null };
+  return { tripID:row.id, bookingID:row.booking_id, bookingNumber:Number(row.booking_number||0)||null, bookingDisplayNumber:bookingPublicNumber(row.booking_number), pilgrimID:pilgrimPublicID(row.pilgrim_id), status:normalizedTripStatus(row.status), paymentStatus:row.payment_status||'', confirmationNumber:row.confirmation_number||'', internalNotes:row.internal_notes||'', startDate:row.start_date||null, endDate:row.end_date||null, createdAt:row.created_at, updatedAt:row.updated_at, completedAt:row.completed_at||null };
 }
 
 async function sourceBookingPayload(env, bookingID) {
@@ -1201,8 +1222,9 @@ async function syncBookingTrip(env, raw) {
   let pilgrim;
   if (!trip) {
     pilgrim = await createPilgrim(env, identity); if (!pilgrim) return null;
-    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-      .bind(`trip-${crypto.randomUUID()}`,bookingID,pilgrim.id,tripStatusFromBooking(effectiveRaw),startDate,endDate,JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
+    const bookingNumber = await allocateBookingNumber(env);
+    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,pilgrim.id,tripStatusFromBooking(effectiveRaw),startDate,endDate,JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
   } else {
     pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
     pilgrim = await updatePilgrimIdentityFields(env,pilgrim,identity);
@@ -1223,7 +1245,7 @@ function canonicalPilgrimName(pilgrim, identity=null) {
   return [firstName,lastName].filter(Boolean).join(' ').trim() || safeHumanText(pilgrim?.display_name||identity?.displayName||'',220) || 'Паломник';
 }
 async function bookingPilgrimName(env,bookingID,fallback='') { const row=await env.HOTELS_DB.prepare(`SELECT p.first_name,p.last_name,p.display_name FROM pilgrim_trips t JOIN pilgrims p ON p.id=t.pilgrim_id WHERE t.booking_id=? LIMIT 1`).bind(bookingID).first().catch(()=>null); return canonicalPilgrimName(row,{displayName:fallback}); }
-function augmentBooking(raw,linked) { const identity=bookingIdentity(raw); return {...raw,clientName:canonicalPilgrimName(linked?.pilgrim,identity),pilgrimID:linked?.pilgrim?pilgrimPublicID(linked.pilgrim.id):null,tripID:linked?.trip?.id||null,operationStatus:linked?.trip?.status||tripStatusFromBooking(raw)}; }
+function augmentBooking(raw,linked) { const identity=bookingIdentity(raw); return {...raw,clientName:canonicalPilgrimName(linked?.pilgrim,identity),pilgrimID:linked?.pilgrim?pilgrimPublicID(linked.pilgrim.id):null,bookingNumber:Number(linked?.trip?.booking_number||0)||null,bookingDisplayNumber:bookingPublicNumber(linked?.trip?.booking_number),tripID:linked?.trip?.id||null,operationStatus:linked?.trip?.status||tripStatusFromBooking(raw)}; }
 async function cleanupOrphanLegacyPilgrims(env) { await env.HOTELS_DB.prepare(`DELETE FROM pilgrims WHERE NOT EXISTS (SELECT 1 FROM pilgrim_trips t WHERE t.pilgrim_id=pilgrims.id) AND NOT EXISTS (SELECT 1 FROM iumrah_accounts a WHERE a.pilgrim_id=pilgrims.id)`).run().catch(()=>{}); }
 
 async function operationsBookings(request, env) {
@@ -1325,6 +1347,18 @@ async function rawBookingForDetail(request, env, bookingID) {
   return null;
 }
 
+async function generatorPricingReport(env, raw) {
+  const trace = raw?.generatorTrace && typeof raw.generatorTrace === 'object' ? raw.generatorTrace : {};
+  const quoteID = cleanText(trace?.quoteId || raw?.quoteId, 180);
+  if (!quoteID) return null;
+  let row;
+  try { row = await env.HOTELS_DB.prepare('SELECT audit_json FROM package_quote_audits WHERE quote_id=? LIMIT 1').bind(quoteID).first(); }
+  catch { return null; }
+  const audit = parseJSONObject(row?.audit_json);
+  if (!audit || !Object.keys(audit).length) return null;
+  return { ...audit, selection: trace };
+}
+
 async function operationsBookingDetail(request, env, bookingID) {
   const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM booking_tombstones WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
   if (deleted) return json({ ok: false, error: 'BOOKING_DELETED' }, 404);
@@ -1333,6 +1367,7 @@ async function operationsBookingDetail(request, env, bookingID) {
   const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
   const pilgrim = trip ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first() : null;
   const pricingSnapshot = trip ? parseJSONObject(trip.pricing_snapshot_json) : extractPricingSnapshot(resolved.raw);
+  const pricingReportSource = trip ? { ...parseJSONObject(trip.booking_snapshot_json), ...resolved.raw } : resolved.raw;
   let pricingLines = flattenPricingLines(pricingSnapshot);
   if (!pricingLines.length) pricingLines = flattenPricingLines(resolved.raw);
   const [history, flightRows, assignment] = await Promise.all([
@@ -1346,6 +1381,7 @@ async function operationsBookingDetail(request, env, bookingID) {
     operation: tripMap(trip),
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
+    pricingReport: await generatorPricingReport(env, pricingReportSource),
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
     flights: (flightRows.results || []).map(mapTripFlight),
@@ -1710,7 +1746,7 @@ async function registerClientPushDevice(request,env){
 
 async function requireBookingToken(request,env,bookingID,options={}){
  const bookingToken=cleanText(request.headers.get('x-booking-token'),1024);if(!bookingToken)return {ok:false,response:json({ok:false,error:'UNAUTHORIZED'},401)};const base=String(env.BOOKINGS_PUBLIC_URL||'https://iumrah.app/api/bookings').replace(/\/$/,'');let response;try{response=await fetch(`${base}/${encodeURIComponent(bookingID)}`,{method:'GET',headers:{'x-booking-token':bookingToken,'accept':'application/json','user-agent':request.headers.get('user-agent')||'iumrah-client'},redirect:'manual'});}catch{return {ok:false,response:json({ok:false,error:'BOOKING_AUTH_UNAVAILABLE'},503)}}if(response.status===404)return {ok:false,response:json({ok:false,error:'BOOKING_NOT_FOUND'},404)};if(!response.ok)return {ok:false,response:json({ok:false,error:'BOOKING_ACCESS_DENIED'},403)};const payload=await response.json().catch(()=>null);const booking=payload?.booking||payload;if(!booking||cleanText(booking?.id,180)!==bookingID)return {ok:false,response:json({ok:false,error:'BOOKING_ACCESS_DENIED'},403)};
- let linked=null;try{linked=await syncBookingTrip(env,booking);}catch(error){console.error('CLIENT_BOOKING_SYNC_FAILED',bookingID,error);if(options.syncTrip!==false)return {ok:false,response:json({ok:false,error:'BOOKING_SYNC_FAILED'},503)}}if(linked?.deleted)return {ok:false,response:json({ok:false,error:'BOOKING_DELETED'},410)};let trip=linked?.trip||await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first().catch(()=>null);return {ok:true,booking,trip,user:{displayName:linked?.pilgrim?canonicalPilgrimName(linked.pilgrim):'Паломник'},bootstrap:true};
+ let linked=null;if(options.syncTrip!==false){try{linked=await syncBookingTrip(env,booking);}catch(error){console.error('CLIENT_BOOKING_SYNC_FAILED',bookingID,error);return {ok:false,response:json({ok:false,error:'BOOKING_SYNC_FAILED'},503)}}}if(linked?.deleted)return {ok:false,response:json({ok:false,error:'BOOKING_DELETED'},410)};let trip=linked?.trip||await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first().catch(()=>null);return {ok:true,booking,trip,user:{displayName:linked?.pilgrim?canonicalPilgrimName(linked.pilgrim):'Паломник'},bootstrap:true};
 }
 
 async function requireIumrahAccount(request,env){
@@ -1776,13 +1812,33 @@ async function handleClientAccount(request,env,parts){
  if(parts.length===1&&parts[0]==='session'&&request.method==='GET'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;return json({ok:true,account:accountProfile(auth.pilgrim)});}
  if(parts.length===1&&parts[0]==='profile'&&request.method==='PUT'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;const payload=await request.json().catch(()=>null);if(!payload)return json({ok:false,error:'INVALID_JSON'},400);const firstName=safeHumanText(payload.firstName,120)||'',lastName=safeHumanText(payload.lastName,120)||'',phone=cleanText(payload.phone,100)||'',email=cleanText(payload.email,220)||'',telegram=cleanText(payload.telegram,120)||'',whatsapp=cleanText(payload.whatsapp,120)||'';if(!firstName||!lastName)return json({ok:false,error:'PROFILE_NAME_REQUIRED'},400);const displayName=[firstName,lastName].filter(Boolean).join(' ').trim();await env.HOTELS_DB.prepare('UPDATE pilgrims SET first_name=?,last_name=?,display_name=?,phone=?,email=?,telegram=?,whatsapp=?,updated_at=? WHERE id=?').bind(firstName,lastName,displayName,phone,email,telegram,whatsapp,new Date().toISOString(),auth.pilgrim.id).run();const pilgrim=await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(auth.pilgrim.id).first();return json({ok:true,account:accountProfile(pilgrim)});}
  if(parts.length===1&&parts[0]==='logout'&&request.method==='POST'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;await env.HOTELS_DB.prepare('UPDATE iumrah_account_sessions SET revoked_at=? WHERE token_hash=?').bind(new Date().toISOString(),auth.tokenHash).run();return json({ok:true});}
- if(parts.length===1&&parts[0]==='link-booking'&&request.method==='POST'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID,180);if(!bookingID)return json({ok:false,error:'BOOKING_ID_REQUIRED'},400);const boot=await requireBookingToken(request,env,bookingID,{syncTrip:true});if(!boot.ok)return boot.response;const old=boot.trip;const canonicalID=Number(auth.pilgrim.id);if(old.pilgrim_id!==canonicalID){await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?,updated_at=? WHERE booking_id=?').bind(canonicalID,new Date().toISOString(),bookingID).run();await recalcPilgrimStats(env,old.pilgrim_id);await recalcPilgrimStats(env,canonicalID);const orphan=await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM pilgrim_trips WHERE pilgrim_id=?').bind(old.pilgrim_id).first();const oldAccount=await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM iumrah_accounts WHERE pilgrim_id=?').bind(old.pilgrim_id).first();if(Number(orphan?.count||0)===0&&!oldAccount)await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(old.pilgrim_id).run().catch(()=>{});}return json({ok:true,pilgrimID:pilgrimPublicID(canonicalID)});}
+ if(parts.length===1&&parts[0]==='link-booking'&&request.method==='POST'){
+  const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;
+  const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID,180);if(!bookingID)return json({ok:false,error:'BOOKING_ID_REQUIRED'},400);
+  // Validate the one-time booking token without creating a temporary pilgrim. The
+  // canonical Iumrah account owns the trip from its first operational row.
+  const boot=await requireBookingToken(request,env,bookingID,{syncTrip:false});if(!boot.ok)return boot.response;
+  const canonicalID=Number(auth.pilgrim.id);const now=new Date().toISOString();
+  let trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if(!trip){
+    const sourcePayload=await sourceBookingPayload(env,bookingID);const effectiveRaw=mergeSourceBooking(boot.booking,sourcePayload);const pricing=extractPricingSnapshot(effectiveRaw);const bookingNumber=await allocateBookingNumber(env);
+    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,canonicalID,tripStatusFromBooking(effectiveRaw),cleanText(effectiveRaw?.startDate,64),cleanText(effectiveRaw?.endDate,64),JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
+  }else if(Number(trip.pilgrim_id)!==canonicalID){
+    const oldID=Number(trip.pilgrim_id||0);
+    await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?,updated_at=? WHERE booking_id=?').bind(canonicalID,now,bookingID).run();
+    await recalcPilgrimStats(env,oldID);const orphan=await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM pilgrim_trips WHERE pilgrim_id=?').bind(oldID).first();const oldAccount=await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM iumrah_accounts WHERE pilgrim_id=?').bind(oldID).first();if(oldID&&Number(orphan?.count||0)===0&&!oldAccount)await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(oldID).run().catch(()=>{});
+  }
+  const identity=bookingIdentity(boot.booking);await updatePilgrimIdentityFields(env,auth.pilgrim,identity);await recalcPilgrimStats(env,canonicalID);
+  trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  return json({ok:true,pilgrimID:pilgrimPublicID(canonicalID),bookingNumber:Number(trip?.booking_number||0)||null,bookingDisplayNumber:bookingPublicNumber(trip?.booking_number)});
+ }
  return methodNotAllowed();
 }
 async function recalcPilgrimStats(env,id){if(!id)return;const r=await env.HOTELS_DB.prepare('SELECT COUNT(*) count,MAX(COALESCE(end_date,created_at)) last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(id).first();await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(r?.count||0),r?.last_trip||null,new Date().toISOString(),id).run();}
 async function listAccountTrips(env,pilgrimID){const rows=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(pilgrimID).all();return json({ok:true,trips:(rows.results||[]).map(tripMap)});}
 async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID)});}
-async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID)});}
+async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);if(trip&&payload?.generatorTrace&&typeof payload.generatorTrace==='object'){const snapshot=parseJSONObject(trip.booking_snapshot_json);snapshot.generatorTrace=payload.generatorTrace;await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,updated_at=? WHERE id=?').bind(JSON.stringify(snapshot),new Date().toISOString(),trip.id).run();trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();}return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID)});}
 
 function travelerCountsFromSnapshot(raw){const t=raw?.input?.travelers||raw?.travelers||{};return {adults:Math.max(1,Number(t.adults||1)),children:Math.max(0,Number(t.children||0)),infants:Math.max(0,Number(t.infants||0))};}
 async function ensureTravelerRows(env,bookingID,trip){const existing=await env.HOTELS_DB.prepare('SELECT COUNT(*) count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();if(Number(existing?.count||0)>0)return;const c=travelerCountsFromSnapshot(parseJSONObject(trip.booking_snapshot_json));let pos=0;const stm=[];for(const [type,count] of [['adult',c.adults],['child',c.children],['infant',c.infants]])for(let i=0;i<count;i++){pos++;stm.push(env.HOTELS_DB.prepare('INSERT OR IGNORE INTO booking_travelers(id,booking_id,position,traveler_type) VALUES(?,?,?,?)').bind(`traveler-${crypto.randomUUID()}`,bookingID,pos,type));}if(stm.length)await env.HOTELS_DB.batch(stm);}

@@ -48,7 +48,7 @@ struct OverviewView: View {
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text("BOOKING OPERATIONS").font(.caption2.bold()).tracking(2.2).foregroundStyle(.white.opacity(0.52))
-                    Text(checking == 0 ? "Очередь подтверждений чистая." : "\(checking) заявок ждут подтверждения.")
+                    Text(checking == 0 ? "Очередь подтверждений чистая." : "\(checking) бронирований ждут подтверждения.")
                         .font(.system(size: 38, weight: .bold)).tracking(-1.9).foregroundStyle(.white)
                     Text("Мобильный центр управления iumrah. Данные бронирований берутся из текущей D1 базы.")
                         .font(.subheadline).foregroundStyle(.white.opacity(0.62))
@@ -62,7 +62,7 @@ struct OverviewView: View {
                 )
 
                 HStack(spacing: 10) {
-                    StatCard(title: "ВСЕГО", value: store.bookings.count, subtitle: "заявок")
+                    StatCard(title: "ВСЕГО", value: store.bookings.count, subtitle: "бронирований")
                     StatCard(title: "НАЛИЧИЕ", value: checking, subtitle: "проверить", attention: true)
                 }
                 HStack(spacing: 10) {
@@ -71,7 +71,7 @@ struct OverviewView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack { Text("Последние заявки").font(.title2.bold()); Spacer(); if store.loading { ProgressView() } }
+                    HStack { Text("Последние бронирования").font(.title2.bold()); Spacer(); if store.loading { ProgressView() } }
                     ForEach(store.bookings.prefix(5)) { booking in
                         NavigationLink {
                             BookingDetailView(bookingID: booking.id)
@@ -155,9 +155,17 @@ struct BookingRow: View {
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
+                    if let bookingNumber = booking.bookingDisplayNumber, !bookingNumber.isEmpty {
+                        Text("Бронь \(bookingNumber)")
+                            .font(.caption.monospaced().weight(.bold))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 28)
+                            .background(Color.black.opacity(0.055), in: Capsule())
+                    }
                     if let pilgrimID = booking.pilgrimID, !pilgrimID.isEmpty {
                         HStack(spacing: 5) {
-                            Text("ID \(pilgrimID)")
+                            Text("Iumrah ID \(pilgrimID)")
                                 .monospaced()
                             Image(systemName: "doc.on.doc")
                                 .font(.system(size: 10, weight: .semibold))
@@ -172,7 +180,7 @@ struct BookingRow: View {
                             Button {
                                 UIPasteboard.general.string = pilgrimID
                             } label: {
-                                Label("Копировать ID", systemImage: "doc.on.doc")
+                                Label("Копировать Iumrah ID", systemImage: "doc.on.doc")
                             }
                         }
                     }

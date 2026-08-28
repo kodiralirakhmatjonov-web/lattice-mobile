@@ -42,13 +42,13 @@ struct BookingCheckoutAdminCard: View {
             if let checkout {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 10) {
-                        readinessPill(title: "ID \(checkout.iumrahID)", ready: checkout.accountActive, icon: "person.crop.circle.badge.checkmark")
+                        readinessPill(title: "Iumrah ID \(checkout.iumrahID)", ready: checkout.accountActive, icon: "person.crop.circle.badge.checkmark")
                         readinessPill(title: "Анкеты \(checkout.travelers.filter(\.completed).count)/\(checkout.travelers.count)", ready: checkout.allTravelersComplete, icon: "person.text.rectangle")
                         readinessPill(title: "Чек \(checkout.receipts.isEmpty ? "—" : "✓")", ready: !checkout.receipts.isEmpty, icon: "doc.text.image")
                     }
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
-                            readinessPill(title: "ID \(checkout.iumrahID)", ready: checkout.accountActive, icon: "person.crop.circle.badge.checkmark")
+                            readinessPill(title: "Iumrah ID \(checkout.iumrahID)", ready: checkout.accountActive, icon: "person.crop.circle.badge.checkmark")
                             readinessPill(title: "Анкеты \(checkout.travelers.filter(\.completed).count)/\(checkout.travelers.count)", ready: checkout.allTravelersComplete, icon: "person.text.rectangle")
                         }
                         readinessPill(title: "Чек \(checkout.receipts.isEmpty ? "—" : "✓")", ready: !checkout.receipts.isEmpty, icon: "doc.text.image")

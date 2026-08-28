@@ -13,7 +13,7 @@ enum TripStatus: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .availabilityCheck: return "Новая заявка · Проверка наличия"
+        case .availabilityCheck: return "Новый пакет создан · Проверка наличия"
         case .paymentPending: return "Наличие подтверждено · Оплата и данные паломников"
         case .bookingConfirmed: return "Оплачено · Бронирование подтверждено"
         case .readyToTravel: return "Документы готовы · Готово к поездке"
@@ -119,6 +119,8 @@ struct BusinessTeamResponse: Codable { let ok: Bool; let members: [BusinessTeamM
 struct BookingOperation: Codable, Hashable {
     let tripID: String
     let bookingID: String
+    let bookingNumber: Int?
+    let bookingDisplayNumber: String?
     let pilgrimID: String
     let status: String
     let paymentStatus: String
@@ -139,6 +141,109 @@ struct BookingPricingLine: Codable, Identifiable, Hashable {
     let group: String
     let amount: Double
     let currency: String
+}
+
+struct BookingPricingReport: Codable, Hashable {
+    let quoteId: String
+    let pricingVersion: String
+    let currency: String
+    let context: BookingPricingContext
+    let selectedPricingInputs: BookingPricingInputs
+    let components: [BookingPricingComponent]
+    let totals: BookingPricingTotals
+    let selection: BookingGeneratorSelection?
+}
+
+struct BookingPricingContext: Codable, Hashable {
+    let tier: String
+    let includeMadinah: Bool
+    let totalDays: Int
+    let travelers: BookingPricingTravelers
+    let roomCount: Int
+    let vehicleCount: Int
+}
+
+struct BookingPricingTravelers: Codable, Hashable {
+    let adults: Int
+    let children: Int
+    let infants: Int
+    let rooms: Int
+}
+
+struct BookingPricingInputs: Codable, Hashable {
+    let outbound: BookingPricingFare
+    let inbound: BookingPricingFare
+    let makkahHotel: BookingPricingHotelInput
+    let madinahHotel: BookingPricingHotelInput?
+}
+
+struct BookingPricingFare: Codable, Hashable {
+    let candidateId: String
+    let amount: Double
+    let currency: String
+    let fareScope: String
+    let providerId: String
+    let observedAt: String
+    let travelDate: String
+    let normalizedGroupUsd: Double
+}
+
+struct BookingPricingHotelInput: Codable, Hashable {
+    let amountUsd: Double
+    let unit: String
+    let nights: Int
+    let hotelId: String?
+    let roomId: String?
+    let pricingMode: String?
+}
+
+struct BookingPricingComponent: Codable, Identifiable, Hashable {
+    var id: String { code }
+    let code: String
+    let label: String
+    let supplierCostUsd: Double
+}
+
+struct BookingPricingTotals: Codable, Hashable {
+    let supplierCostUsd: Double
+    let markupRate: Double
+    let markupAmountUsd: Double
+    let subtotalAfterMarkupUsd: Double
+    let paymentFeeRate: Double
+    let paymentFeeAmountUsd: Double
+    let calculatedSellingPriceUsd: Double
+    let publicPricePerPilgrimUsd: Double
+    let publicTotalUsd: Double
+    let roundingDifferenceUsd: Double
+    let estimatedProfitUsd: Double
+}
+
+struct BookingGeneratorSelection: Codable, Hashable {
+    let quoteId: String?
+    let outbound: BookingGeneratorFlightSelection?
+    let inbound: BookingGeneratorFlightSelection?
+    let makkahHotel: BookingGeneratorHotelSelection?
+    let madinahHotel: BookingGeneratorHotelSelection?
+}
+
+struct BookingGeneratorFlightSelection: Codable, Hashable {
+    let candidateId: String?
+    let airline: String
+    let flightNumbers: String
+    let origin: String
+    let destination: String
+    let departureAt: String
+    let arrivalAt: String
+    let source: String
+}
+
+struct BookingGeneratorHotelSelection: Codable, Hashable {
+    let hotelId: String
+    let hotelName: String
+    let city: String
+    let roomId: String?
+    let roomName: String?
+    let roomCategory: String?
 }
 
 struct BookingRequestField: Codable, Identifiable, Hashable {
@@ -246,6 +351,7 @@ struct BookingDetailResponse: Codable {
     let operation: BookingOperation?
     let pilgrim: PilgrimSummary?
     let pricingLines: [BookingPricingLine]
+    let pricingReport: BookingPricingReport?
     let requestFields: [BookingRequestField]
     let statusHistory: [BookingStatusHistoryItem]
     let flights: [BookingFlight]?

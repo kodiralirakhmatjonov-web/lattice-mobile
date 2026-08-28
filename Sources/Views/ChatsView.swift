@@ -159,7 +159,9 @@ private struct ThreadCard: View {
                     .font(.subheadline).foregroundStyle(thread.unreadForStaff ? .primary : .secondary)
                     .fontWeight(thread.unreadForStaff ? .semibold : .regular).lineLimit(2)
                 HStack(spacing: 5) {
-                    Text(thread.booking.pilgrimID.map { "ID \($0)" } ?? "ID —").monospaced()
+                    Text(thread.booking.bookingDisplayNumber.map { "Бронь \($0)" } ?? "Бронь #----").monospaced()
+                    Text("·")
+                    Text(thread.booking.pilgrimID.map { "Iumrah ID \($0)" } ?? "Iumrah ID —").monospaced()
                     Text("·")
                     Text("\(thread.booking.originCode) → \(thread.booking.outboundDestination)")
                     if thread.unreadForStaff { Spacer(); Circle().fill(.black).frame(width: 8, height: 8) }
@@ -187,7 +189,7 @@ private struct NewChatBookingPicker: View {
             NavigationLink { ChatConversationView(booking: booking) } label: {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(businessPilgrimName(booking)).font(.subheadline.bold())
-                    Text("\(booking.pilgrimID.map { "ID \($0)" } ?? "ID —") · \(booking.originCode) → \(booking.outboundDestination) · \(booking.startDate)")
+                    Text("\(booking.bookingDisplayNumber.map { "Бронь \($0)" } ?? "Бронь #----") · \(booking.pilgrimID.map { "Iumrah ID \($0)" } ?? "Iumrah ID —") · \(booking.originCode) → \(booking.outboundDestination)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -246,7 +248,7 @@ struct ChatConversationView: View {
             HStack(spacing: 11) {
                 ZStack { Circle().fill(.black); Image(systemName: "suitcase.rolling.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white) }.frame(width: 36, height: 36)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(booking.pilgrimID.map { "ID \($0)" } ?? "ID —") · \(booking.travelerCount) чел.").font(.caption.bold())
+                    Text("\(booking.bookingDisplayNumber.map { "Бронь \($0)" } ?? "Бронь #----") · \(booking.pilgrimID.map { "Iumrah ID \($0)" } ?? "Iumrah ID —") · \(booking.travelerCount) чел.").font(.caption.bold())
                     Text("\(booking.startDate) – \(booking.endDate)").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer(); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
