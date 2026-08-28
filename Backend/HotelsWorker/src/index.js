@@ -342,10 +342,10 @@ function clientNotificationCopy(localeRaw, type, value) {
   const lang = locale.startsWith('uz-cyrl') ? 'uz-cyrl' : locale.startsWith('uz') ? 'uz' : locale.startsWith('en') ? 'en' : 'ru';
   if (type === 'status') {
     const labels = {
-      ru: { new:'Новое', availability_check:'Проверка наличия', payment_pending:'Ожидает оплаты', paid:'Оплачено', booking_confirmed:'Бронирование подтверждено', documents_ready:'Документы готовы', ready_to_travel:'Готово к поездке', in_trip:'В поездке', completed:'Поездка завершена', cancelled:'Отменено' },
-      en: { new:'New', availability_check:'Availability check', payment_pending:'Payment pending', paid:'Paid', booking_confirmed:'Booking confirmed', documents_ready:'Documents ready', ready_to_travel:'Ready to travel', in_trip:'In trip', completed:'Trip completed', cancelled:'Cancelled' },
-      uz: { new:'Yangi', availability_check:'Mavjudlik tekshirilmoqda', payment_pending:'To‘lov kutilmoqda', paid:'To‘langan', booking_confirmed:'Bron tasdiqlandi', documents_ready:'Hujjatlar tayyor', ready_to_travel:'Safarga tayyor', in_trip:'Safarda', completed:'Safar yakunlandi', cancelled:'Bekor qilindi' },
-      'uz-cyrl': { new:'Янги', availability_check:'Мавжудлик текширилмоқда', payment_pending:'Тўлов кутилмоқда', paid:'Тўланган', booking_confirmed:'Брон тасдиқланди', documents_ready:'Ҳужжатлар тайёр', ready_to_travel:'Сафарга тайёр', in_trip:'Сафарда', completed:'Сафар якунланди', cancelled:'Бекор қилинди' }
+      ru: { availability_check:'Новая заявка · Проверка наличия', payment_pending:'Наличие подтверждено · Оплата и данные паломников', booking_confirmed:'Оплачено · Бронирование подтверждено', ready_to_travel:'Документы готовы · Готово к поездке', in_trip:'Паломник в поездке', completed:'Поездка завершена', cancelled:'Отменено' },
+      en: { availability_check:'New request · Availability check', payment_pending:'Availability confirmed · Payment & pilgrim details', booking_confirmed:'Paid · Booking confirmed', ready_to_travel:'Documents ready · Ready to travel', in_trip:'Pilgrim in trip', completed:'Trip completed', cancelled:'Cancelled' },
+      uz: { availability_check:'Yangi ariza · Mavjudlik tekshiruvi', payment_pending:'Mavjudlik tasdiqlandi · To‘lov va ziyoratchi ma’lumotlari', booking_confirmed:'To‘langan · Bron tasdiqlandi', ready_to_travel:'Hujjatlar tayyor · Safarga tayyor', in_trip:'Ziyoratchi safarda', completed:'Safar yakunlandi', cancelled:'Bekor qilindi' },
+      'uz-cyrl': { availability_check:'Янги ариза · Мавжудлик текшируви', payment_pending:'Мавжудлик тасдиқланди · Тўлов ва зиёратчи маълумотлари', booking_confirmed:'Тўланган · Брон тасдиқланди', ready_to_travel:'Ҳужжатлар тайёр · Сафарга тайёр', in_trip:'Зиёратчи сафарда', completed:'Сафар якунланди', cancelled:'Бекор қилинди' }
     };
     const titles = { ru:'Статус поездки обновлён', en:'Trip status updated', uz:'Safar holati yangilandi', 'uz-cyrl':'Сафар ҳолати янгиланди' };
     return { title: titles[lang], body: labels[lang][value] || String(value || '') };
@@ -469,10 +469,16 @@ async function handleCatalog(request, env, url) {
 }
 
 
-const TRIP_STATUSES = new Set([
-  'new','availability_check','payment_pending','paid','booking_confirmed',
-  'documents_ready','ready_to_travel','in_trip','completed','cancelled'
-]);
+const TRIP_STATUSES = new Set(['availability_check','payment_pending','booking_confirmed','ready_to_travel','in_trip','completed','cancelled']);
+const TRIP_TRANSITIONS = {
+  availability_check: new Set(['availability_check','payment_pending','cancelled']),
+  payment_pending: new Set(['payment_pending','availability_check','booking_confirmed','cancelled']),
+  booking_confirmed: new Set(['booking_confirmed','payment_pending','ready_to_travel','cancelled']),
+  ready_to_travel: new Set(['ready_to_travel','booking_confirmed','in_trip','cancelled']),
+  in_trip: new Set(['in_trip','completed','cancelled']),
+  completed: new Set(['completed']),
+  cancelled: new Set(['cancelled'])
+};
 
 async function handleBusinessOperations(request, env, url, parts, user) {
   if (parts.length === 1 && parts[0] === 'me') {
@@ -505,6 +511,12 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     if (parts.length === 2 && request.method === 'PATCH') return updateOperationsBooking(request, env, bookingID, user);
     if (parts.length === 2 && request.method === 'DELETE') return deleteOperationsBooking(request, env, bookingID, user);
     if (parts.length === 3 && parts[2] === 'assignments' && request.method === 'PATCH') return updateBookingAssignments(request, env, bookingID);
+    if (parts.length === 3 && parts[2] === 'payment' && request.method === 'PUT') return saveBookingPaymentInstructions(request, env, bookingID, user);
+    if (parts.length === 3 && parts[2] === 'payment-qr' && request.method === 'POST') return uploadBookingPaymeQR(request, env, bookingID, user);
+    if (parts.length === 4 && parts[2] === 'receipt' && parts[3] === 'media' && request.method === 'GET') return serveAdminPaymentReceipt(env, bookingID, url.searchParams.get('id'));
+    if (parts.length === 5 && parts[2] === 'travelers' && parts[4] === 'passport' && request.method === 'GET') return serveAdminTravelerPassport(env, bookingID, Number(parts[3]));
+    if (parts.length === 3 && parts[2] === 'documents' && request.method === 'POST') return uploadBookingTravelDocument(request, env, bookingID, user, url);
+    if (parts.length === 4 && parts[2] === 'documents' && request.method === 'GET') return serveAdminTravelDocument(env, bookingID, parts[3]);
     if (parts.length === 4 && parts[2] === 'flights' && request.method === 'PUT') return saveVerifiedBookingFlight(request, env, bookingID, parts[3]);
     if (parts.length === 4 && parts[2] === 'flights' && request.method === 'DELETE') return deleteBookingFlight(env, bookingID, parts[3]);
     return methodNotAllowed();
@@ -871,7 +883,7 @@ async function purgeOperationalBooking(env, bookingID) {
     env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM trip_assignments WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM pilgrim_trips WHERE booking_id=?').bind(bookingID),
-    env.HOTELS_DB.prepare('DELETE FROM deleted_bookings WHERE booking_id=?').bind(bookingID)
+    env.HOTELS_DB.prepare('DELETE FROM booking_tombstones WHERE booking_id=?').bind(bookingID)
   ]);
 
   await Promise.allSettled((attachments.results || []).map(row => env.HOTELS_MEDIA.delete(row.object_key)));
@@ -880,7 +892,7 @@ async function purgeOperationalBooking(env, bookingID) {
     const pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(trip.pilgrim_id).first().catch(() => null);
     const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(trip.pilgrim_id).first();
     const count = Number(stats?.count || 0);
-    if (count === 0 && pilgrim && String(pilgrim.client_user_id || '').startsWith('legacy-booking:') && !String(pilgrim.first_name || '').trim() && !String(pilgrim.last_name || '').trim()) {
+    if (count === 0 && pilgrim && !(await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM iumrah_accounts WHERE pilgrim_id=?').bind(trip.pilgrim_id).first().catch(() => null))) {
       await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).run();
     } else {
       // The pilgrim identity is permanent. Deleting one trip must never recycle its six-digit iumrah ID.
@@ -1107,15 +1119,14 @@ function deepScalar(root, candidates) {
   return '';
 }
 
-function bookingIdentity(raw, bookingID) {
-  const clientUserID = deepScalar(raw, ['clientUserID','client_user_id','userID','userId','profileID','profileId','accountID','accountId']);
+function bookingIdentity(raw) {
   const firstName = deepScalar(raw, ['firstName','first_name','givenName']);
   const lastName = deepScalar(raw, ['lastName','last_name','familyName','surname']);
   const explicitName = deepScalar(raw, ['clientName','customerName','travelerName','travellerName','fullName','displayName']);
   const email = deepScalar(raw, ['email','emailAddress']);
   const phone = deepScalar(raw, ['phone','phoneNumber','mobile','whatsapp']);
   const displayName = [firstName, lastName].filter(Boolean).join(' ').trim() || explicitName || '';
-  return { clientUserID, firstName, lastName, displayName, email, phone };
+  return { firstName, lastName, displayName, email, phone };
 }
 
 function extractPricingSnapshot(raw) {
@@ -1126,57 +1137,31 @@ function extractPricingSnapshot(raw) {
   return {};
 }
 
-function tripStatusFromBooking(raw) {
-  const rawStatus = String(raw?.status || '').toUpperCase();
+function normalizedTripStatus(value) {
+  const raw = String(value || '').toUpperCase();
   const map = {
-    NEW: 'new', AVAILABILITY_CHECK: 'availability_check', PAYMENT_PENDING: 'payment_pending', PAID: 'paid',
-    BOOKING_CONFIRMED: 'booking_confirmed', DOCUMENTS_READY: 'documents_ready', READY_TO_TRAVEL: 'ready_to_travel',
-    IN_TRIP: 'in_trip', COMPLETED: 'completed', CANCELLED: 'cancelled'
+    NEW:'availability_check', AVAILABILITY_CHECK:'availability_check',
+    PAYMENT_PENDING:'payment_pending', PAID:'booking_confirmed', BOOKING_CONFIRMED:'booking_confirmed',
+    DOCUMENTS_READY:'ready_to_travel', READY_TO_TRAVEL:'ready_to_travel',
+    IN_TRIP:'in_trip', COMPLETED:'completed', CANCELLED:'cancelled'
   };
-  return map[rawStatus] || 'new';
+  return map[raw] || (TRIP_STATUSES.has(String(value || '').toLowerCase()) ? String(value).toLowerCase() : 'availability_check');
 }
 
-async function ensurePilgrim(env, identity, bookingID) {
-  let row = null;
-  if (identity.clientUserID) row = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(identity.clientUserID).first();
-  if (!row && identity.email) row = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE LOWER(email)=LOWER(?) AND email<>'' LIMIT 1").bind(identity.email).first();
-  if (!row && identity.phone) row = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE phone=? AND phone<>'' LIMIT 1").bind(identity.phone).first();
-  if (!row) {
-    const fallbackUserID = identity.clientUserID || `legacy-booking:${bookingID}`;
-    const now = new Date().toISOString();
-    const result = await env.HOTELS_DB.prepare(`INSERT INTO pilgrims (client_user_id, first_name, last_name, display_name, phone, email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(fallbackUserID, identity.firstName, identity.lastName, identity.displayName || 'Имя не синхронизировано', identity.phone, identity.email, now, now).run();
-    const id = Number(result?.meta?.last_row_id || 0);
-    row = id ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(id).first() : await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=?').bind(fallbackUserID).first();
-  } else {
-    const now = new Date().toISOString();
-    await env.HOTELS_DB.prepare(`UPDATE pilgrims SET first_name=CASE WHEN ?<>'' THEN ? ELSE first_name END, last_name=CASE WHEN ?<>'' THEN ? ELSE last_name END, display_name=CASE WHEN ?<>'' THEN ? ELSE display_name END, phone=CASE WHEN ?<>'' THEN ? ELSE phone END, email=CASE WHEN ?<>'' THEN ? ELSE email END, updated_at=? WHERE id=?`)
-      .bind(identity.firstName, identity.firstName, identity.lastName, identity.lastName, identity.displayName, identity.displayName, identity.phone, identity.phone, identity.email, identity.email, now, row.id).run();
-    row = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(row.id).first();
-  }
-  return row;
+function tripStatusFromBooking(raw) { return normalizedTripStatus(raw?.status); }
+
+async function createPilgrim(env, identity) {
+  const now = new Date().toISOString();
+  const result = await env.HOTELS_DB.prepare(`INSERT INTO pilgrims (first_name,last_name,display_name,phone,email,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`)
+    .bind(identity.firstName || '', identity.lastName || '', identity.displayName || 'Паломник', identity.phone || '', identity.email || '', now, now).run();
+  return env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(Number(result?.meta?.last_row_id || 0)).first();
 }
 
-function pilgrimPublicID(id) {
-  return String(Number(id || 0)).padStart(6, '0');
-}
+function pilgrimPublicID(id) { return String(Number(id || 0)).padStart(6, '0'); }
 
 function tripMap(row) {
   if (!row) return null;
-  return {
-    tripID: row.id,
-    bookingID: row.booking_id,
-    pilgrimID: pilgrimPublicID(row.pilgrim_id),
-    status: row.status,
-    paymentStatus: row.payment_status || '',
-    confirmationNumber: row.confirmation_number || '',
-    internalNotes: row.internal_notes || '',
-    startDate: row.start_date || null,
-    endDate: row.end_date || null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    completedAt: row.completed_at || null
-  };
+  return { tripID:row.id, bookingID:row.booking_id, pilgrimID:pilgrimPublicID(row.pilgrim_id), status:normalizedTripStatus(row.status), paymentStatus:row.payment_status||'', confirmationNumber:row.confirmation_number||'', internalNotes:row.internal_notes||'', startDate:row.start_date||null, endDate:row.end_date||null, createdAt:row.created_at, updatedAt:row.updated_at, completedAt:row.completed_at||null };
 }
 
 async function sourceBookingPayload(env, bookingID) {
@@ -1194,184 +1179,58 @@ function mergeSourceBooking(raw, sourcePayload) {
   return merged;
 }
 
-function isWeakPilgrimOwner(value) {
-  const text = String(value || '');
-  return !text || text.startsWith('legacy-booking:') || text.startsWith('booking-token:');
-}
-
-function mergedBookingIdentity(raw, storedSnapshot, currentPilgrim, bookingID) {
-  const upstream = bookingIdentity(raw || {}, bookingID);
-  const stored = bookingIdentity(storedSnapshot || {}, bookingID);
-  const currentOwner = String(currentPilgrim?.client_user_id || '');
-  const firstName = upstream.firstName || stored.firstName || safeHumanText(currentPilgrim?.first_name || '', 120) || '';
-  const lastName = upstream.lastName || stored.lastName || safeHumanText(currentPilgrim?.last_name || '', 120) || '';
-  const explicitDisplay = upstream.displayName || stored.displayName || safeHumanText(currentPilgrim?.display_name || '', 220) || '';
-  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim() || (explicitDisplay === 'Паломник' ? '' : explicitDisplay);
-  return {
-    clientUserID: upstream.clientUserID || stored.clientUserID || (!isWeakPilgrimOwner(currentOwner) ? currentOwner : ''),
-    firstName,
-    lastName,
-    displayName,
-    email: upstream.email || stored.email || cleanText(currentPilgrim?.email, 220) || '',
-    phone: upstream.phone || stored.phone || cleanText(currentPilgrim?.phone, 100) || ''
-  };
-}
-
 async function updatePilgrimIdentityFields(env, pilgrim, identity) {
   if (!pilgrim) return null;
   const now = new Date().toISOString();
-  await env.HOTELS_DB.prepare(`UPDATE pilgrims SET
-      first_name=CASE WHEN ?<>'' THEN ? ELSE first_name END,
-      last_name=CASE WHEN ?<>'' THEN ? ELSE last_name END,
-      display_name=CASE WHEN ?<>'' THEN ? ELSE display_name END,
-      phone=CASE WHEN ?<>'' THEN ? ELSE phone END,
-      email=CASE WHEN ?<>'' THEN ? ELSE email END,
-      updated_at=? WHERE id=?`)
-    .bind(identity.firstName, identity.firstName, identity.lastName, identity.lastName,
-      identity.displayName, identity.displayName, identity.phone, identity.phone,
-      identity.email, identity.email, now, pilgrim.id).run();
+  await env.HOTELS_DB.prepare(`UPDATE pilgrims SET first_name=CASE WHEN ?<>'' THEN ? ELSE first_name END,last_name=CASE WHEN ?<>'' THEN ? ELSE last_name END,display_name=CASE WHEN ?<>'' THEN ? ELSE display_name END,phone=CASE WHEN ?<>'' THEN ? ELSE phone END,email=CASE WHEN ?<>'' THEN ? ELSE email END,updated_at=? WHERE id=?`)
+    .bind(identity.firstName||'',identity.firstName||'',identity.lastName||'',identity.lastName||'',identity.displayName||'',identity.displayName||'',identity.phone||'',identity.phone||'',identity.email||'',identity.email||'',now,pilgrim.id).run();
   return env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(pilgrim.id).first();
 }
 
 async function syncBookingTrip(env, raw) {
-  const bookingID = cleanText(raw?.id, 180);
-  if (!bookingID) return null;
-  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
-  if (deleted) return { deleted: true, pilgrim: null, trip: null };
-
+  const bookingID = cleanText(raw?.id, 180); if (!bookingID) return null;
+  const tombstone = await env.HOTELS_DB.prepare('SELECT booking_id FROM booking_tombstones WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(()=>null);
+  if (tombstone) return { deleted:true, pilgrim:null, trip:null };
   const sourcePayload = await sourceBookingPayload(env, bookingID);
   const effectiveRaw = mergeSourceBooking(raw, sourcePayload);
-  const existing = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  let trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   const now = new Date().toISOString();
+  const identity = bookingIdentity(effectiveRaw);
   const pricing = extractPricingSnapshot(effectiveRaw);
-  const startDate = cleanText(effectiveRaw?.startDate, 64);
-  const endDate = cleanText(effectiveRaw?.endDate, 64);
-
-  if (!existing) {
-    const identity = bookingIdentity(effectiveRaw, bookingID);
-    const pilgrim = await ensurePilgrim(env, identity, bookingID);
-    if (!pilgrim) return null;
-    const tripID = `trip-${crypto.randomUUID()}`;
-    await env.HOTELS_DB.prepare(`
-      INSERT INTO pilgrim_trips (id, booking_id, pilgrim_id, client_user_id, status, start_date, end_date, booking_snapshot_json, pricing_snapshot_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(tripID, bookingID, pilgrim.id, identity.clientUserID || pilgrim.client_user_id || null, tripStatusFromBooking(effectiveRaw), startDate, endDate, JSON.stringify(effectiveRaw), JSON.stringify(pricing), now, now).run();
-    const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
-    const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
-    await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
-      .bind(Number(stats?.count || 0), stats?.last_trip || null, now, pilgrim.id).run();
-    return { pilgrim, trip };
+  const startDate = cleanText(effectiveRaw?.startDate,64); const endDate = cleanText(effectiveRaw?.endDate,64);
+  let pilgrim;
+  if (!trip) {
+    pilgrim = await createPilgrim(env, identity); if (!pilgrim) return null;
+    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,pilgrim.id,tripStatusFromBooking(effectiveRaw),startDate,endDate,JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
+  } else {
+    pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
+    pilgrim = await updatePilgrimIdentityFields(env,pilgrim,identity);
+    const previous = parseJSONObject(trip.booking_snapshot_json); const merged={...previous,...effectiveRaw};
+    const priceJSON = pricing && Object.keys(pricing).length ? JSON.stringify(pricing) : (trip.pricing_snapshot_json||'{}');
+    await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET start_date=COALESCE(?,start_date),end_date=COALESCE(?,end_date),booking_snapshot_json=?,pricing_snapshot_json=?,updated_at=? WHERE booking_id=?`)
+      .bind(startDate,endDate,JSON.stringify(merged),priceJSON,now,bookingID).run();
   }
-
-  // Existing operational trips already have a canonical pilgrim relationship.
-  // Never replace it with a new anonymous "legacy-booking" pilgrim just because
-  // the upstream admin projection omitted pilgrimProfile/name fields.
-  const currentPilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(existing.pilgrim_id).first().catch(() => null);
-  const previousBooking = parseJSONObject(existing.booking_snapshot_json);
-  const identity = mergedBookingIdentity(effectiveRaw, previousBooking, currentPilgrim, bookingID);
-  let pilgrim = currentPilgrim;
-
-  let canonical = null;
-  if (identity.clientUserID) {
-    canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(identity.clientUserID).first().catch(() => null);
-  }
-  if (!canonical && identity.phone) {
-    const result = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE phone=? AND phone<>'' AND client_user_id NOT LIKE 'legacy-booking:%' ORDER BY id ASC LIMIT 2").bind(identity.phone).all().catch(() => ({ results: [] }));
-    if ((result.results || []).length === 1) canonical = result.results[0];
-  }
-  if (!canonical && identity.email) {
-    const result = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE LOWER(email)=LOWER(?) AND email<>'' AND client_user_id NOT LIKE 'legacy-booking:%' ORDER BY id ASC LIMIT 2").bind(identity.email).all().catch(() => ({ results: [] }));
-    if ((result.results || []).length === 1) canonical = result.results[0];
-  }
-  if (!canonical && identity.firstName && identity.lastName && pilgrim && isWeakPilgrimOwner(pilgrim.client_user_id)) {
-    const result = await env.HOTELS_DB.prepare("SELECT * FROM pilgrims WHERE LOWER(first_name)=LOWER(?) AND LOWER(last_name)=LOWER(?) AND client_user_id NOT LIKE 'legacy-booking:%' ORDER BY id ASC LIMIT 2")
-      .bind(identity.firstName, identity.lastName).all().catch(() => ({ results: [] }));
-    if ((result.results || []).length === 1) canonical = result.results[0];
-  }
-
-  if (canonical) {
-    pilgrim = canonical;
-  } else if (identity.clientUserID && pilgrim && isWeakPilgrimOwner(pilgrim.client_user_id)) {
-    try {
-      await env.HOTELS_DB.prepare('UPDATE pilgrims SET client_user_id=?, updated_at=? WHERE id=?').bind(identity.clientUserID, now, pilgrim.id).run();
-      pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(pilgrim.id).first();
-    } catch (error) {
-      const retry = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(identity.clientUserID).first().catch(() => null);
-      if (retry) pilgrim = retry;
-      else throw error;
-    }
-  }
-
-  if (!pilgrim) pilgrim = await ensurePilgrim(env, identity, bookingID);
-  if (!pilgrim) return null;
-  pilgrim = await updatePilgrimIdentityFields(env, pilgrim, identity);
-
-  const mergedBooking = { ...previousBooking, ...effectiveRaw };
-  if ((!effectiveRaw?.pilgrimProfile || typeof effectiveRaw.pilgrimProfile !== 'object') && previousBooking?.pilgrimProfile) {
-    mergedBooking.pilgrimProfile = previousBooking.pilgrimProfile;
-  }
-  if (identity.firstName || identity.lastName) {
-    mergedBooking.pilgrimProfile = {
-      ...(mergedBooking.pilgrimProfile && typeof mergedBooking.pilgrimProfile === 'object' ? mergedBooking.pilgrimProfile : {}),
-      firstName: identity.firstName,
-      lastName: identity.lastName
-    };
-    mergedBooking.clientName = identity.displayName;
-  }
-  if (identity.clientUserID) mergedBooking.clientUserID = identity.clientUserID;
-
-  const hasPricing = pricing && typeof pricing === 'object' && Object.keys(pricing).length > 0;
-  const pricingJSON = hasPricing ? JSON.stringify(pricing) : (existing.pricing_snapshot_json || '{}');
-  await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET pilgrim_id=?, client_user_id=COALESCE(?, client_user_id), start_date=COALESCE(?, start_date), end_date=COALESCE(?, end_date), booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=? WHERE booking_id=?`)
-    .bind(pilgrim.id, identity.clientUserID || null, startDate, endDate, JSON.stringify(mergedBooking), pricingJSON, now, bookingID).run();
-
-  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
-  const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
-  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
-    .bind(Number(stats?.count || 0), stats?.last_trip || null, now, pilgrim.id).run();
-  return { pilgrim, trip };
+  trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  pilgrim=pilgrim||await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
+  const stats=await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count,MAX(COALESCE(end_date,created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
+  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(stats?.count||0),stats?.last_trip||null,now,pilgrim.id).run();
+  return {pilgrim,trip};
 }
 
-function canonicalPilgrimName(pilgrim, identity = null) {
-  const firstName = safeHumanText(pilgrim?.first_name || identity?.firstName || '', 120) || '';
-  const lastName = safeHumanText(pilgrim?.last_name || identity?.lastName || '', 120) || '';
-  return [firstName, lastName].filter(Boolean).join(' ').trim()
-    || safeHumanText(pilgrim?.display_name || identity?.displayName || '', 220)
-    || 'Имя не синхронизировано';
+function canonicalPilgrimName(pilgrim, identity=null) {
+  const firstName=safeHumanText(pilgrim?.first_name||identity?.firstName||'',120)||''; const lastName=safeHumanText(pilgrim?.last_name||identity?.lastName||'',120)||'';
+  return [firstName,lastName].filter(Boolean).join(' ').trim() || safeHumanText(pilgrim?.display_name||identity?.displayName||'',220) || 'Паломник';
 }
-
-async function bookingPilgrimName(env, bookingID, fallback = '') {
-  const row = await env.HOTELS_DB.prepare(`
-    SELECT p.first_name, p.last_name, p.display_name
-    FROM pilgrim_trips t JOIN pilgrims p ON p.id=t.pilgrim_id
-    WHERE t.booking_id=? LIMIT 1
-  `).bind(bookingID).first().catch(() => null);
-  return canonicalPilgrimName(row, { displayName: fallback });
-}
-
-function augmentBooking(raw, linked) {
-  const identity = bookingIdentity(raw, raw?.id || '');
-  return {
-    ...raw,
-    clientName: canonicalPilgrimName(linked?.pilgrim, identity),
-    pilgrimID: linked?.pilgrim ? pilgrimPublicID(linked.pilgrim.id) : null,
-    tripID: linked?.trip?.id || null,
-    operationStatus: linked?.trip?.status || tripStatusFromBooking(raw)
-  };
-}
-
-async function cleanupOrphanLegacyPilgrims(env) {
-  await env.HOTELS_DB.prepare(`DELETE FROM pilgrims
-    WHERE (client_user_id LIKE 'legacy-booking:%' OR client_user_id LIKE 'booking-token:%')
-      AND NOT EXISTS (SELECT 1 FROM pilgrim_trips t WHERE t.pilgrim_id=pilgrims.id)`)
-    .run().catch(error => console.warn('LEGACY_PILGRIM_CLEANUP_FAILED', error));
-}
+async function bookingPilgrimName(env,bookingID,fallback='') { const row=await env.HOTELS_DB.prepare(`SELECT p.first_name,p.last_name,p.display_name FROM pilgrim_trips t JOIN pilgrims p ON p.id=t.pilgrim_id WHERE t.booking_id=? LIMIT 1`).bind(bookingID).first().catch(()=>null); return canonicalPilgrimName(row,{displayName:fallback}); }
+function augmentBooking(raw,linked) { const identity=bookingIdentity(raw); return {...raw,clientName:canonicalPilgrimName(linked?.pilgrim,identity),pilgrimID:linked?.pilgrim?pilgrimPublicID(linked.pilgrim.id):null,tripID:linked?.trip?.id||null,operationStatus:linked?.trip?.status||tripStatusFromBooking(raw)}; }
+async function cleanupOrphanLegacyPilgrims(env) { await env.HOTELS_DB.prepare(`DELETE FROM pilgrims WHERE NOT EXISTS (SELECT 1 FROM pilgrim_trips t WHERE t.pilgrim_id=pilgrims.id) AND NOT EXISTS (SELECT 1 FROM iumrah_accounts a WHERE a.pilgrim_id=pilgrims.id)`).run().catch(()=>{}); }
 
 async function operationsBookings(request, env) {
   let bookings;
   try { bookings = await fetchUpstreamBookings(request, env); }
   catch (error) { return json({ ok: false, error: String(error?.message || 'BOOKINGS_UNAVAILABLE') }, 502); }
-  const deletedRows = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings').all().catch(() => ({ results: [] }));
+  const deletedRows = await env.HOTELS_DB.prepare('SELECT booking_id FROM booking_tombstones').all().catch(() => ({ results: [] }));
   const deletedIDs = new Set((deletedRows.results || []).map(row => String(row.booking_id || '')));
   const source = bookings.filter(item => !deletedIDs.has(String(item?.id || ''))).slice(0, 500);
   const output = new Array(source.length);
@@ -1467,7 +1326,7 @@ async function rawBookingForDetail(request, env, bookingID) {
 }
 
 async function operationsBookingDetail(request, env, bookingID) {
-  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM booking_tombstones WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
   if (deleted) return json({ ok: false, error: 'BOOKING_DELETED' }, 404);
   const resolved = await rawBookingForDetail(request, env, bookingID);
   if (!resolved) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
@@ -1490,17 +1349,120 @@ async function operationsBookingDetail(request, env, bookingID) {
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
     flights: (flightRows.results || []).map(mapTripFlight),
-    assignment
+    assignment,
+    checkout: await adminCheckoutDetail(env, bookingID, trip)
   });
 }
 
-function sourceStatusFromTripStatus(value) {
-  const map = {
-    new: 'NEW', availability_check: 'AVAILABILITY_CHECK', payment_pending: 'PAYMENT_PENDING', paid: 'PAID',
-    booking_confirmed: 'BOOKING_CONFIRMED', documents_ready: 'DOCUMENTS_READY', ready_to_travel: 'READY_TO_TRAVEL',
-    in_trip: 'IN_TRIP', completed: 'COMPLETED', cancelled: 'CANCELLED'
+
+async function adminCheckoutDetail(env, bookingID, trip) {
+  if (!trip) return null;
+  await ensureTravelerRows(env, bookingID, trip);
+  const [travelers, payment, receipts, documents, account] = await Promise.all([
+    env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? ORDER BY position').bind(bookingID).all(),
+    env.HOTELS_DB.prepare('SELECT * FROM booking_payment_instructions WHERE booking_id=?').bind(bookingID).first(),
+    env.HOTELS_DB.prepare('SELECT id,payment_method,note,review_status,created_at,content_type FROM booking_payment_receipts WHERE booking_id=? ORDER BY created_at DESC').bind(bookingID).all(),
+    env.HOTELS_DB.prepare('SELECT id,document_kind,title,content_type,created_at FROM booking_travel_documents WHERE booking_id=? ORDER BY created_at').bind(bookingID).all(),
+    env.HOTELS_DB.prepare('SELECT activated_at,last_login_at FROM iumrah_accounts WHERE pilgrim_id=?').bind(trip.pilgrim_id).first()
+  ]);
+  const travelerItems = (travelers.results || []).map(row => ({
+    ...travelerMap(row),
+    passportMediaURL: row.passport_object_key ? `/api/admin/hotels/operations/bookings/${encodeURIComponent(bookingID)}/travelers/${Number(row.position)}/passport` : null
+  }));
+  return {
+    iumrahID: pilgrimPublicID(trip.pilgrim_id),
+    accountActive: !!account,
+    activatedAt: account?.activated_at || null,
+    allTravelersComplete: travelerItems.length > 0 && travelerItems.every(item => item.completed),
+    travelers: travelerItems,
+    payment: {
+      visaCardNumber: payment?.visa_card_number || '',
+      visaHolder: payment?.visa_holder || '',
+      hasPaymeQR: !!payment?.payme_qr_object_key,
+      humoCardNumber: payment?.humo_card_number || '',
+      humoHolder: payment?.humo_holder || '',
+      instructions: payment?.instructions || ''
+    },
+    receipts: (receipts.results || []).map(r => ({
+      id: r.id,
+      paymentMethod: r.payment_method || 'other',
+      note: r.note || '',
+      reviewStatus: r.review_status || 'submitted',
+      createdAt: r.created_at || '',
+      contentType: r.content_type || null,
+      mediaURL: `/api/admin/hotels/operations/bookings/${encodeURIComponent(bookingID)}/receipt/media?id=${encodeURIComponent(r.id)}`
+    })),
+    documents: (documents.results || []).map(d => ({
+      id: d.id,
+      documentKind: d.document_kind || 'other',
+      title: d.title || 'Документ поездки',
+      contentType: d.content_type || 'application/octet-stream',
+      createdAt: d.created_at || '',
+      mediaURL: `/api/admin/hotels/operations/bookings/${encodeURIComponent(bookingID)}/documents/${encodeURIComponent(d.id)}`
+    }))
   };
-  return map[String(value || '')] || 'NEW';
+}
+
+async function saveBookingPaymentInstructions(request, env, bookingID, user) {
+  const trip=await env.HOTELS_DB.prepare('SELECT status FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  if(!trip||!['availability_check','payment_pending'].includes(normalizedTripStatus(trip.status))) return json({ok:false,error:'PAYMENT_INSTRUCTIONS_LOCKED'},409);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ok:false,error:'INVALID_JSON'},400);
+  const visaCard = cleanText(payload.visaCardNumber, 80) || '';
+  const visaHolder = safeHumanText(payload.visaHolder, 160) || '';
+  const humoCard = cleanText(payload.humoCardNumber, 80) || '';
+  const humoHolder = safeHumanText(payload.humoHolder, 160) || '';
+  const instructions = safeHumanText(payload.instructions, 1500) || '';
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`INSERT INTO booking_payment_instructions(booking_id,visa_card_number,visa_holder,humo_card_number,humo_holder,instructions,updated_by,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(booking_id) DO UPDATE SET visa_card_number=excluded.visa_card_number,visa_holder=excluded.visa_holder,humo_card_number=excluded.humo_card_number,humo_holder=excluded.humo_holder,instructions=excluded.instructions,updated_by=excluded.updated_by,updated_at=excluded.updated_at`)
+    .bind(bookingID,visaCard,visaHolder,humoCard,humoHolder,instructions,cleanText(user?.login,180),now).run();
+  return json({ok:true,checkout:await adminCheckoutDetail(env,bookingID,await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first())});
+}
+
+async function uploadBookingPaymeQR(request, env, bookingID, user) {
+  const trip=await env.HOTELS_DB.prepare('SELECT status FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  if(!trip||!['availability_check','payment_pending'].includes(normalizedTripStatus(trip.status))) return json({ok:false,error:'PAYMENT_INSTRUCTIONS_LOCKED'},409);
+  const up = await privateImageUpload(request, env, `payment-qr/${bookingID}`); if (!up.ok) return up.response;
+  const current = await env.HOTELS_DB.prepare('SELECT payme_qr_object_key FROM booking_payment_instructions WHERE booking_id=?').bind(bookingID).first();
+  const now=new Date().toISOString();
+  await env.HOTELS_DB.prepare(`INSERT INTO booking_payment_instructions(booking_id,payme_qr_object_key,payme_qr_content_type,updated_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(booking_id) DO UPDATE SET payme_qr_object_key=excluded.payme_qr_object_key,payme_qr_content_type=excluded.payme_qr_content_type,updated_by=excluded.updated_by,updated_at=excluded.updated_at`).bind(bookingID,up.key,up.ct,cleanText(user?.login,180),now).run();
+  if(current?.payme_qr_object_key) await env.HOTELS_MEDIA.delete(current.payme_qr_object_key).catch(()=>{});
+  return json({ok:true});
+}
+
+async function serveAdminPaymentReceipt(env, bookingID, receiptID) {
+  const id=safeID(receiptID); if(!id)return json({ok:false,error:'INVALID_RECEIPT'},400);
+  const row=await env.HOTELS_DB.prepare('SELECT object_key,content_type FROM booking_payment_receipts WHERE id=? AND booking_id=?').bind(id,bookingID).first();
+  if(!row)return json({ok:false,error:'RECEIPT_NOT_FOUND'},404); const obj=await env.HOTELS_MEDIA.get(row.object_key); if(!obj)return json({ok:false,error:'RECEIPT_NOT_FOUND'},404);
+  return new Response(obj.body,{headers:{'content-type':row.content_type||'image/jpeg','cache-control':'private, no-store'}});
+}
+
+async function serveAdminTravelerPassport(env, bookingID, position) {
+  if (!Number.isInteger(position) || position < 1) return json({ok:false,error:'INVALID_TRAVELER'},400);
+  const row = await env.HOTELS_DB.prepare('SELECT passport_object_key,passport_content_type FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first();
+  if (!row?.passport_object_key) return json({ok:false,error:'PASSPORT_NOT_FOUND'},404);
+  const obj = await env.HOTELS_MEDIA.get(row.passport_object_key);
+  if (!obj) return json({ok:false,error:'PASSPORT_NOT_FOUND'},404);
+  return new Response(obj.body,{headers:{'content-type':row.passport_content_type||'image/jpeg','cache-control':'private, no-store'}});
+}
+
+async function uploadBookingTravelDocument(request, env, bookingID, user, url) {
+  const kind=cleanText(url.searchParams.get('kind'),32)||'other'; if(!['visa','voucher','insurance','ticket','other'].includes(kind))return json({ok:false,error:'INVALID_DOCUMENT_KIND'},400);
+  const title=safeHumanText(url.searchParams.get('title'),180)||'Документ поездки';
+  const ct=String(request.headers.get('content-type')||'').split(';')[0].trim().toLowerCase();
+  if(!(ct==='application/pdf'||ct.startsWith('image/')))return json({ok:false,error:'DOCUMENT_REQUIRED'},415);
+  const bytes=await request.arrayBuffer(); if(!bytes.byteLength||bytes.byteLength>15_000_000)return json({ok:false,error:'DOCUMENT_TOO_LARGE'},413);
+  const ext=ct==='application/pdf'?'pdf':ct.includes('png')?'png':'jpg'; const id=crypto.randomUUID(); const key=`private/travel-documents/${bookingID}/${id}.${ext}`;
+  await env.HOTELS_MEDIA.put(key,bytes,{httpMetadata:{contentType:ct}});
+  await env.HOTELS_DB.prepare('INSERT INTO booking_travel_documents(id,booking_id,document_kind,title,object_key,content_type,byte_size,created_by) VALUES(?,?,?,?,?,?,?,?)').bind(id,bookingID,kind,title,key,ct,bytes.byteLength,cleanText(user?.login,180)).run();
+  await sendClientPush(env,bookingID,'Документ поездки готов',title,{type:'travel_document',bookingID}).catch(()=>{});
+  return json({ok:true,id});
+}
+async function serveAdminTravelDocument(env,bookingID,id){const safe=safeID(id);if(!safe)return json({ok:false,error:'INVALID_DOCUMENT'},400);const row=await env.HOTELS_DB.prepare('SELECT object_key,content_type FROM booking_travel_documents WHERE id=? AND booking_id=?').bind(safe,bookingID).first();if(!row)return json({ok:false,error:'DOCUMENT_NOT_FOUND'},404);const obj=await env.HOTELS_MEDIA.get(row.object_key);if(!obj)return json({ok:false,error:'DOCUMENT_NOT_FOUND'},404);return new Response(obj.body,{headers:{'content-type':row.content_type,'cache-control':'private, no-store'}});}
+
+function sourceStatusFromTripStatus(value) {
+  const map = { availability_check:'AVAILABILITY_CHECK', payment_pending:'PAYMENT_PENDING', booking_confirmed:'BOOKING_CONFIRMED', ready_to_travel:'READY_TO_TRAVEL', in_trip:'IN_TRIP', completed:'COMPLETED', cancelled:'CANCELLED' };
+  return map[String(value || '')] || 'AVAILABILITY_CHECK';
 }
 
 async function persistSourceBookingStatus(env, bookingID, status) {
@@ -1517,6 +1479,11 @@ async function persistSourceBookingStatus(env, bookingID, status) {
     ? await env.BOOKINGS_DB.prepare(sql).bind(sourceStatus, now, bookingID).run()
     : await env.BOOKINGS_DB.prepare(sql).bind(sourceStatus, bookingID).run();
   if (Number(result?.meta?.changes ?? 0) < 1) throw new Error('BOOKING_NOT_FOUND_IN_SOURCE_DB');
+  if (names.has('payload_json')) {
+    await env.BOOKINGS_DB.prepare(
+      `UPDATE bookings SET payload_json=json_set(payload_json,'$.status',?) WHERE id=? AND json_valid(payload_json)=1`
+    ).bind(sourceStatus, bookingID).run().catch(error => console.warn('BOOKING_PAYLOAD_STATUS_SYNC_FAILED', bookingID, error));
+  }
   const persisted = await env.BOOKINGS_DB.prepare('SELECT status FROM bookings WHERE id=? LIMIT 1').bind(bookingID).first();
   if (!persisted || String(persisted.status || '').toUpperCase() !== sourceStatus) throw new Error('BOOKING_SOURCE_STATUS_NOT_PERSISTED');
   return sourceStatus;
@@ -1529,16 +1496,39 @@ async function updateOperationsBooking(request, env, bookingID, user) {
   if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
   const nextStatus = cleanText(payload?.status, 80) || trip.status;
   if (!TRIP_STATUSES.has(nextStatus)) return json({ ok: false, error: 'INVALID_TRIP_STATUS' }, 400);
+  const currentStatus = normalizedTripStatus(trip.status);
+  if (!(TRIP_TRANSITIONS[currentStatus] || new Set([currentStatus])).has(nextStatus)) {
+    return json({ ok:false, error:'INVALID_STATUS_TRANSITION' }, 409);
+  }
   const paymentStatus = safeHumanText(payload?.paymentStatus ?? trip.payment_status ?? '', 160) || '';
   const confirmationNumber = safeHumanText(payload?.confirmationNumber ?? trip.confirmation_number ?? '', 200) || '';
   const internalNotes = safeHumanText(payload?.internalNotes ?? trip.internal_notes ?? '', 4000) || '';
   const now = new Date().toISOString();
   const completedAt = nextStatus === 'completed' ? (trip.completed_at || now) : null;
 
+  if (nextStatus === 'payment_pending' && nextStatus !== currentStatus) {
+    const payment = await env.HOTELS_DB.prepare('SELECT visa_card_number,humo_card_number,payme_qr_object_key FROM booking_payment_instructions WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+    if (!(payment?.visa_card_number || payment?.humo_card_number || payment?.payme_qr_object_key)) {
+      return json({ ok:false, error:'PAYMENT_INSTRUCTIONS_REQUIRED' }, 409);
+    }
+  }
+
+  if (nextStatus === 'booking_confirmed' && nextStatus !== currentStatus) {
+    await ensureTravelerRows(env, bookingID, trip);
+    const readiness = await adminCheckoutDetail(env, bookingID, trip);
+    if (!readiness?.accountActive) return json({ ok:false, error:'IUMRAH_ACCOUNT_REQUIRED' }, 409);
+    if (!readiness?.allTravelersComplete) return json({ ok:false, error:'TRAVELER_DATA_INCOMPLETE' }, 409);
+    if (!(readiness?.receipts || []).length) return json({ ok:false, error:'PAYMENT_RECEIPT_REQUIRED' }, 409);
+  }
+  if (nextStatus === 'ready_to_travel' && nextStatus !== currentStatus) {
+    const docs = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM booking_travel_documents WHERE booking_id=?').bind(bookingID).first();
+    if (Number(docs?.count || 0) < 1) return json({ ok:false, error:'TRAVEL_DOCUMENT_REQUIRED' }, 409);
+  }
+
   // The status is canonical across both databases: the customer booking row and
   // the Business operational mirror. This keeps filters, Beta and staff screens
   // on the same value instead of maintaining two drifting statuses.
-  if (nextStatus !== trip.status) {
+  if (nextStatus !== currentStatus) {
     try {
       await persistSourceBookingStatus(env, bookingID, nextStatus);
     } catch (error) {
@@ -1550,20 +1540,20 @@ async function updateOperationsBooking(request, env, bookingID, user) {
   const updateResult = await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET status=?, payment_status=?, confirmation_number=?, internal_notes=?, completed_at=?, updated_at=? WHERE booking_id=?`)
     .bind(nextStatus, paymentStatus, confirmationNumber, internalNotes, completedAt, now, bookingID).run();
   if (Number(updateResult?.meta?.changes ?? 0) < 1) {
-    if (nextStatus !== trip.status) await persistSourceBookingStatus(env, bookingID, trip.status).catch(() => {});
+    if (nextStatus !== currentStatus) await persistSourceBookingStatus(env, bookingID, currentStatus).catch(() => {});
     return json({ ok: false, error: 'BOOKING_STATUS_UPDATE_NOT_PERSISTED' }, 500);
   }
 
   const persisted = await env.HOTELS_DB.prepare('SELECT status, payment_status, confirmation_number, internal_notes FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   if (!persisted || String(persisted.status || '') !== nextStatus) {
-    if (nextStatus !== trip.status) await persistSourceBookingStatus(env, bookingID, trip.status).catch(() => {});
+    if (nextStatus !== currentStatus) await persistSourceBookingStatus(env, bookingID, currentStatus).catch(() => {});
     console.error('BOOKING_STATUS_VERIFY_FAILED', bookingID, { expected: nextStatus, actual: persisted?.status || null });
     return json({ ok: false, error: 'BOOKING_STATUS_UPDATE_NOT_PERSISTED' }, 500);
   }
 
-  if (nextStatus !== trip.status) {
+  if (nextStatus !== currentStatus) {
     await env.HOTELS_DB.prepare('INSERT INTO booking_status_history (id, booking_id, old_status, new_status, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(crypto.randomUUID(), bookingID, trip.status, nextStatus, cleanText(user?.login, 180), now).run();
+      .bind(crypto.randomUUID(), bookingID, currentStatus, nextStatus, cleanText(user?.login, 180), now).run();
     await sendClientStatusPush(env, bookingID, nextStatus).catch(error => console.warn('CLIENT_STATUS_PUSH_FAILED', bookingID, error));
   }
 
@@ -1590,7 +1580,7 @@ async function listPilgrims(env, url) {
 
 function parsePilgrimPublicID(value) {
   const text = String(value || '').trim();
-  const match = text.match(/^(?:PILGRIM-)?(\d{1,12})$/i);
+  const match = text.match(/^(\d{6})$/);
   return match ? Number(match[1]) : null;
 }
 
@@ -1657,332 +1647,132 @@ async function publicPrimaryHotels(env, url) {
 }
 
 async function handleClientOperations(request, env, parts) {
+  if (parts[0] === 'account') return handleClientAccount(request, env, parts.slice(1));
+
   if (parts[0] === 'trips') {
-    if (parts.length === 2 && parts[1] === 'sync' && request.method === 'POST') {
-      const auth = await requireClientSession(request, env);
-      if (!auth.ok) return auth.response;
-      return syncClientTrip(request, env, auth.user);
-    }
     if (parts.length === 1 && request.method === 'GET') {
-      const auth = await requireClientSession(request, env);
-      if (!auth.ok) return auth.response;
-      return listClientTrips(env, auth.user.id);
+      const auth = await requireIumrahAccount(request, env); if (!auth.ok) return auth.response;
+      return listAccountTrips(env, auth.pilgrim.id);
     }
-    const bookingID = cleanText(parts[1], 180);
-    if (parts.length === 3 && bookingID && parts[2] === 'sync' && request.method === 'POST') {
-      const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
-      if (!auth.ok) return auth.response;
-      return syncClientIdentityByBookingToken(request, env, bookingID, auth);
+    const bookingID = cleanText(parts[1],180); if (!bookingID) return json({ok:false,error:'INVALID_BOOKING_ID'},400);
+    if (parts.length === 3 && parts[2] === 'sync' && request.method === 'POST') {
+      const auth = await requireBookingToken(request, env, bookingID, {syncTrip:true}); if (!auth.ok) return auth.response;
+      return syncBookingProfileByToken(request, env, bookingID, auth);
     }
-    if (parts.length === 2 && bookingID && request.method === 'GET') {
-      const auth = await requireClientBooking(request, env, bookingID);
-      if (!auth.ok) return auth.response;
-      return json({ ok: true, trip: tripMap(auth.trip), assignment: await clientBookingAssignmentDetail(env, bookingID) });
+    if (parts.length === 2 && request.method === 'GET') {
+      const auth = await requireClientBooking(request, env, bookingID); if (!auth.ok) return auth.response;
+      return clientTripDetail(env, bookingID, auth.trip);
+    }
+    if (parts.length === 3 && parts[2] === 'checkout' && request.method === 'GET') {
+      const auth=await requireClientBooking(request,env,bookingID); if(!auth.ok)return auth.response;
+      return clientCheckoutDetail(env,bookingID,auth.trip);
+    }
+    if (parts.length === 4 && parts[2] === 'travelers' && request.method === 'PUT') {
+      const auth=await requireIumrahBookingAccount(request,env,bookingID); if(!auth.ok)return auth.response;
+      return saveTravelerForm(request,env,bookingID,Number(parts[3]),auth);
+    }
+    if (parts.length === 4 && parts[2] === 'travelers' && parts[3] === 'passport' && request.method === 'POST') return methodNotAllowed();
+    if (parts.length === 5 && parts[2] === 'travelers' && parts[4] === 'passport' && request.method === 'POST') {
+      const auth=await requireIumrahBookingAccount(request,env,bookingID); if(!auth.ok)return auth.response;
+      return uploadTravelerPassport(request,env,bookingID,Number(parts[3]),auth);
+    }
+    if (parts.length === 3 && parts[2] === 'receipt' && request.method === 'POST') {
+      const auth=await requireIumrahBookingAccount(request,env,bookingID); if(!auth.ok)return auth.response;
+      return uploadPaymentReceipt(request,env,bookingID,auth);
+    }
+    if (parts.length === 4 && parts[2] === 'media' && request.method === 'GET') {
+      const auth=await requireIumrahBookingAccount(request,env,bookingID); if(!auth.ok)return auth.response;
+      return serveClientPrivateMedia(env,bookingID,parts[3]);
     }
     return methodNotAllowed();
   }
 
   if (parts[0] === 'bookings') {
-    const bookingID = cleanText(parts[1], 180);
-    if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
-    if (parts.length === 2 && request.method === 'DELETE') {
-      const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
-      if (!auth.ok) return auth.response;
-      return deleteClientBooking(request, env, bookingID, auth);
-    }
-    return methodNotAllowed();
+    const bookingID=cleanText(parts[1],180); if(!bookingID)return json({ok:false,error:'INVALID_BOOKING_ID'},400);
+    if(parts.length===2&&request.method==='DELETE'){const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false});if(!auth.ok)return auth.response;return deleteClientBooking(request,env,bookingID,auth);} return methodNotAllowed();
   }
-
-  if (parts[0] === 'push') {
-    if (parts.length === 2 && parts[1] === 'devices' && request.method === 'POST') {
-      return registerClientPushDevice(request, env);
-    }
-    return methodNotAllowed();
-  }
-
-  if (parts[0] !== 'chats') return json({ ok: false, error: 'NOT_FOUND' }, 404);
-  const bookingID = cleanText(parts[1], 180);
-  if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
-  // Chat access is authenticated by the booking access token itself. Do not make
-  // messaging depend on the operational pilgrim-trip mirror: a temporary sync/data
-  // issue must never prevent a pilgrim from contacting iumrah Care.
-  const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
-  if (!auth.ok) return auth.response;
-  if (parts.length === 3 && parts[2] === 'messages') {
-    if (request.method === 'GET') return chatMessages(env, bookingID, false);
-    if (request.method === 'POST') return sendClientChatMessage(request, env, bookingID, auth.user);
-  }
-  if (parts.length === 3 && parts[2] === 'attachments' && request.method === 'POST') return sendChatAttachment(request, env, bookingID, auth.user, false);
-  if (parts.length === 3 && parts[2] === 'read' && request.method === 'POST') return markClientChatRead(env, bookingID);
-  if (parts.length === 4 && parts[2] === 'media' && request.method === 'GET') return serveChatAttachment(env, bookingID, parts[3]);
+  if(parts[0]==='push'&&parts.length===2&&parts[1]==='devices'&&request.method==='POST')return registerClientPushDevice(request,env);
+  if(parts[0]!=='chats')return json({ok:false,error:'NOT_FOUND'},404);
+  const bookingID=cleanText(parts[1],180); if(!bookingID)return json({ok:false,error:'INVALID_BOOKING_ID'},400);
+  const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false}); if(!auth.ok)return auth.response;
+  if(parts.length===3&&parts[2]==='messages'){if(request.method==='GET')return chatMessages(env,bookingID,false);if(request.method==='POST')return sendClientChatMessage(request,env,bookingID,auth.user);}
+  if(parts.length===3&&parts[2]==='attachments'&&request.method==='POST')return sendChatAttachment(request,env,bookingID,auth.user,false);
+  if(parts.length===3&&parts[2]==='read'&&request.method==='POST')return markClientChatRead(env,bookingID);
+  if(parts.length===4&&parts[2]==='media'&&request.method==='GET')return serveChatAttachment(env,bookingID,parts[3]);
   return methodNotAllowed();
 }
 
-async function registerClientPushDevice(request, env) {
-  const payload = await request.json().catch(() => null);
-  const bookingID = cleanText(payload?.bookingID || payload?.bookingId, 180);
-  const token = cleanText(payload?.deviceToken, 256)?.toLowerCase();
-  if (!bookingID) return json({ ok: false, error: 'BOOKING_ID_REQUIRED' }, 400);
-  if (!token || !/^[0-9a-f]{32,256}$/.test(token)) return json({ ok: false, error: 'INVALID_DEVICE_TOKEN' }, 400);
-
-  // A valid booking token is sufficient to subscribe this device. The subscription
-  // intentionally does not depend on the operational trip mirror (migration 0011).
-  const auth = await requireClientBooking(request, env, bookingID, { syncTrip: false });
-  if (!auth.ok) return auth.response;
-
-  const environment = payload?.environment === 'development' ? 'development' : 'production';
-  const appBundleID = cleanText(payload?.appBundleID || payload?.appBundleId, 220) || 'com.iumrah.beta';
-  if (appBundleID !== 'com.iumrah.beta') return json({ ok: false, error: 'INVALID_APP_BUNDLE_ID' }, 400);
-  const locale = cleanText(payload?.locale, 32) || 'ru';
-  const now = new Date().toISOString();
-
-  await env.HOTELS_DB.prepare(`
-    INSERT INTO client_push_subscriptions (
-      device_token, booking_id, environment, app_bundle_id, locale, enabled, created_at, updated_at, last_error
-    ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)
-    ON CONFLICT(device_token, booking_id) DO UPDATE SET
-      environment=excluded.environment,
-      app_bundle_id=excluded.app_bundle_id,
-      locale=excluded.locale,
-      enabled=1,
-      updated_at=excluded.updated_at,
-      last_error=NULL
-  `).bind(token, bookingID, environment, appBundleID, locale, now, now).run();
-
-  return json({ ok: true, ready: apnsConfigured(env), bookingID });
+async function registerClientPushDevice(request,env){
+ const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID||payload?.bookingId,180);const token=cleanText(payload?.deviceToken,256)?.toLowerCase();if(!bookingID)return json({ok:false,error:'BOOKING_ID_REQUIRED'},400);if(!token||!/^[0-9a-f]{32,256}$/.test(token))return json({ok:false,error:'INVALID_DEVICE_TOKEN'},400);
+ const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false});if(!auth.ok)return auth.response;const environment=payload?.environment==='development'?'development':'production';const appBundleID=cleanText(payload?.appBundleID||payload?.appBundleId,220)||'com.iumrah.beta';if(appBundleID!=='com.iumrah.beta')return json({ok:false,error:'INVALID_APP_BUNDLE_ID'},400);const locale=cleanText(payload?.locale,32)||'ru';const now=new Date().toISOString();
+ await env.HOTELS_DB.prepare(`INSERT INTO client_push_subscriptions(device_token,booking_id,environment,app_bundle_id,locale,enabled,created_at,updated_at,last_error) VALUES(?,?,?,?,?,1,?,?,NULL) ON CONFLICT(device_token,booking_id) DO UPDATE SET environment=excluded.environment,app_bundle_id=excluded.app_bundle_id,locale=excluded.locale,enabled=1,updated_at=excluded.updated_at,last_error=NULL`).bind(token,bookingID,environment,appBundleID,locale,now,now).run();return json({ok:true,ready:apnsConfigured(env),bookingID});
 }
 
-async function requireBookingToken(request, env, bookingID, options = {}) {
-  const bookingToken = cleanText(request.headers.get('x-booking-token'), 1024);
-  if (!bookingToken) return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
-  const base = String(env.BOOKINGS_PUBLIC_URL || 'https://iumrah.app/api/bookings').replace(/\/$/, '');
-  let response;
-  try {
-    response = await fetch(`${base}/${encodeURIComponent(bookingID)}`, {
-      method: 'GET',
-      headers: {
-        'x-booking-token': bookingToken,
-        'accept': 'application/json',
-        'user-agent': request.headers.get('user-agent') || 'iumrah-client'
-      },
-      redirect: 'manual'
-    });
-  } catch (error) {
-    console.warn('CLIENT_BOOKING_AUTH_UNAVAILABLE', bookingID, error);
-    return { ok: false, response: json({ ok: false, error: 'BOOKING_AUTH_UNAVAILABLE' }, 503) };
-  }
-  if (response.status === 404) return { ok: false, response: json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404) };
-  if (!response.ok) return { ok: false, response: json({ ok: false, error: 'BOOKING_ACCESS_DENIED' }, 403) };
-  const payload = await response.json().catch(() => null);
-  const booking = payload?.booking || payload;
-  const resolvedID = cleanText(booking?.id, 180);
-  if (!booking || resolvedID !== bookingID) return { ok: false, response: json({ ok: false, error: 'BOOKING_ACCESS_DENIED' }, 403) };
-
-  const identity = bookingIdentity(booking, bookingID);
-  const user = {
-    id: identity.clientUserID || `booking-token:${bookingID}`,
-    displayName: identity.displayName,
-    firstName: identity.firstName,
-    lastName: identity.lastName,
-    email: identity.email,
-    phone: identity.phone
-  };
-
-  // Keep the operational mirror up to date when possible, but do not couple chat/push
-  // availability to it. The upstream booking token is the authorization boundary.
-  let linked = null;
-  try {
-    linked = await syncBookingTrip(env, booking);
-  } catch (error) {
-    console.error('CLIENT_BOOKING_SYNC_FAILED', bookingID, error);
-    if (options.syncTrip !== false) {
-      return { ok: false, response: json({ ok: false, error: 'BOOKING_SYNC_FAILED' }, 503) };
-    }
-  }
-
-  if (linked?.deleted) return { ok: false, response: json({ ok: false, error: 'BOOKING_DELETED' }, 410) };
-  let trip = linked?.trip || null;
-  if (!trip && options.syncTrip !== false) {
-    trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
-    if (!trip) return { ok: false, response: json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 409) };
-  }
-
-  return { ok: true, booking, trip, user };
+async function requireBookingToken(request,env,bookingID,options={}){
+ const bookingToken=cleanText(request.headers.get('x-booking-token'),1024);if(!bookingToken)return {ok:false,response:json({ok:false,error:'UNAUTHORIZED'},401)};const base=String(env.BOOKINGS_PUBLIC_URL||'https://iumrah.app/api/bookings').replace(/\/$/,'');let response;try{response=await fetch(`${base}/${encodeURIComponent(bookingID)}`,{method:'GET',headers:{'x-booking-token':bookingToken,'accept':'application/json','user-agent':request.headers.get('user-agent')||'iumrah-client'},redirect:'manual'});}catch{return {ok:false,response:json({ok:false,error:'BOOKING_AUTH_UNAVAILABLE'},503)}}if(response.status===404)return {ok:false,response:json({ok:false,error:'BOOKING_NOT_FOUND'},404)};if(!response.ok)return {ok:false,response:json({ok:false,error:'BOOKING_ACCESS_DENIED'},403)};const payload=await response.json().catch(()=>null);const booking=payload?.booking||payload;if(!booking||cleanText(booking?.id,180)!==bookingID)return {ok:false,response:json({ok:false,error:'BOOKING_ACCESS_DENIED'},403)};
+ let linked=null;try{linked=await syncBookingTrip(env,booking);}catch(error){console.error('CLIENT_BOOKING_SYNC_FAILED',bookingID,error);if(options.syncTrip!==false)return {ok:false,response:json({ok:false,error:'BOOKING_SYNC_FAILED'},503)}}if(linked?.deleted)return {ok:false,response:json({ok:false,error:'BOOKING_DELETED'},410)};let trip=linked?.trip||await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first().catch(()=>null);return {ok:true,booking,trip,user:{displayName:linked?.pilgrim?canonicalPilgrimName(linked.pilgrim):'Паломник'},bootstrap:true};
 }
 
-async function requireClientSession(request, env) {
-  const cookie = request.headers.get('cookie') || '';
-  const authorization = request.headers.get('authorization') || '';
-  if (!cookie && !authorization) return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
-  let response;
-  try {
-    response = await fetch(env.CLIENT_SESSION_URL || 'https://iumrah.app/api/auth/session', {
-      method: 'GET',
-      headers: { 'cookie': cookie, 'authorization': authorization, 'accept': 'application/json', 'user-agent': request.headers.get('user-agent') || 'iumrah-client' },
-      redirect: 'manual'
-    });
-  } catch {
-    return { ok: false, response: json({ ok: false, error: 'CLIENT_AUTH_UNAVAILABLE' }, 503) };
-  }
-  if (!response.ok) return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
-  const payload = await response.json().catch(() => null);
-  const user = payload?.user || payload?.profile || payload;
-  const userID = cleanText(user?.id || user?.userID || user?.userId, 180);
-  if (!userID) return { ok: false, response: json({ ok: false, error: 'CLIENT_ID_MISSING' }, 403) };
-  return { ok: true, user: { ...user, id: userID } };
+async function requireIumrahAccount(request,env){
+ const header=String(request.headers.get('authorization')||'');
+ const token=header.toLowerCase().startsWith('bearer ')?header.slice(7).trim():'';
+ if(!token)return {ok:false,response:json({ok:false,error:'ACCOUNT_AUTH_REQUIRED'},401)};
+ const hash=await sha256Hex(token),now=new Date().toISOString();
+ const row=await env.HOTELS_DB.prepare(`SELECT s.pilgrim_id,s.expires_at,p.id,p.first_name,p.last_name,p.display_name,p.phone,p.email,p.telegram,p.whatsapp,p.created_at,p.updated_at,p.last_trip_at,p.total_trips FROM iumrah_account_sessions s JOIN pilgrims p ON p.id=s.pilgrim_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? LIMIT 1`).bind(hash,now).first();
+ if(!row)return {ok:false,response:json({ok:false,error:'ACCOUNT_SESSION_EXPIRED'},401)};
+ await env.HOTELS_DB.prepare('UPDATE iumrah_account_sessions SET last_used_at=? WHERE token_hash=?').bind(now,hash).run().catch(()=>{});
+ return {ok:true,pilgrim:row,tokenHash:hash,user:{id:pilgrimPublicID(row.id),displayName:canonicalPilgrimName(row)}};
 }
+async function requireIumrahBookingAccount(request,env,bookingID){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth;const trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? AND pilgrim_id=? LIMIT 1').bind(bookingID,auth.pilgrim.pilgrim_id||auth.pilgrim.id).first();if(!trip)return {ok:false,response:json({ok:false,error:'BOOKING_ACCESS_DENIED'},403)};return {...auth,trip};}
+async function requireClientBooking(request,env,bookingID,options={}){const account=await requireIumrahAccount(request,env);if(account.ok){const access=await requireIumrahBookingAccount(request,env,bookingID);if(access.ok)return access;}return requireBookingToken(request,env,bookingID,options);}
 
-async function authorizeClientTrip(env, bookingID, userID) {
-  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  if (!trip || String(trip.client_user_id || '') !== userID) return { ok: false, response: json({ ok: false, error: 'BOOKING_ACCESS_DENIED' }, 403) };
-  return { ok: true, trip };
+function decodePilgrimID(value){const text=String(value||'').trim();if(!/^\d{6}$/.test(text))return 0;return Number(text);}
+function validPassword(value){return typeof value==='string'&&value.length>=8&&value.length<=128;}
+function randomToken(bytes=32){const data=new Uint8Array(bytes);crypto.getRandomValues(data);return base64urlBytes(data);}
+async function passwordDigest(password,salt,iterations){const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:new TextEncoder().encode(salt),iterations},key,256);return base64urlBytes(new Uint8Array(bits));}
+function constantTimeEqual(a,b){const x=new TextEncoder().encode(String(a||'')),y=new TextEncoder().encode(String(b||''));let diff=x.length^y.length;const n=Math.max(x.length,y.length);for(let i=0;i<n;i++)diff|=(x[i%x.length]||0)^(y[i%y.length]||0);return diff===0;}
+async function createAccountSession(env,pilgrimID){const token=randomToken(32),hash=await sha256Hex(token),now=new Date(),expires=new Date(now.getTime()+90*86400_000);await env.HOTELS_DB.prepare('INSERT INTO iumrah_account_sessions(token_hash,pilgrim_id,created_at,expires_at,last_used_at) VALUES(?,?,?,?,?)').bind(hash,pilgrimID,now.toISOString(),expires.toISOString(),now.toISOString()).run();return {token,expiresAt:expires.toISOString()};}
+function accountProfile(p){return {iumrahID:pilgrimPublicID(p.id||p.pilgrim_id),displayName:canonicalPilgrimName(p),firstName:p.first_name||'',lastName:p.last_name||'',phone:p.phone||'',email:p.email||''};}
+async function handleClientAccount(request,env,parts){
+ if(parts.length===1&&parts[0]==='activate'&&request.method==='POST'){const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID,180);const password=String(payload?.password||'');if(!bookingID||!validPassword(password))return json({ok:false,error:'INVALID_ACCOUNT_DATA'},400);const boot=await requireBookingToken(request,env,bookingID,{syncTrip:true});if(!boot.ok)return boot.response;const trip=boot.trip;if(!trip||normalizedTripStatus(trip.status)!=='payment_pending')return json({ok:false,error:'ACCOUNT_ACTIVATION_NOT_AVAILABLE'},409);const existing=await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM iumrah_accounts WHERE pilgrim_id=?').bind(trip.pilgrim_id).first();if(existing)return json({ok:false,error:'ACCOUNT_ALREADY_ACTIVE'},409);const salt=randomToken(18),iterations=210000,hash=await passwordDigest(password,salt,iterations),now=new Date().toISOString();await env.HOTELS_DB.prepare('INSERT INTO iumrah_accounts(pilgrim_id,password_salt,password_hash,password_iterations,activated_at,password_updated_at) VALUES(?,?,?,?,?,?)').bind(trip.pilgrim_id,salt,hash,iterations,now,now).run();const pilgrim=await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();const session=await createAccountSession(env,trip.pilgrim_id);return json({ok:true,account:accountProfile(pilgrim),session});}
+ if(parts.length===1&&parts[0]==='login'&&request.method==='POST'){const payload=await request.json().catch(()=>null);const id=decodePilgrimID(payload?.iumrahID||payload?.id),password=String(payload?.password||'');if(!id||!validPassword(password))return json({ok:false,error:'INVALID_CREDENTIALS'},401);const row=await env.HOTELS_DB.prepare('SELECT a.*,p.* FROM iumrah_accounts a JOIN pilgrims p ON p.id=a.pilgrim_id WHERE a.pilgrim_id=? LIMIT 1').bind(id).first();if(!row)return json({ok:false,error:'INVALID_CREDENTIALS'},401);if(row.locked_until&&Date.parse(row.locked_until)>Date.now())return json({ok:false,error:'ACCOUNT_TEMPORARILY_LOCKED'},423);const expected=await passwordDigest(password,row.password_salt,Number(row.password_iterations||210000));if(!constantTimeEqual(expected,row.password_hash)){const attempts=Number(row.failed_attempts||0)+1;const locked=attempts>=6?new Date(Date.now()+15*60_000).toISOString():null;await env.HOTELS_DB.prepare('UPDATE iumrah_accounts SET failed_attempts=?,locked_until=? WHERE pilgrim_id=?').bind(locked?0:attempts,locked,id).run();return json({ok:false,error:locked?'ACCOUNT_TEMPORARILY_LOCKED':'INVALID_CREDENTIALS'},locked?423:401);}const now=new Date().toISOString();await env.HOTELS_DB.prepare('UPDATE iumrah_accounts SET failed_attempts=0,locked_until=NULL,last_login_at=? WHERE pilgrim_id=?').bind(now,id).run();const session=await createAccountSession(env,id);return json({ok:true,account:accountProfile(row),session});}
+ if(parts.length===1&&parts[0]==='session'&&request.method==='GET'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;return json({ok:true,account:accountProfile(auth.pilgrim)});}
+ if(parts.length===1&&parts[0]==='logout'&&request.method==='POST'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;await env.HOTELS_DB.prepare('UPDATE iumrah_account_sessions SET revoked_at=? WHERE token_hash=?').bind(new Date().toISOString(),auth.tokenHash).run();return json({ok:true});}
+ if(parts.length===1&&parts[0]==='link-booking'&&request.method==='POST'){const auth=await requireIumrahAccount(request,env);if(!auth.ok)return auth.response;const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID,180);if(!bookingID)return json({ok:false,error:'BOOKING_ID_REQUIRED'},400);const boot=await requireBookingToken(request,env,bookingID,{syncTrip:true});if(!boot.ok)return boot.response;const old=boot.trip;const canonicalID=Number(auth.pilgrim.id);if(old.pilgrim_id!==canonicalID){await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?,updated_at=? WHERE booking_id=?').bind(canonicalID,new Date().toISOString(),bookingID).run();await recalcPilgrimStats(env,old.pilgrim_id);await recalcPilgrimStats(env,canonicalID);const orphan=await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM pilgrim_trips WHERE pilgrim_id=?').bind(old.pilgrim_id).first();const oldAccount=await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM iumrah_accounts WHERE pilgrim_id=?').bind(old.pilgrim_id).first();if(Number(orphan?.count||0)===0&&!oldAccount)await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(old.pilgrim_id).run().catch(()=>{});}return json({ok:true,pilgrimID:pilgrimPublicID(canonicalID)});}
+ return methodNotAllowed();
 }
+async function recalcPilgrimStats(env,id){if(!id)return;const r=await env.HOTELS_DB.prepare('SELECT COUNT(*) count,MAX(COALESCE(end_date,created_at)) last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(id).first();await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(r?.count||0),r?.last_trip||null,new Date().toISOString(),id).run();}
+async function listAccountTrips(env,pilgrimID){const rows=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(pilgrimID).all();return json({ok:true,trips:(rows.results||[]).map(tripMap)});}
+async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID)});}
+async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID)});}
 
-async function requireClientBooking(request, env, bookingID, options = {}) {
-  const bookingToken = cleanText(request.headers.get('x-booking-token'), 1024);
-  if (bookingToken) return requireBookingToken(request, env, bookingID, options);
-
-  const auth = await requireClientSession(request, env);
-  if (!auth.ok) return auth;
-  const access = await authorizeClientTrip(env, bookingID, auth.user.id);
-  if (!access.ok) return access;
-  return { ...auth, trip: access.trip };
+function travelerCountsFromSnapshot(raw){const t=raw?.input?.travelers||raw?.travelers||{};return {adults:Math.max(1,Number(t.adults||1)),children:Math.max(0,Number(t.children||0)),infants:Math.max(0,Number(t.infants||0))};}
+async function ensureTravelerRows(env,bookingID,trip){const existing=await env.HOTELS_DB.prepare('SELECT COUNT(*) count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();if(Number(existing?.count||0)>0)return;const c=travelerCountsFromSnapshot(parseJSONObject(trip.booking_snapshot_json));let pos=0;const stm=[];for(const [type,count] of [['adult',c.adults],['child',c.children],['infant',c.infants]])for(let i=0;i<count;i++){pos++;stm.push(env.HOTELS_DB.prepare('INSERT OR IGNORE INTO booking_travelers(id,booking_id,position,traveler_type) VALUES(?,?,?,?)').bind(`traveler-${crypto.randomUUID()}`,bookingID,pos,type));}if(stm.length)await env.HOTELS_DB.batch(stm);}
+function travelerMap(r){return {position:Number(r.position),travelerType:r.traveler_type,firstName:r.first_name,middleName:r.middle_name,lastName:r.last_name,gender:r.gender,dateOfBirth:r.date_of_birth,placeOfBirth:r.place_of_birth,nationality:r.nationality,residenceCountry:r.residence_country,passportNumber:r.passport_number,passportIssueDate:r.passport_issue_date,passportExpiryDate:r.passport_expiry_date,passportIssuingCountry:r.passport_issuing_country,phone:r.phone,email:r.email,emergencyName:r.emergency_name,emergencyPhone:r.emergency_phone,emergencyRelation:r.emergency_relation,hasPassport:!!r.passport_object_key,completed:Number(r.completed||0)===1};}
+async function accountActive(env,pid){return !!(await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM iumrah_accounts WHERE pilgrim_id=?').bind(pid).first());}
+async function clientCheckoutDetail(env,bookingID,trip){
+ await ensureTravelerRows(env,bookingID,trip);
+ const [trav,pay,receipts,docs,active]=await Promise.all([
+  env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? ORDER BY position').bind(bookingID).all(),
+  env.HOTELS_DB.prepare('SELECT * FROM booking_payment_instructions WHERE booking_id=?').bind(bookingID).first(),
+  env.HOTELS_DB.prepare('SELECT id,payment_method,note,review_status,created_at FROM booking_payment_receipts WHERE booking_id=? ORDER BY created_at DESC').bind(bookingID).all(),
+  env.HOTELS_DB.prepare('SELECT id,document_kind,title,content_type,created_at FROM booking_travel_documents WHERE booking_id=? ORDER BY created_at').bind(bookingID).all(),
+  accountActive(env,trip.pilgrim_id)
+ ]);
+ return json({
+  ok:true,iumrahID:pilgrimPublicID(trip.pilgrim_id),accountActive:active,status:normalizedTripStatus(trip.status),
+  travelers:(trav.results||[]).map(travelerMap),
+  payment:{visaCardNumber:pay?.visa_card_number||'',visaHolder:pay?.visa_holder||'',hasPaymeQR:!!pay?.payme_qr_object_key,paymeQRURL:pay?.payme_qr_object_key?`/api/catalog/hotels/client/trips/${encodeURIComponent(bookingID)}/media/payment-qr`:null,humoCardNumber:pay?.humo_card_number||'',humoHolder:pay?.humo_holder||'',instructions:pay?.instructions||''},
+  receipts:(receipts.results||[]).map(r=>({id:r.id,paymentMethod:r.payment_method||'other',note:r.note||'',reviewStatus:r.review_status||'submitted',createdAt:r.created_at||''})),
+  documents:(docs.results||[]).map(d=>({id:d.id,documentKind:d.document_kind||'other',title:d.title||'Документ поездки',contentType:d.content_type||'application/octet-stream',createdAt:d.created_at||'',url:`/api/catalog/hotels/client/trips/${encodeURIComponent(bookingID)}/media/document-${d.id}`}))
+ });
 }
-
-async function listClientTrips(env, userID) {
-  const result = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE client_user_id=? ORDER BY created_at DESC LIMIT 200').bind(userID).all();
-  return json({ ok: true, trips: (result.results || []).map(tripMap) });
-}
-
-async function syncClientTrip(request, env, user) {
-  const parsed = await readJSON(request, 750_000);
-  if (!parsed.ok) return parsed.response;
-  const payload = parsed.value;
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return json({ ok: false, error: 'INVALID_JSON' }, 400);
-  const bookingID = cleanText(payload.bookingID || payload.bookingId || payload?.bookingSnapshot?.id, 180);
-  if (!bookingID) return json({ ok: false, error: 'BOOKING_ID_REQUIRED' }, 400);
-  const deleted = await env.HOTELS_DB.prepare('SELECT booking_id FROM deleted_bookings WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
-  if (deleted) return json({ ok: false, error: 'BOOKING_DELETED' }, 410);
-  const clientUserID = cleanText(payload.clientUserID || payload.clientUserId || user.id, 180);
-  if (!clientUserID || clientUserID !== user.id) return json({ ok: false, error: 'CLIENT_ID_MISMATCH' }, 403);
-
-  const bookingSnapshot = payload.bookingSnapshot && typeof payload.bookingSnapshot === 'object' ? { ...payload.bookingSnapshot, id: bookingID, clientUserID } : { id: bookingID, clientUserID };
-  const pricingSnapshot = payload.pricingSnapshot && typeof payload.pricingSnapshot === 'object' ? payload.pricingSnapshot : {};
-  const identity = {
-    clientUserID,
-    firstName: safeHumanText(payload.firstName || user.firstName || user.first_name || '', 120) || '',
-    lastName: safeHumanText(payload.lastName || user.lastName || user.last_name || '', 120) || '',
-    displayName: safeHumanText(payload.displayName || user.displayName || user.name || '', 220) || '',
-    email: cleanText(payload.email || user.email, 220) || '',
-    phone: cleanText(payload.phone || user.phone, 100) || ''
-  };
-  if (!identity.displayName) identity.displayName = [identity.firstName, identity.lastName].filter(Boolean).join(' ').trim();
-  const pilgrim = await ensurePilgrim(env, identity, bookingID);
-  const existing = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  if (existing && existing.client_user_id && String(existing.client_user_id) !== clientUserID && !String(existing.client_user_id).startsWith('legacy-booking:')) {
-    return json({ ok: false, error: 'BOOKING_ALREADY_OWNED' }, 409);
-  }
-  const now = new Date().toISOString();
-  const startDate = cleanText(payload.startDate || bookingSnapshot.startDate, 64);
-  const endDate = cleanText(payload.endDate || bookingSnapshot.endDate, 64);
-  if (!existing) {
-    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id, booking_id, pilgrim_id, client_user_id, status, start_date, end_date, booking_snapshot_json, pricing_snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)`)
-      .bind(`trip-${crypto.randomUUID()}`, bookingID, pilgrim.id, clientUserID, startDate, endDate, JSON.stringify(bookingSnapshot), JSON.stringify(pricingSnapshot), now, now).run();
-  } else {
-    const previousBooking = parseJSONObject(existing.booking_snapshot_json);
-    const previousPricing = parseJSONObject(existing.pricing_snapshot_json);
-    const mergedBooking = { ...previousBooking, ...bookingSnapshot };
-    const mergedPricing = Object.keys(pricingSnapshot).length ? { ...previousPricing, ...pricingSnapshot } : previousPricing;
-    await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET pilgrim_id=?, client_user_id=?, start_date=COALESCE(?, start_date), end_date=COALESCE(?, end_date), booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=? WHERE booking_id=?`)
-      .bind(pilgrim.id, clientUserID, startDate, endDate, JSON.stringify(mergedBooking), JSON.stringify(mergedPricing), now, bookingID).run();
-  }
-  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
-  const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
-  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?').bind(Number(stats?.count || 0), stats?.last_trip || null, now, pilgrim.id).run();
-  return json({ ok: true, pilgrimID: pilgrimPublicID(pilgrim.id), trip: tripMap(trip) });
-}
-
-async function syncClientIdentityByBookingToken(request, env, bookingID, auth) {
-  const payload = await request.json().catch(() => null);
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return json({ ok: false, error: 'INVALID_JSON' }, 400);
-
-  const clientUserID = cleanText(payload.clientUserID || payload.clientUserId, 180);
-  const firstName = safeHumanText(payload.firstName || '', 120) || '';
-  const lastName = safeHumanText(payload.lastName || '', 120) || '';
-  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim();
-  if (!clientUserID) return json({ ok: false, error: 'CLIENT_ID_REQUIRED' }, 400);
-  if (!firstName || !lastName) return json({ ok: false, error: 'PILGRIM_NAME_REQUIRED' }, 400);
-
-  // Make sure the technical trip exists, but bind its permanent person identity
-  // independently from the upstream booking code.
-  let linked = await syncBookingTrip(env, auth.booking).catch(() => null);
-  let trip = linked?.trip || await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
-  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 409);
-
-  let currentPilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(trip.pilgrim_id).first().catch(() => null);
-  let canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(clientUserID).first().catch(() => null);
-  const now = new Date().toISOString();
-  const phone = cleanText(payload.whatsapp || payload.phone || auth.user?.phone, 100) || '';
-  const email = cleanText(payload.email || auth.user?.email, 220) || '';
-
-  if (!canonical && currentPilgrim) {
-    const currentOwner = String(currentPilgrim.client_user_id || '');
-    if (!currentOwner || currentOwner.startsWith('legacy-booking:') || currentOwner.startsWith('booking-token:')) {
-      try {
-        await env.HOTELS_DB.prepare(`UPDATE pilgrims SET client_user_id=?, first_name=?, last_name=?, display_name=?, phone=CASE WHEN ?<>'' THEN ? ELSE phone END, email=CASE WHEN ?<>'' THEN ? ELSE email END, updated_at=? WHERE id=?`)
-          .bind(clientUserID, firstName, lastName, displayName, phone, phone, email, email, now, currentPilgrim.id).run();
-        canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(currentPilgrim.id).first();
-      } catch (error) {
-        canonical = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE client_user_id=? LIMIT 1').bind(clientUserID).first().catch(() => null);
-        if (!canonical) throw error;
-      }
-    }
-  }
-
-  if (!canonical) {
-    canonical = await ensurePilgrim(env, { clientUserID, firstName, lastName, displayName, phone, email }, bookingID);
-  }
-  if (!canonical) return json({ ok: false, error: 'PILGRIM_SYNC_FAILED' }, 500);
-
-  await env.HOTELS_DB.prepare(`UPDATE pilgrims SET first_name=?, last_name=?, display_name=?, phone=CASE WHEN ?<>'' THEN ? ELSE phone END, email=CASE WHEN ?<>'' THEN ? ELSE email END, updated_at=? WHERE id=?`)
-    .bind(firstName, lastName, displayName, phone, phone, email, email, now, canonical.id).run();
-
-  const oldPilgrimID = Number(trip.pilgrim_id || 0);
-  const canonicalClientUserID = cleanText(canonical.client_user_id, 180) || clientUserID;
-  const previousTripSnapshot = parseJSONObject(trip.booking_snapshot_json);
-  const mergedTripSnapshot = {
-    ...previousTripSnapshot,
-    id: bookingID,
-    clientUserID: canonicalClientUserID,
-    clientName: displayName,
-    pilgrimProfile: {
-      ...(previousTripSnapshot?.pilgrimProfile && typeof previousTripSnapshot.pilgrimProfile === 'object' ? previousTripSnapshot.pilgrimProfile : {}),
-      firstName,
-      lastName,
-      displayName
-    }
-  };
-  await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?, client_user_id=?, booking_snapshot_json=?, updated_at=? WHERE booking_id=?')
-    .bind(canonical.id, canonicalClientUserID, JSON.stringify(mergedTripSnapshot), now, bookingID).run();
-
-  if (oldPilgrimID && oldPilgrimID !== Number(canonical.id)) {
-    const old = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=? LIMIT 1').bind(oldPilgrimID).first().catch(() => null);
-    const oldStats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(oldPilgrimID).first();
-    if (Number(oldStats?.count || 0) === 0 && old && String(old.client_user_id || '').startsWith('legacy-booking:')) {
-      await env.HOTELS_DB.prepare('DELETE FROM pilgrims WHERE id=?').bind(oldPilgrimID).run().catch(() => {});
-    } else if (old) {
-      await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
-        .bind(Number(oldStats?.count || 0), oldStats?.last_trip || null, now, oldPilgrimID).run().catch(() => {});
-    }
-  }
-
-  const stats = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count, MAX(COALESCE(end_date, created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(canonical.id).first();
-  await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?, last_trip_at=?, updated_at=? WHERE id=?')
-    .bind(Number(stats?.count || 0), stats?.last_trip || null, now, canonical.id).run();
-
-  trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  return json({ ok: true, pilgrimID: pilgrimPublicID(canonical.id), trip: tripMap(trip), assignment: await clientBookingAssignmentDetail(env, bookingID) });
-}
+function travelerComplete(v,hasPassport){return !!(v.firstName&&v.lastName&&v.gender&&v.dateOfBirth&&v.placeOfBirth&&v.nationality&&v.residenceCountry&&v.passportNumber&&v.passportIssueDate&&v.passportExpiryDate&&v.passportIssuingCountry&&v.phone&&v.emergencyName&&v.emergencyPhone&&v.emergencyRelation&&hasPassport);}
+async function saveTravelerForm(request,env,bookingID,position,auth){if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'TRAVELER_EDITING_CLOSED'},409);if(!Number.isInteger(position)||position<1)return json({ok:false,error:'INVALID_TRAVELER'},400);const p=await request.json().catch(()=>null);if(!p)return json({ok:false,error:'INVALID_JSON'},400);const row=await env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first();if(!row)return json({ok:false,error:'TRAVELER_NOT_FOUND'},404);const val={firstName:safeHumanText(p.firstName,120)||'',middleName:safeHumanText(p.middleName,120)||'',lastName:safeHumanText(p.lastName,120)||'',gender:cleanText(p.gender,20)||'',dateOfBirth:cleanText(p.dateOfBirth,20)||'',placeOfBirth:safeHumanText(p.placeOfBirth,160)||'',nationality:safeHumanText(p.nationality,100)||'',residenceCountry:safeHumanText(p.residenceCountry,100)||'',passportNumber:cleanText(p.passportNumber,80)||'',passportIssueDate:cleanText(p.passportIssueDate,20)||'',passportExpiryDate:cleanText(p.passportExpiryDate,20)||'',passportIssuingCountry:safeHumanText(p.passportIssuingCountry,100)||'',phone:cleanText(p.phone,100)||'',email:cleanText(p.email,220)||'',emergencyName:safeHumanText(p.emergencyName,160)||'',emergencyPhone:cleanText(p.emergencyPhone,100)||'',emergencyRelation:safeHumanText(p.emergencyRelation,80)||''};const complete=travelerComplete(val,!!row.passport_object_key);await env.HOTELS_DB.prepare(`UPDATE booking_travelers SET first_name=?,middle_name=?,last_name=?,gender=?,date_of_birth=?,place_of_birth=?,nationality=?,residence_country=?,passport_number=?,passport_issue_date=?,passport_expiry_date=?,passport_issuing_country=?,phone=?,email=?,emergency_name=?,emergency_phone=?,emergency_relation=?,completed=?,updated_at=? WHERE booking_id=? AND position=?`).bind(val.firstName,val.middleName,val.lastName,val.gender,val.dateOfBirth,val.placeOfBirth,val.nationality,val.residenceCountry,val.passportNumber,val.passportIssueDate,val.passportExpiryDate,val.passportIssuingCountry,val.phone,val.email,val.emergencyName,val.emergencyPhone,val.emergencyRelation,complete?1:0,new Date().toISOString(),bookingID,position).run();return json({ok:true,traveler:travelerMap(await env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first())});}
+async function privateImageUpload(request,env,keyPrefix){const ct=String(request.headers.get('content-type')||'').split(';')[0].toLowerCase();if(!ct.startsWith('image/'))return {ok:false,response:json({ok:false,error:'IMAGE_REQUIRED'},415)};const bytes=await request.arrayBuffer();if(!bytes.byteLength||bytes.byteLength>10_000_000)return {ok:false,response:json({ok:false,error:'IMAGE_TOO_LARGE'},413)};const ext=ct.includes('png')?'png':ct.includes('heic')?'heic':'jpg';const key=`private/${keyPrefix}/${crypto.randomUUID()}.${ext}`;await env.HOTELS_MEDIA.put(key,bytes,{httpMetadata:{contentType:ct}});return {ok:true,key,ct,size:bytes.byteLength};}
+async function uploadTravelerPassport(request,env,bookingID,position,auth){if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'TRAVELER_EDITING_CLOSED'},409);const row=await env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first();if(!row)return json({ok:false,error:'TRAVELER_NOT_FOUND'},404);const up=await privateImageUpload(request,env,`passports/${bookingID}`);if(!up.ok)return up.response;if(row.passport_object_key)await env.HOTELS_MEDIA.delete(row.passport_object_key).catch(()=>{});const complete=travelerComplete({firstName:row.first_name,lastName:row.last_name,gender:row.gender,dateOfBirth:row.date_of_birth,placeOfBirth:row.place_of_birth,nationality:row.nationality,residenceCountry:row.residence_country,passportNumber:row.passport_number,passportIssueDate:row.passport_issue_date,passportExpiryDate:row.passport_expiry_date,passportIssuingCountry:row.passport_issuing_country,phone:row.phone,emergencyName:row.emergency_name,emergencyPhone:row.emergency_phone,emergencyRelation:row.emergency_relation},true);await env.HOTELS_DB.prepare('UPDATE booking_travelers SET passport_object_key=?,passport_content_type=?,completed=?,updated_at=? WHERE booking_id=? AND position=?').bind(up.key,up.ct,complete?1:0,new Date().toISOString(),bookingID,position).run();return json({ok:true,hasPassport:true});}
+async function uploadPaymentReceipt(request,env,bookingID,auth){if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'PAYMENT_SUBMISSION_CLOSED'},409);const method=cleanText(request.headers.get('x-payment-method') || new URL(request.url).searchParams.get('method'),20)||'other';if(!['visa','payme','humo','other'].includes(method))return json({ok:false,error:'INVALID_PAYMENT_METHOD'},400);const up=await privateImageUpload(request,env,`receipts/${bookingID}`);if(!up.ok)return up.response;const id=crypto.randomUUID();await env.HOTELS_DB.prepare('INSERT INTO booking_payment_receipts(id,booking_id,payment_method,object_key,content_type,byte_size) VALUES(?,?,?,?,?,?)').bind(id,bookingID,method,up.key,up.ct,up.size).run();await env.HOTELS_DB.prepare("UPDATE pilgrim_trips SET payment_status='receipt_submitted',updated_at=? WHERE booking_id=?").bind(new Date().toISOString(),bookingID).run();await sendStaffPush(env,'Новый чек оплаты',`Бронь ${bookingID} · iumrah ID ${pilgrimPublicID(auth.pilgrim.id)}`,{type:'payment_receipt',bookingID}).catch(()=>{});return json({ok:true,id});}
+async function serveClientPrivateMedia(env,bookingID,mediaID){let key=null,ct='application/octet-stream';if(mediaID==='payment-qr'){const r=await env.HOTELS_DB.prepare('SELECT payme_qr_object_key,payme_qr_content_type FROM booking_payment_instructions WHERE booking_id=?').bind(bookingID).first();key=r?.payme_qr_object_key;ct=r?.payme_qr_content_type||'image/png';}else if(mediaID.startsWith('document-')){const id=mediaID.slice(9);const r=await env.HOTELS_DB.prepare('SELECT object_key,content_type FROM booking_travel_documents WHERE id=? AND booking_id=?').bind(id,bookingID).first();key=r?.object_key;ct=r?.content_type||ct;}if(!key)return json({ok:false,error:'MEDIA_NOT_FOUND'},404);const obj=await env.HOTELS_MEDIA.get(key);if(!obj)return json({ok:false,error:'MEDIA_NOT_FOUND'},404);return new Response(obj.body,{headers:{'content-type':ct,'cache-control':'private, no-store'}});}
 
 async function sendClientChatMessage(request, env, bookingID, user) {
   const payload = await request.json().catch(() => null);

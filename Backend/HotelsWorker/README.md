@@ -10,7 +10,7 @@ Central hotel catalog backend for iumrah.
 - Admin route: `https://iumrah.app/api/admin/hotels*`
 - Public catalog route: `https://iumrah.app/api/catalog/hotels*`
 
-The Worker runs only on the hotel routes. Existing `iumrah.app` auth remains the source of truth: admin requests are validated by forwarding the existing session cookie to `/api/auth/staff/session`.
+The Worker runs only on the hotel routes. Business staff authentication remains unchanged: admin requests are validated through the existing staff session endpoint. Client authentication is independent and lives in this Worker: a permanent six-digit **iumrah ID** plus password creates a server-side account session, and all trips belong to that canonical pilgrim identity.
 
 ## Data ownership
 
@@ -34,3 +34,7 @@ Recommended token permissions:
 - Zone `iumrah.app`: Workers Routes Edit
 
 The deploy workflow creates D1/R2 if needed, applies migrations, deploys the Worker, and verifies the public health endpoint.
+
+## Mobile account and checkout
+
+The active mobile identity model is documented in `CLIENT_INTEGRATION.md`. Legacy device `clientUserID` identity is not part of the active architecture. D1 migration `0012_iumrah_accounts_checkout.sql` collapses legacy trip statuses, removes identity-keyed legacy tables/columns, and creates the iumrah account, traveler, payment, receipt and travel-document model.

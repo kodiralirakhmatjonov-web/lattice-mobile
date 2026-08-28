@@ -18,29 +18,43 @@ struct LoginResponse: Codable {
     let error: String?
 }
 
-enum BookingStatus: String, Codable, Hashable {
-    case new = "NEW"
+enum BookingStatus: String, Hashable, Codable {
     case availabilityCheck = "AVAILABILITY_CHECK"
     case paymentPending = "PAYMENT_PENDING"
-    case paid = "PAID"
     case bookingConfirmed = "BOOKING_CONFIRMED"
-    case documentsReady = "DOCUMENTS_READY"
     case readyToTravel = "READY_TO_TRAVEL"
     case inTrip = "IN_TRIP"
     case completed = "COMPLETED"
     case cancelled = "CANCELLED"
 
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = (try? container.decode(String.self))?.uppercased() ?? "AVAILABILITY_CHECK"
+        switch raw {
+        case "NEW", "AVAILABILITY_CHECK": self = .availabilityCheck
+        case "PAYMENT_PENDING": self = .paymentPending
+        case "PAID", "BOOKING_CONFIRMED": self = .bookingConfirmed
+        case "DOCUMENTS_READY", "READY_TO_TRAVEL": self = .readyToTravel
+        case "IN_TRIP": self = .inTrip
+        case "COMPLETED": self = .completed
+        case "CANCELLED": self = .cancelled
+        default: self = .availabilityCheck
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
     var shortLabel: String {
         switch self {
-        case .new: return "Новая"
-        case .availabilityCheck: return "Наличие"
-        case .paymentPending: return "Оплата"
-        case .paid: return "Оплачено"
-        case .bookingConfirmed: return "Бронь"
-        case .documentsReady: return "Документы"
-        case .readyToTravel: return "Поездка"
+        case .availabilityCheck: return "Проверка наличия"
+        case .paymentPending: return "Оплата и данные"
+        case .bookingConfirmed: return "Подтверждено"
+        case .readyToTravel: return "Готово к поездке"
         case .inTrip: return "В поездке"
-        case .completed: return "Готово"
+        case .completed: return "Завершена"
         case .cancelled: return "Отменено"
         }
     }

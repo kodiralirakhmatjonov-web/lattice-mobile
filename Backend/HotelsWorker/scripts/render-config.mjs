@@ -116,7 +116,55 @@ async function findBookingDatabase() {
   return selected;
 }
 
+async function normalizeBookingStatuses(databaseID) {
+  const mappings = [
+    ['NEW', 'AVAILABILITY_CHECK'],
+    ['PAID', 'BOOKING_CONFIRMED'],
+    ['DOCUMENTS_READY', 'READY_TO_TRAVEL'],
+  ];
+
+  const before = await d1Query(
+    databaseID,
+    `SELECT UPPER(COALESCE(status,'')) AS status, COUNT(*) AS count FROM bookings GROUP BY UPPER(COALESCE(status,'')) ORDER BY status`,
+  );
+
+  for (const [legacy, canonical] of mappings) {
+    await d1Query(
+      databaseID,
+      `UPDATE bookings SET status=? WHERE UPPER(COALESCE(status,''))=?`,
+      [canonical, legacy],
+    );
+
+    // Keep the immutable booking payload readable by older consumers while making
+    // its embedded status agree with the canonical database status when present.
+    try {
+      await d1Query(
+        databaseID,
+        `UPDATE bookings
+         SET payload_json=json_set(payload_json,'$.status',?)
+         WHERE json_valid(payload_json)=1
+           AND UPPER(COALESCE(json_extract(payload_json,'$.status'),''))=?`,
+        [canonical, legacy],
+      );
+    } catch (error) {
+      console.warn(`Could not normalize embedded payload status ${legacy}: ${error?.message || error}`);
+    }
+  }
+
+  const after = await d1Query(
+    databaseID,
+    `SELECT UPPER(COALESCE(status,'')) AS status, COUNT(*) AS count FROM bookings GROUP BY UPPER(COALESCE(status,'')) ORDER BY status`,
+  );
+  const forbidden = new Set(['NEW', 'PAID', 'DOCUMENTS_READY']);
+  const remaining = after.filter(row => forbidden.has(String(row?.status || '').toUpperCase()) && Number(row?.count || 0) > 0);
+  if (remaining.length) {
+    throw new Error(`Legacy booking statuses remain after normalization: ${JSON.stringify(remaining)}`);
+  }
+  console.log('Bookings status normalization:', { before, after });
+}
+
 const bookingDatabase = await findBookingDatabase();
+await normalizeBookingStatuses(bookingDatabase.id);
 const template = fs.readFileSync(new URL('../wrangler.template.jsonc', import.meta.url), 'utf8');
 const rendered = template
   .replaceAll('__D1_DATABASE_ID__', hotelDatabaseID)

@@ -4,34 +4,26 @@ import SwiftUI
 private let bookingOperationsChangedNotification = Notification.Name("iumrah.business.bookingOperationsChanged")
 
 private enum BookingListFilter: String, CaseIterable, Identifiable {
-    case all, new, availability, payment, paid, confirmed, documents, ready, inTrip, completed, cancelled
+    case all, availability, payment, confirmed, ready, inTrip, completed, cancelled
     var id: String { rawValue }
-
     var title: String {
         switch self {
         case .all: return "Все"
-        case .new: return "Новые"
         case .availability: return "Проверка"
-        case .payment: return "Ожидают оплату"
-        case .paid: return "Оплачено"
+        case .payment: return "Оплата и данные"
         case .confirmed: return "Подтверждено"
-        case .documents: return "Документы"
-        case .ready: return "Готовы"
+        case .ready: return "К поездке"
         case .inTrip: return "В поездке"
         case .completed: return "Завершено"
         case .cancelled: return "Отменено"
         }
     }
-
     func matches(_ status: TripStatus) -> Bool {
         switch self {
         case .all: return true
-        case .new: return status == .new
         case .availability: return status == .availabilityCheck
         case .payment: return status == .paymentPending
-        case .paid: return status == .paid
         case .confirmed: return status == .bookingConfirmed
-        case .documents: return status == .documentsReady
         case .ready: return status == .readyToTravel
         case .inTrip: return status == .inTrip
         case .completed: return status == .completed
@@ -39,6 +31,7 @@ private enum BookingListFilter: String, CaseIterable, Identifiable {
         }
     }
 }
+
 
 struct BookingsView: View {
     @State private var bookings: [BookingSummary] = []
@@ -168,12 +161,9 @@ struct BookingsView: View {
     private func operationalStatus(_ booking: BookingSummary) -> TripStatus {
         if let raw = booking.operationStatus, let value = TripStatus(rawValue: raw) { return value }
         switch booking.status {
-        case .new: return .new
         case .availabilityCheck: return .availabilityCheck
         case .paymentPending: return .paymentPending
-        case .paid: return .paid
         case .bookingConfirmed: return .bookingConfirmed
-        case .documentsReady: return .documentsReady
         case .readyToTravel: return .readyToTravel
         case .inTrip: return .inTrip
         case .completed: return .completed

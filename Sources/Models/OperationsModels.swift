@@ -1,12 +1,9 @@
 import Foundation
 
 enum TripStatus: String, Codable, CaseIterable, Identifiable {
-    case new
     case availabilityCheck = "availability_check"
     case paymentPending = "payment_pending"
-    case paid
     case bookingConfirmed = "booking_confirmed"
-    case documentsReady = "documents_ready"
     case readyToTravel = "ready_to_travel"
     case inTrip = "in_trip"
     case completed
@@ -16,21 +13,43 @@ enum TripStatus: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .new: return "Новая заявка"
-        case .availabilityCheck: return "Проверка наличия"
-        case .paymentPending: return "Ожидание оплаты"
-        case .paid: return "Оплачено"
-        case .bookingConfirmed: return "Бронирование подтверждено"
-        case .documentsReady: return "Документы готовы"
-        case .readyToTravel: return "Готово к поездке"
+        case .availabilityCheck: return "Новая заявка · Проверка наличия"
+        case .paymentPending: return "Наличие подтверждено · Оплата и данные паломников"
+        case .bookingConfirmed: return "Оплачено · Бронирование подтверждено"
+        case .readyToTravel: return "Документы готовы · Готово к поездке"
         case .inTrip: return "Паломник в поездке"
         case .completed: return "Поездка завершена"
         case .cancelled: return "Отменено"
         }
     }
 
+    var shortTitle: String {
+        switch self {
+        case .availabilityCheck: return "Проверка наличия"
+        case .paymentPending: return "Оплата и данные"
+        case .bookingConfirmed: return "Подтверждено"
+        case .readyToTravel: return "Готово к поездке"
+        case .inTrip: return "В поездке"
+        case .completed: return "Завершена"
+        case .cancelled: return "Отменено"
+        }
+    }
+
     var isCompleted: Bool { self == .completed || self == .cancelled }
+
+    var allowedTargets: [TripStatus] {
+        switch self {
+        case .availabilityCheck: return [.availabilityCheck, .paymentPending, .cancelled]
+        case .paymentPending: return [.paymentPending, .availabilityCheck, .bookingConfirmed, .cancelled]
+        case .bookingConfirmed: return [.bookingConfirmed, .paymentPending, .readyToTravel, .cancelled]
+        case .readyToTravel: return [.readyToTravel, .bookingConfirmed, .inTrip, .cancelled]
+        case .inTrip: return [.inTrip, .completed, .cancelled]
+        case .completed: return [.completed]
+        case .cancelled: return [.cancelled]
+        }
+    }
 }
+
 
 struct BusinessTeamMember: Codable, Identifiable, Hashable {
     let id: String
@@ -111,7 +130,7 @@ struct BookingOperation: Codable, Hashable {
     let updatedAt: String
     let completedAt: String?
 
-    var tripStatus: TripStatus { TripStatus(rawValue: status) ?? .new }
+    var tripStatus: TripStatus { TripStatus(rawValue: status) ?? .availabilityCheck }
 }
 
 struct BookingPricingLine: Codable, Identifiable, Hashable {
@@ -148,6 +167,79 @@ struct PilgrimSummary: Codable, Identifiable, Hashable {
     let lastTripAt: String?
 }
 
+struct BusinessCheckoutTraveler: Codable, Identifiable, Hashable {
+    var id: Int { position }
+    let position: Int
+    let travelerType: String
+    let firstName: String
+    let middleName: String
+    let lastName: String
+    let gender: String
+    let dateOfBirth: String
+    let placeOfBirth: String
+    let nationality: String
+    let residenceCountry: String
+    let passportNumber: String
+    let passportIssueDate: String
+    let passportExpiryDate: String
+    let passportIssuingCountry: String
+    let phone: String
+    let email: String
+    let emergencyName: String
+    let emergencyPhone: String
+    let emergencyRelation: String
+    let hasPassport: Bool
+    let completed: Bool
+    let passportMediaURL: String?
+}
+
+struct BusinessPaymentInstructions: Codable, Hashable {
+    let visaCardNumber: String
+    let visaHolder: String
+    let hasPaymeQR: Bool
+    let humoCardNumber: String
+    let humoHolder: String
+    let instructions: String
+}
+
+struct BusinessPaymentReceipt: Codable, Identifiable, Hashable {
+    let id: String
+    let paymentMethod: String
+    let note: String
+    let reviewStatus: String
+    let createdAt: String
+    let contentType: String?
+    let mediaURL: String
+}
+
+struct BusinessTravelDocument: Codable, Identifiable, Hashable {
+    let id: String
+    let documentKind: String
+    let title: String
+    let contentType: String
+    let createdAt: String
+    let mediaURL: String
+}
+
+struct BusinessCheckout: Codable, Hashable {
+    let iumrahID: String
+    let accountActive: Bool
+    let activatedAt: String?
+    let allTravelersComplete: Bool
+    let travelers: [BusinessCheckoutTraveler]
+    let payment: BusinessPaymentInstructions
+    let receipts: [BusinessPaymentReceipt]
+    let documents: [BusinessTravelDocument]
+}
+
+struct BusinessPaymentInstructionsPayload: Encodable {
+    let visaCardNumber: String
+    let visaHolder: String
+    let humoCardNumber: String
+    let humoHolder: String
+    let instructions: String
+}
+
 struct BookingDetailResponse: Codable {
     let ok: Bool
     let booking: BookingSummary
@@ -158,6 +250,7 @@ struct BookingDetailResponse: Codable {
     let statusHistory: [BookingStatusHistoryItem]
     let flights: [BookingFlight]?
     let assignment: BookingAssignment?
+    let checkout: BusinessCheckout?
 }
 
 struct BookingOperationUpdatePayload: Encodable {

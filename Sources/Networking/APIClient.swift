@@ -140,6 +140,46 @@ actor APIClient {
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
 
+    func savePaymentInstructions(bookingID: String, payload: BusinessPaymentInstructionsPayload) async throws -> BusinessCheckout {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/payment"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        struct Envelope: Decodable { let ok: Bool; let checkout: BusinessCheckout }
+        return try decoder.decode(Envelope.self, from: data).checkout
+    }
+
+    func uploadPaymeQR(bookingID: String, data: Data, contentType: String = "image/jpeg") async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/payment-qr"))
+        request.httpMethod = "POST"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let (body, response) = try await session.data(for: request)
+        try validate(response, data: body)
+    }
+
+    func uploadTravelDocument(bookingID: String, kind: String, title: String, data: Data, contentType: String) async throws {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/documents"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "kind", value: kind), URLQueryItem(name: "title", value: title)]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let (body, response) = try await session.data(for: request)
+        try validate(response, data: body)
+    }
+
+    func privateMedia(path: String) async throws -> Data {
+        let url: URL
+        if let direct = URL(string: path), direct.scheme != nil { url = direct }
+        else { url = AppConfig.apiBaseURL.appending(path: path) }
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return data
+    }
+
     func deleteBooking(id: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)"))
         request.httpMethod = "DELETE"
@@ -476,7 +516,16 @@ enum APIError: LocalizedError {
         case .invalidResponse: return "Сервер вернул некорректный ответ."
         case .possibleDuplicate(let hotel): return "Возможно, этот отель уже есть в базе: \(hotel.name)."
         case .hotelAlreadyExists(let hotel): return "Этот отель уже есть в базе: \(hotel.name)."
-        case .server(let value): return value
+        case .server(let value):
+            switch value {
+            case "PAYMENT_INSTRUCTIONS_REQUIRED": return "Сначала сохраните хотя бы один способ оплаты: Visa, PayMe или Humo."
+            case "IUMRAH_ACCOUNT_REQUIRED": return "Паломник ещё не активировал свой iumrah ID и пароль."
+            case "TRAVELER_DATA_INCOMPLETE": return "Не все анкеты паломников заполнены полностью и с паспортом."
+            case "PAYMENT_RECEIPT_REQUIRED": return "Паломник ещё не прикрепил чек оплаты."
+            case "TRAVEL_DOCUMENT_REQUIRED": return "Перед статусом «Готово к поездке» загрузите хотя бы один документ поездки."
+            case "INVALID_STATUS_TRANSITION": return "Этот переход статуса недоступен из текущего состояния поездки."
+            default: return value
+            }
         }
     }
 }

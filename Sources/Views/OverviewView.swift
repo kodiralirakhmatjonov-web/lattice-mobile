@@ -22,19 +22,16 @@ struct OverviewView: View {
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var store = OverviewStore()
 
-    var checking: Int { store.bookings.filter { operationalStatus($0) == .new || operationalStatus($0) == .availabilityCheck }.count }
+    var checking: Int { store.bookings.filter { operationalStatus($0) == .availabilityCheck }.count }
     var payment: Int { store.bookings.filter { operationalStatus($0) == .paymentPending }.count }
-    var active: Int { store.bookings.filter { [.paid, .bookingConfirmed, .documentsReady, .readyToTravel, .inTrip].contains(operationalStatus($0)) }.count }
+    var active: Int { store.bookings.filter { [.bookingConfirmed, .readyToTravel, .inTrip].contains(operationalStatus($0)) }.count }
 
     private func operationalStatus(_ booking: BookingSummary) -> TripStatus {
         if let raw = booking.operationStatus, let value = TripStatus(rawValue: raw) { return value }
         switch booking.status {
-        case .new: return .new
         case .availabilityCheck: return .availabilityCheck
         case .paymentPending: return .paymentPending
-        case .paid: return .paid
         case .bookingConfirmed: return .bookingConfirmed
-        case .documentsReady: return .documentsReady
         case .readyToTravel: return .readyToTravel
         case .inTrip: return .inTrip
         case .completed: return .completed

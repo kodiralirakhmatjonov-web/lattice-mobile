@@ -9,7 +9,7 @@ struct BookingDetailView: View {
     @State private var loading = true
     @State private var saving = false
     @State private var errorMessage: String?
-    @State private var status: TripStatus = .new
+    @State private var status: TripStatus = .availabilityCheck
     @State private var paymentStatus = ""
     @State private var confirmationNumber = ""
     @State private var internalNotes = ""
@@ -24,6 +24,9 @@ struct BookingDetailView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     hero(detail)
                     operationsCard(detail)
+                    BookingCheckoutAdminCard(bookingID: bookingID, status: status, checkout: detail.checkout) {
+                        Task { await load() }
+                    }
 
                     sectionTitle("Перелёты", subtitle: "Рейс можно заменить только после проверки AeroDataBox.")
                     flightCard(.outbound, detail: detail)
@@ -143,13 +146,44 @@ struct BookingDetailView: View {
         .padding(18).businessCard(radius: 28)
     }
 
+    private var currentStatusTargets: [TripStatus] {
+        let base = detail?.operation?.tripStatus ?? status
+        return base.allowedTargets
+    }
+
     private func operationsCard(_ detail: BookingDetailResponse) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Управление поездкой", systemImage: "slider.horizontal.3").font(.title2.bold())
-            Picker("Статус поездки", selection: $status) {
-                ForEach(TripStatus.allCases) { item in Text(item.title).tag(item) }
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Статус поездки")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Menu {
+                    ForEach(currentStatusTargets) { item in
+                        Button { status = item } label: {
+                            if item == status { Label(item.title, systemImage: "checkmark") }
+                            else { Text(item.title) }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "circle.hexagongrid.fill")
+                            .foregroundStyle(.secondary)
+                        Text(status.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 10)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption.bold())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 13)
+                    .frame(minHeight: 52)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
-            .pickerStyle(.menu)
 
             labeledField("Статус оплаты", text: $paymentStatus, placeholder: "Например: оплачено полностью")
             labeledField("Номер бронирования / подтверждения", text: $confirmationNumber, placeholder: "Confirmation number")
