@@ -234,13 +234,18 @@ struct BookingDetailView: View {
     private func flightCard(_ direction: BookingFlightDirection, detail: BookingDetailResponse) -> some View {
         let flight = savedFlight(direction, detail: detail)
         let generated = direction == .outbound ? detail.pricingReport?.selection?.outbound : detail.pricingReport?.selection?.inbound
-        let generatedNumber = generated?.flightNumbers.nonEmpty
-        let displayNumber = flight?.flightNumber.nonEmpty ?? generatedNumber ?? flightNumberFromSummary(detail.booking.flightName, direction: direction)
-        let displayAirline = flight?.airlineName.nonEmpty ?? generated?.airline.nonEmpty ?? "Рейс из генератора"
-        let airlineCode = flight?.airlineIATA.nonEmpty ?? airlineCodeFromFlightNumber(displayNumber)
+        let savedNumber = BusinessFlightReference.normalizedFlightNumber(flight?.flightNumber)
+        let generatedNumbers = exactGeneratedFlightNumbers(generated)
+        let summaryNumber = flightNumberFromSummary(detail.booking.flightName, direction: direction)
+        let displayNumber = savedNumber ?? generatedNumbers ?? summaryNumber
+        let generatedCode = generated?.segments?.compactMap(\.airlineCode).first
+        let airlineCode = normalizedAirlineCode(flight?.airlineIATA) ?? normalizedAirlineCode(generatedCode) ?? BusinessFlightReference.airlineCode(fromFlightNumber: displayNumber?.components(separatedBy: " · ").first)
+        let displayAirline = BusinessFlightReference.airlineName(code: airlineCode, fallback: flight?.airlineName.nonEmpty ?? generated?.airline.nonEmpty)
         let origin = direction == .outbound ? detail.booking.originCode : detail.booking.returnOrigin
         let destination = direction == .outbound ? detail.booking.outboundDestination : detail.booking.originCode
         let fallbackDate = direction == .outbound ? detail.booking.startDate : detail.booking.endDate
+        let departureDate = displayFlightDate(flight?.scheduledDepartureLocal ?? generated?.departureAt, fallback: fallbackDate)
+        let terminal = flight?.departureTerminal.nonEmpty ?? generated?.segments?.first?.originTerminal.nonEmpty ?? "—"
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
@@ -250,9 +255,13 @@ struct BookingDetailView: View {
                     Text(displayAirline)
                         .font(.subheadline).foregroundStyle(.secondary)
                     if let displayNumber {
-                        Text(displayNumber)
+                        Text("Рейс \(displayNumber)")
                             .font(.caption.monospaced().weight(.bold))
                             .foregroundStyle(.primary)
+                    } else {
+                        Text("Номер рейса не подтверждён")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.orange)
                     }
                 }
                 Spacer()
@@ -264,14 +273,14 @@ struct BookingDetailView: View {
 
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(flight?.departureAirportIATA.nonEmpty ?? origin).font(.system(size: 26, weight: .bold, design: .rounded))
+                    Text(flight?.departureAirportIATA.nonEmpty ?? generated?.origin.nonEmpty ?? origin).font(.system(size: 26, weight: .bold, design: .rounded))
                     Text(flight?.departureAirportName.nonEmpty ?? "Отправление").font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
                 Image(systemName: "airplane").font(.title3).foregroundStyle(.secondary)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(flight?.arrivalAirportIATA.nonEmpty ?? destination).font(.system(size: 26, weight: .bold, design: .rounded))
+                    Text(flight?.arrivalAirportIATA.nonEmpty ?? generated?.destination.nonEmpty ?? destination).font(.system(size: 26, weight: .bold, design: .rounded))
                     Text(flight?.arrivalAirportName.nonEmpty ?? "Прибытие").font(.caption).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.trailing)
                 }
             }
@@ -280,8 +289,18 @@ struct BookingDetailView: View {
 
             HStack(alignment: .top, spacing: 12) {
                 flightMetric("Рейс", displayNumber ?? "—")
-                flightMetric("Дата", displayFlightDate(flight?.scheduledDepartureLocal, fallback: fallbackDate))
-                flightMetric("Терминал", flight?.departureTerminal.nonEmpty ?? "—")
+                flightMetric("Дата", departureDate)
+                flightMetric("Терминал", terminal)
+            }
+
+            if flight == nil, let segments = exactGeneratedSegments(generated), !segments.isEmpty {
+                VStack(spacing: 10) {
+                    ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                        generatedFlightSegmentRow(segment)
+                    }
+                }
+                .padding(13)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
             if let flight {
@@ -291,10 +310,16 @@ struct BookingDetailView: View {
                     if !flight.status.isEmpty { Text("· \(flight.status)") }
                 }
                 .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            } else if displayNumber != nil {
+                HStack(spacing: 7) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text("Точные номера и сегменты сохранены генератором iumrah")
+                }
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             } else {
                 HStack(spacing: 7) {
                     Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
-                    Text("Введите номер рейса и дату — система проверит существование рейса перед сохранением.")
+                    Text("Введите точный номер рейса и дату — система проверит рейс через AeroDataBox перед сохранением.")
                 }
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -302,25 +327,78 @@ struct BookingDetailView: View {
         .padding(18).businessCard(radius: 28)
     }
 
-    private func airlineCodeFromFlightNumber(_ value: String?) -> String? {
+    private func exactGeneratedFlightNumbers(_ generated: BookingGeneratorFlightSelection?) -> String? {
+        if let segments = generated?.segments {
+            let values = segments.compactMap { BusinessFlightReference.normalizedFlightNumber($0.flightNumber) }
+            if !values.isEmpty { return deduplicateFlightNumbers(values).joined(separator: " · ") }
+        }
+        guard let raw = generated?.flightNumbers else { return nil }
+        let parts = raw.components(separatedBy: CharacterSet(charactersIn: "·,/+|"))
+        let values = parts.compactMap { BusinessFlightReference.normalizedFlightNumber($0) }
+        return values.isEmpty ? nil : values.joined(separator: " · ")
+    }
+
+    private func exactGeneratedSegments(_ generated: BookingGeneratorFlightSelection?) -> [BookingGeneratorFlightSegmentSelection]? {
+        guard let segments = generated?.segments, !segments.isEmpty else { return nil }
+        let valid = segments.filter { segment in
+            BusinessFlightReference.normalizedFlightNumber(segment.flightNumber) != nil &&
+            !segment.origin.isEmpty && !segment.destination.isEmpty &&
+            !segment.departureAt.isEmpty && !segment.arrivalAt.isEmpty
+        }
+        return valid.count == segments.count ? valid : nil
+    }
+
+    private func generatedFlightSegmentRow(_ segment: BookingGeneratorFlightSegmentSelection) -> some View {
+        let number = BusinessFlightReference.normalizedFlightNumber(segment.flightNumber) ?? segment.flightNumber
+        let code = normalizedAirlineCode(segment.airlineCode) ?? BusinessFlightReference.airlineCode(fromFlightNumber: number)
+        let airline = BusinessFlightReference.airlineName(code: code, fallback: segment.airline)
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("\(airline) · \(number)").font(.subheadline.bold())
+                Spacer()
+                if let aircraft = segment.aircraft?.nonEmpty { Text(aircraft).font(.caption).foregroundStyle(.secondary) }
+            }
+            HStack {
+                Text("\(segment.origin) → \(segment.destination)").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(compactFlightDateTime(segment.departureAt)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            if let terminal = segment.originTerminal?.nonEmpty {
+                Text("Терминал вылета: \(terminal)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func normalizedAirlineCode(_ value: String?) -> String? {
         guard let value else { return nil }
-        let compact = value.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "-", with: "")
-        guard compact.count >= 3 else { return nil }
-        let code = String(compact.prefix(2))
-        return code.range(of: "^[A-Z0-9]{2}$", options: .regularExpression) == nil ? nil : code
+        let code = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard code.range(of: "^[A-Z0-9]{2}$", options: .regularExpression) != nil else { return nil }
+        return code
     }
 
     private func flightNumberFromSummary(_ value: String, direction: BookingFlightDirection) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"\b[A-Z0-9]{2,3}[\s-]?\d{1,4}\b"#) else { return nil }
+        guard let regex = try? NSRegularExpression(pattern: #"\b[A-Z0-9]{2}[\s-]?\d{1,4}\b"#) else { return nil }
         let source = value.uppercased()
         let range = NSRange(source.startIndex..<source.endIndex, in: source)
         let values = regex.matches(in: source, range: range).compactMap { match -> String? in
             guard let swiftRange = Range(match.range, in: source) else { return nil }
-            return String(source[swiftRange])
+            return BusinessFlightReference.normalizedFlightNumber(String(source[swiftRange]))
         }
         guard !values.isEmpty else { return nil }
         if direction == .outbound { return values.first }
         return values.count > 1 ? values.last : values.first
+    }
+
+    private func deduplicateFlightNumbers(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    private func compactFlightDateTime(_ value: String) -> String {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = withFraction.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        return date?.formatted(.dateTime.day().month(.abbreviated).hour().minute()) ?? String(value.prefix(16))
     }
 
     private func flightMetric(_ title: String, _ value: String) -> some View {
@@ -463,8 +541,8 @@ struct BookingDetailView: View {
         VStack(alignment: .leading, spacing: 14) {
             if let selection = report.selection {
                 Text("ЧТО ВЫБРАЛ ГЕНЕРАТОР").font(.caption2.bold()).tracking(1.2).foregroundStyle(.secondary)
-                if let flight = selection.outbound { pricingSelectionRow(icon: "airplane.departure", title: "Перелёт туда", name: "\(flight.airline) · \(flight.flightNumbers)", subtitle: "\(flight.origin) → \(flight.destination)") }
-                if let flight = selection.inbound { pricingSelectionRow(icon: "airplane.arrival", title: "Перелёт обратно", name: "\(flight.airline) · \(flight.flightNumbers)", subtitle: "\(flight.origin) → \(flight.destination)") }
+                if let flight = selection.outbound { pricingSelectionRow(icon: "airplane.departure", title: "Перелёт туда", name: pricingFlightDisplayName(flight), subtitle: "\(flight.origin) → \(flight.destination)") }
+                if let flight = selection.inbound { pricingSelectionRow(icon: "airplane.arrival", title: "Перелёт обратно", name: pricingFlightDisplayName(flight), subtitle: "\(flight.origin) → \(flight.destination)") }
                 if let hotel = selection.makkahHotel { pricingSelectionRow(icon: "building.2.fill", title: "Отель Мекки", name: hotel.hotelName, subtitle: [hotel.roomName, hotel.roomCategory].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")) }
                 if let hotel = selection.madinahHotel { pricingSelectionRow(icon: "moon.stars.fill", title: "Отель Медины", name: hotel.hotelName, subtitle: [hotel.roomName, hotel.roomCategory].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")) }
                 Divider()
@@ -502,6 +580,14 @@ struct BookingDetailView: View {
                 Text("Маржа ≈ \(report.totals.estimatedProfitUsd, format: .currency(code: report.currency).precision(.fractionLength(0...2)))").font(.caption.bold()).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func pricingFlightDisplayName(_ flight: BookingGeneratorFlightSelection) -> String {
+        let numbers = exactGeneratedFlightNumbers(flight)
+        let code = flight.segments?.compactMap(\.airlineCode).compactMap(normalizedAirlineCode).first
+            ?? BusinessFlightReference.airlineCode(fromFlightNumber: numbers?.components(separatedBy: " · ").first)
+        let airline = BusinessFlightReference.airlineName(code: code, fallback: flight.airline)
+        return numbers.map { "\(airline) · \($0)" } ?? "\(airline) · номер не подтверждён"
     }
 
     private func fareAuditRow(_ title: String, _ fare: BookingPricingFare, currency: String) -> some View {

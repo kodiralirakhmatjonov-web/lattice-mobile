@@ -258,6 +258,25 @@ struct BookingGeneratorFlightSelection: Codable, Hashable {
     let departureAt: String
     let arrivalAt: String
     let source: String
+    let stops: Int?
+    let durationMinutes: Int?
+    let segments: [BookingGeneratorFlightSegmentSelection]?
+    let connectionAirports: [String]?
+}
+
+struct BookingGeneratorFlightSegmentSelection: Codable, Hashable {
+    let airline: String
+    let airlineCode: String?
+    let flightNumber: String
+    let origin: String
+    let destination: String
+    let departureAt: String
+    let arrivalAt: String
+    let originTerminal: String?
+    let destinationTerminal: String?
+    let aircraft: String?
+    let operatingCarrier: String?
+    let cabin: String?
 }
 
 struct BookingGeneratorHotelSelection: Codable, Hashable {
