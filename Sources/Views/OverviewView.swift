@@ -154,6 +154,13 @@ struct BookingRow: View {
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .lineLimit(1)
 
+                if !booking.flightName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Label(booking.flightName, systemImage: "airplane.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
                 HStack(spacing: 8) {
                     if let bookingNumber = booking.bookingDisplayNumber, !bookingNumber.isEmpty {
                         Text("Бронь \(bookingNumber)")

@@ -130,6 +130,23 @@ actor APIClient {
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
 
+    func bookingItinerary(bookingID: String) async throws -> [BookingItineraryItem] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/itinerary")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BookingItineraryResponse.self, from: data).items
+    }
+
+    func saveBookingItinerary(bookingID: String, items: [BookingItineraryItem]) async throws -> [BookingItineraryItem] {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/itinerary"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BookingItineraryUpdatePayload(items: items))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingItineraryResponse.self, from: data).items
+    }
+
     func updateBookingOperation(id: String, status: TripStatus, paymentStatus: String, confirmationNumber: String, internalNotes: String) async throws -> BookingDetailResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)"))
         request.httpMethod = "PATCH"

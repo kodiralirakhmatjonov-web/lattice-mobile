@@ -359,6 +359,30 @@ struct BookingDetailResponse: Codable {
     let checkout: BusinessCheckout?
 }
 
+struct BookingItineraryItem: Codable, Identifiable, Hashable {
+    let id: String
+    let bookingID: String
+    var dateLocal: String
+    var sortOrder: Int
+    var title: String
+    var subtitle: String
+    var icon: String
+    var location: String
+    var notes: String
+    let createdAt: String
+    let updatedAt: String
+}
+
+struct BookingItineraryResponse: Codable {
+    let ok: Bool
+    let bookingID: String
+    let items: [BookingItineraryItem]
+}
+
+struct BookingItineraryUpdatePayload: Encodable {
+    let items: [BookingItineraryItem]
+}
+
 struct BookingOperationUpdatePayload: Encodable {
     let status: String
     let paymentStatus: String

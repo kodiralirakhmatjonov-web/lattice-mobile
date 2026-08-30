@@ -24,6 +24,11 @@ struct BookingDetailView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     hero(detail)
                     operationsCard(detail)
+                    BusinessBookingItineraryEditor(
+                        bookingID: bookingID,
+                        startDate: detail.booking.startDate,
+                        endDate: detail.booking.endDate
+                    )
                     BookingCheckoutAdminCard(bookingID: bookingID, status: status, checkout: detail.checkout) {
                         Task { await load() }
                     }
@@ -218,16 +223,27 @@ struct BookingDetailView: View {
 
     private func flightCard(_ direction: BookingFlightDirection, detail: BookingDetailResponse) -> some View {
         let flight = savedFlight(direction, detail: detail)
+        let generated = direction == .outbound ? detail.pricingReport?.selection?.outbound : detail.pricingReport?.selection?.inbound
+        let generatedNumber = generated?.flightNumbers.nonEmpty
+        let displayNumber = flight?.flightNumber.nonEmpty ?? generatedNumber ?? flightNumberFromSummary(detail.booking.flightName, direction: direction)
+        let displayAirline = flight?.airlineName.nonEmpty ?? generated?.airline.nonEmpty ?? "Рейс из генератора"
+        let airlineCode = flight?.airlineIATA.nonEmpty ?? airlineCodeFromFlightNumber(displayNumber)
         let origin = direction == .outbound ? detail.booking.originCode : detail.booking.returnOrigin
         let destination = direction == .outbound ? detail.booking.outboundDestination : detail.booking.originCode
         let fallbackDate = direction == .outbound ? detail.booking.startDate : detail.booking.endDate
 
         return VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 12) {
+                BusinessAirlineLogoView(airlineIATA: airlineCode, size: 44)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(direction.title).font(.title2.bold())
-                    Text(flight?.airlineName.nonEmpty ?? "Рейс ещё не подтверждён")
+                    Text(displayAirline)
                         .font(.subheadline).foregroundStyle(.secondary)
+                    if let displayNumber {
+                        Text(displayNumber)
+                            .font(.caption.monospaced().weight(.bold))
+                            .foregroundStyle(.primary)
+                    }
                 }
                 Spacer()
                 Button("Изменить") { editingFlight = direction }
@@ -253,7 +269,7 @@ struct BookingDetailView: View {
             Divider()
 
             HStack(alignment: .top, spacing: 12) {
-                flightMetric("Рейс", flight?.flightNumber.nonEmpty ?? "—")
+                flightMetric("Рейс", displayNumber ?? "—")
                 flightMetric("Дата", displayFlightDate(flight?.scheduledDepartureLocal, fallback: fallbackDate))
                 flightMetric("Терминал", flight?.departureTerminal.nonEmpty ?? "—")
             }
@@ -274,6 +290,27 @@ struct BookingDetailView: View {
             }
         }
         .padding(18).businessCard(radius: 28)
+    }
+
+    private func airlineCodeFromFlightNumber(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let compact = value.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "-", with: "")
+        guard compact.count >= 3 else { return nil }
+        let code = String(compact.prefix(2))
+        return code.range(of: "^[A-Z0-9]{2}$", options: .regularExpression) == nil ? nil : code
+    }
+
+    private func flightNumberFromSummary(_ value: String, direction: BookingFlightDirection) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: #"\b[A-Z0-9]{2,3}[\s-]?\d{1,4}\b"#) else { return nil }
+        let source = value.uppercased()
+        let range = NSRange(source.startIndex..<source.endIndex, in: source)
+        let values = regex.matches(in: source, range: range).compactMap { match -> String? in
+            guard let swiftRange = Range(match.range, in: source) else { return nil }
+            return String(source[swiftRange])
+        }
+        guard !values.isEmpty else { return nil }
+        if direction == .outbound { return values.first }
+        return values.count > 1 ? values.last : values.first
     }
 
     private func flightMetric(_ title: String, _ value: String) -> some View {

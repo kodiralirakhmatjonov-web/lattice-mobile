@@ -510,6 +510,11 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     if (parts.length === 2 && request.method === 'GET') return operationsBookingDetail(request, env, bookingID);
     if (parts.length === 2 && request.method === 'PATCH') return updateOperationsBooking(request, env, bookingID, user);
     if (parts.length === 2 && request.method === 'DELETE') return deleteOperationsBooking(request, env, bookingID, user);
+    if (parts.length === 3 && parts[2] === 'itinerary') {
+      if (request.method === 'GET') return bookingItineraryDetail(env, bookingID);
+      if (request.method === 'PUT') return saveBookingItinerary(request, env, bookingID);
+      return methodNotAllowed();
+    }
     if (parts.length === 3 && parts[2] === 'assignments' && request.method === 'PATCH') return updateBookingAssignments(request, env, bookingID);
     if (parts.length === 3 && parts[2] === 'payment' && request.method === 'PUT') return saveBookingPaymentInstructions(request, env, bookingID, user);
     if (parts.length === 3 && parts[2] === 'payment-qr' && request.method === 'POST') return uploadBookingPaymeQR(request, env, bookingID, user);
@@ -870,6 +875,7 @@ async function hardDeleteSourceBooking(env, bookingID) {
 }
 
 async function purgeOperationalBooking(env, bookingID) {
+  await ensureBookingItinerarySchema(env);
   const trip = await env.HOTELS_DB.prepare('SELECT pilgrim_id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
   const attachments = await env.HOTELS_DB.prepare('SELECT object_key FROM business_chat_attachments WHERE booking_id=?').bind(bookingID).all().catch(() => ({ results: [] }));
   const now = new Date().toISOString();
@@ -881,6 +887,7 @@ async function purgeOperationalBooking(env, bookingID) {
     env.HOTELS_DB.prepare('DELETE FROM business_chat_threads WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM booking_status_history WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM booking_itinerary_items WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM trip_assignments WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM pilgrim_trips WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM booking_tombstones WHERE booking_id=?').bind(bookingID)
@@ -1277,6 +1284,170 @@ async function operationsBookings(request, env) {
   }
   await cleanupOrphanLegacyPilgrims(env);
   return json({ bookings: output });
+}
+
+
+async function ensureBookingItinerarySchema(env) {
+  await env.HOTELS_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS booking_itinerary_items (
+      id TEXT PRIMARY KEY,
+      booking_id TEXT NOT NULL,
+      date_local TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      subtitle TEXT NOT NULL DEFAULT '',
+      icon TEXT NOT NULL DEFAULT 'calendar',
+      location TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `).run();
+  await env.HOTELS_DB.prepare('CREATE INDEX IF NOT EXISTS idx_booking_itinerary_booking_date ON booking_itinerary_items(booking_id, date_local, sort_order)').run();
+}
+
+function itineraryDay(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return '';
+  const parsed = Date.parse(`${text}T12:00:00Z`);
+  return Number.isFinite(parsed) ? text : '';
+}
+
+function addItineraryDays(day, offset) {
+  const valid = itineraryDay(day);
+  if (!valid) return '';
+  const date = new Date(`${valid}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + Number(offset || 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function itineraryItemMap(row) {
+  return {
+    id: row.id,
+    bookingID: row.booking_id,
+    dateLocal: row.date_local,
+    sortOrder: Number(row.sort_order || 0),
+    title: row.title || '',
+    subtitle: row.subtitle || '',
+    icon: row.icon || 'calendar',
+    location: row.location || '',
+    notes: row.notes || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || ''
+  };
+}
+
+async function seedBookingItineraryIfNeeded(env, bookingID, trip = null) {
+  await ensureBookingItinerarySchema(env);
+  const count = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM booking_itinerary_items WHERE booking_id=?').bind(bookingID).first();
+  if (Number(count?.count || 0) > 0) return;
+
+  const resolvedTrip = trip || await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!resolvedTrip) return;
+  const snapshot = parseJSONObject(resolvedTrip.booking_snapshot_json);
+  const input = snapshot?.input && typeof snapshot.input === 'object' ? snapshot.input : {};
+  const stay = snapshot?.stay && typeof snapshot.stay === 'object' ? snapshot.stay : {};
+  const route = snapshot?.route && typeof snapshot.route === 'object' ? snapshot.route : {};
+  const hotelNames = snapshot?.hotelNames && typeof snapshot.hotelNames === 'object' ? snapshot.hotelNames : {};
+  const customization = snapshot?.customization && typeof snapshot.customization === 'object' ? snapshot.customization : {};
+  const trace = snapshot?.generatorTrace && typeof snapshot.generatorTrace === 'object' ? snapshot.generatorTrace : {};
+
+  const start = itineraryDay(resolvedTrip.start_date || input.startDate || snapshot.startDate);
+  const end = itineraryDay(resolvedTrip.end_date || input.endDate || snapshot.endDate);
+  if (!start) return;
+
+  const events = [];
+  const push = (dateLocal, title, subtitle = '', icon = 'calendar', location = '', notes = '') => {
+    const day = itineraryDay(dateLocal);
+    if (!day) return;
+    events.push({ id: `iti-${crypto.randomUUID()}`, dateLocal: day, sortOrder: events.filter(item => item.dateLocal === day).length, title, subtitle, icon, location, notes });
+  };
+
+  const outbound = trace?.outbound || {};
+  const inbound = trace?.inbound || {};
+  const outboundLabel = [safeHumanText(outbound.airline || '', 120), safeHumanText(outbound.flightNumbers || '', 120)].filter(Boolean).join(' · ');
+  const inboundLabel = [safeHumanText(inbound.airline || '', 120), safeHumanText(inbound.flightNumbers || '', 120)].filter(Boolean).join(' · ');
+  const origin = cleanText(route.originCode || input.originCode, 12) || '';
+  const destination = cleanText(route.outboundDestination || input.arrivalAirportCode, 12) || '';
+
+  push(start, 'Прилёт и встреча', outboundLabel || `${origin} → ${destination}`, 'airplane.arrival', destination);
+  if (hotelNames.makkah) push(start, 'Заселение в отель', safeHumanText(hotelNames.makkah, 220) || '', 'building.2.fill', 'Makkah');
+
+  const umrahDay = addItineraryDays(start, 1);
+  if (!end || umrahDay <= end) push(umrahDay, 'Умра', 'Ихрам · таваф · са’й', 'moon.stars.fill', 'Masjid al-Haram');
+
+  if (customization.ziyaratMakkah !== false) {
+    const ziyaratMakkahDay = addItineraryDays(start, 2);
+    if (!end || ziyaratMakkahDay <= end) push(ziyaratMakkahDay, 'Зиярат в Мекке', 'Маршрут святых мест', 'mappin.and.ellipse', 'Makkah');
+  }
+
+  const madinahCheckIn = itineraryDay(stay.madinahCheckIn);
+  if (madinahCheckIn) {
+    push(madinahCheckIn, 'Переезд в Медину', 'Междугородний трансфер', 'car.side.fill', 'Madinah');
+    if (hotelNames.madinah) push(madinahCheckIn, 'Заселение в отель', safeHumanText(hotelNames.madinah, 220) || '', 'building.2.fill', 'Madinah');
+    const madinahVisit = addItineraryDays(madinahCheckIn, 1);
+    if (!end || madinahVisit <= end) push(madinahVisit, 'Зиярат в Медине', 'Мечеть Пророка ﷺ и места зиярата', 'building.columns.fill', 'Madinah');
+  }
+
+  if (end) push(end, 'Обратный рейс', inboundLabel || `${cleanText(route.returnOrigin, 12) || destination} → ${origin}`, 'airplane.departure', cleanText(route.returnOrigin, 12) || destination);
+
+  if (!events.length) return;
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.batch(events.map(item => env.HOTELS_DB.prepare(`INSERT INTO booking_itinerary_items (id,booking_id,date_local,sort_order,title,subtitle,icon,location,notes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(item.id, bookingID, item.dateLocal, item.sortOrder, item.title, item.subtitle, item.icon, item.location, item.notes, now, now)));
+}
+
+async function bookingItineraryDetail(env, bookingID, trip = null) {
+  await seedBookingItineraryIfNeeded(env, bookingID, trip);
+  const rows = await env.HOTELS_DB.prepare('SELECT * FROM booking_itinerary_items WHERE booking_id=? ORDER BY date_local ASC, sort_order ASC, created_at ASC').bind(bookingID).all();
+  return json({ ok: true, bookingID, items: (rows.results || []).map(itineraryItemMap) });
+}
+
+async function saveBookingItinerary(request, env, bookingID) {
+  await ensureBookingItinerarySchema(env);
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_SYNCED' }, 404);
+  const payload = await request.json().catch(() => null);
+  const rawItems = Array.isArray(payload?.items) ? payload.items : null;
+  if (!rawItems) return json({ ok: false, error: 'ITEMS_REQUIRED' }, 400);
+  if (rawItems.length > 80) return json({ ok: false, error: 'TOO_MANY_ITINERARY_ITEMS' }, 400);
+
+  const snapshot = parseJSONObject(trip.booking_snapshot_json);
+  const start = itineraryDay(trip.start_date || snapshot?.input?.startDate || snapshot?.startDate);
+  const end = itineraryDay(trip.end_date || snapshot?.input?.endDate || snapshot?.endDate);
+  const now = new Date().toISOString();
+  const items = [];
+
+  for (let index = 0; index < rawItems.length; index += 1) {
+    const raw = rawItems[index] || {};
+    const dateLocal = itineraryDay(raw.dateLocal || raw.date);
+    if (!dateLocal) return json({ ok: false, error: 'INVALID_ITINERARY_DATE', index }, 400);
+    if (start && dateLocal < start) return json({ ok: false, error: 'ITINERARY_DATE_BEFORE_TRIP', index }, 409);
+    if (end && dateLocal > end) return json({ ok: false, error: 'ITINERARY_DATE_AFTER_TRIP', index }, 409);
+    const title = safeHumanText(raw.title || '', 180);
+    if (!title) return json({ ok: false, error: 'ITINERARY_TITLE_REQUIRED', index }, 400);
+    const rawID = cleanText(raw.id, 120) || '';
+    const id = /^[A-Za-z0-9_-]{6,120}$/.test(rawID) ? rawID : `iti-${crypto.randomUUID()}`;
+    items.push({
+      id,
+      bookingID,
+      dateLocal,
+      sortOrder: Number.isFinite(Number(raw.sortOrder)) ? Math.max(0, Math.trunc(Number(raw.sortOrder))) : index,
+      title,
+      subtitle: safeHumanText(raw.subtitle || '', 320) || '',
+      icon: cleanText(raw.icon, 80) || 'calendar',
+      location: safeHumanText(raw.location || '', 180) || '',
+      notes: safeHumanText(raw.notes || '', 1200) || '',
+      createdAt: cleanText(raw.createdAt, 80) || now,
+      updatedAt: now
+    });
+  }
+
+  const statements = [env.HOTELS_DB.prepare('DELETE FROM booking_itinerary_items WHERE booking_id=?').bind(bookingID)];
+  for (const item of items) {
+    statements.push(env.HOTELS_DB.prepare(`INSERT INTO booking_itinerary_items (id,booking_id,date_local,sort_order,title,subtitle,icon,location,notes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(item.id, bookingID, item.dateLocal, item.sortOrder, item.title, item.subtitle, item.icon, item.location, item.notes, item.createdAt, item.updatedAt));
+  }
+  await env.HOTELS_DB.batch(statements);
+  return bookingItineraryDetail(env, bookingID, trip);
 }
 
 function humanizeFieldKey(value) {
@@ -1698,6 +1869,10 @@ async function handleClientOperations(request, env, parts) {
     if (parts.length === 2 && request.method === 'GET') {
       const auth = await requireClientBooking(request, env, bookingID); if (!auth.ok) return auth.response;
       return clientTripDetail(env, bookingID, auth.trip);
+    }
+    if (parts.length === 3 && parts[2] === 'itinerary' && request.method === 'GET') {
+      const auth = await requireClientBooking(request, env, bookingID); if (!auth.ok) return auth.response;
+      return bookingItineraryDetail(env, bookingID, auth.trip);
     }
     if (parts.length === 3 && parts[2] === 'checkout' && request.method === 'GET') {
       const auth=await requireClientBooking(request,env,bookingID); if(!auth.ok)return auth.response;
