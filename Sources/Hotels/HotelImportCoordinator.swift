@@ -20,7 +20,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             let host = (url.host ?? "").lowercased()
             switch self {
             case .booking:
-                return false
+                let path = url.path.lowercased()
+                return path.hasPrefix("/share-") || path.hasPrefix("/share/") || path.hasPrefix("/share_")
             case .expedia:
                 return host == "expe.onelink.me" || host.hasSuffix(".expe.onelink.me")
             }
@@ -37,7 +38,6 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
 
         func isLikelyHotelDetailURL(_ url: URL) -> Bool {
-            if isShareRedirectURL(url) { return true }
             let value = url.absoluteString.lowercased()
             switch self {
             case .booking:
@@ -110,7 +110,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             fail("Поддерживаются только прямые ссылки на конкретный отель в Booking или Expedia.")
             return
         }
-        guard provider.isLikelyHotelDetailURL(normalized) else {
+        guard provider.isShareRedirectURL(normalized) || provider.isLikelyHotelDetailURL(normalized) else {
             fail("Это похоже не на карточку отеля. Откройте конкретный отель в \(provider.rawValue) и скопируйте ссылку его страницы.")
             return
         }
@@ -142,7 +142,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             }
 
             status = provider.isShareRedirectURL(normalized)
-                ? "Открываем ссылку Expedia и переходим к карточке отеля…"
+                ? "Открываем ссылку \(provider.rawValue) и переходим к карточке отеля…"
                 : "Открываем карточку \(provider.rawValue)…"
             progress = 0.08
             var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
@@ -246,15 +246,36 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
 
         guard let currentURL = webView.url else { return }
+        if provider.isShareRedirectURL(currentURL) {
+            status = "Переходим из ссылки \(provider.rawValue) к карточке отеля…"
+            progress = max(progress, 0.12)
+            if provider == .booking {
+                let target = try? await webView.evaluateJavaScript("""
+                (() => {
+                  const urls = [
+                    document.querySelector('link[rel=canonical]')?.href,
+                    document.querySelector('meta[property=\"og:url\"]')?.content,
+                    ...Array.from(document.querySelectorAll('a[href*=\"/hotel/\"]')).map(a => a.href)
+                  ].filter(Boolean);
+                  return urls.find(value => String(value).toLowerCase().includes('booking.com/hotel/')) || null;
+                })()
+                """) as? String
+                if let target, let resolved = URL(string: target), provider.isLikelyHotelDetailURL(resolved) {
+                    sourceURL = resolved
+                    webView.load(URLRequest(url: resolved, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45))
+                }
+            }
+            return
+        }
         guard provider.isProviderContentURL(currentURL) else {
             if provider.isShareRedirectURL(sourceURL ?? currentURL) {
-                status = "Переходим из ссылки Expedia к карточке отеля…"
+                status = "Переходим из ссылки \(provider.rawValue) к карточке отеля…"
                 progress = max(progress, 0.12)
             }
             return
         }
         guard provider.isLikelyHotelDetailURL(currentURL) else {
-            fail("Ссылка открылась в Expedia, но не на карточке конкретного отеля. Откройте нужный отель и скопируйте его ссылку ещё раз.")
+            fail("Ссылка открылась в \(provider.rawValue), но не на карточке конкретного отеля. Откройте нужный отель и скопируйте его ссылку ещё раз.")
             return
         }
         extractionStarted = true

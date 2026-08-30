@@ -515,6 +515,11 @@ async function handleBusinessOperations(request, env, url, parts, user) {
       if (request.method === 'PUT') return saveBookingItinerary(request, env, bookingID);
       return methodNotAllowed();
     }
+    if (parts.length === 3 && parts[2] === 'pricing') {
+      if (request.method === 'GET') return bookingPricingOverrideDetail(request, env, bookingID);
+      if (request.method === 'PUT') return saveBookingPricingOverride(request, env, bookingID, user);
+      return methodNotAllowed();
+    }
     if (parts.length === 3 && parts[2] === 'assignments' && request.method === 'PATCH') return updateBookingAssignments(request, env, bookingID);
     if (parts.length === 3 && parts[2] === 'payment' && request.method === 'PUT') return saveBookingPaymentInstructions(request, env, bookingID, user);
     if (parts.length === 3 && parts[2] === 'payment-qr' && request.method === 'POST') return uploadBookingPaymeQR(request, env, bookingID, user);
@@ -1518,6 +1523,190 @@ async function rawBookingForDetail(request, env, bookingID) {
   return null;
 }
 
+
+async function ensureBookingPricingOverrideSchema(env) {
+  await env.HOTELS_DB.prepare(`CREATE TABLE IF NOT EXISTS booking_pricing_overrides (
+    booking_id TEXT PRIMARY KEY,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    components_json TEXT NOT NULL DEFAULT '[]',
+    markup_rate REAL NOT NULL DEFAULT 0.50,
+    payment_fee_rate REAL NOT NULL DEFAULT 0.02,
+    supplier_cost_usd REAL NOT NULL DEFAULT 0,
+    markup_amount_usd REAL NOT NULL DEFAULT 0,
+    subtotal_after_markup_usd REAL NOT NULL DEFAULT 0,
+    payment_fee_amount_usd REAL NOT NULL DEFAULT 0,
+    calculated_selling_price_usd REAL NOT NULL DEFAULT 0,
+    public_price_per_pilgrim_usd REAL NOT NULL DEFAULT 0,
+    public_total_usd REAL NOT NULL DEFAULT 0,
+    rounding_difference_usd REAL NOT NULL DEFAULT 0,
+    estimated_profit_usd REAL NOT NULL DEFAULT 0,
+    traveler_count INTEGER NOT NULL DEFAULT 1,
+    updated_by TEXT,
+    updated_at TEXT NOT NULL
+  )`).run();
+}
+
+function bookingPricingOverrideMap(row) {
+  if (!row) return null;
+  return {
+    bookingID: row.booking_id,
+    currency: row.currency || 'USD',
+    components: (() => { try { const value = JSON.parse(row.components_json || '[]'); return Array.isArray(value) ? value : []; } catch { return []; } })(),
+    markupRate: Number(row.markup_rate || 0),
+    paymentFeeRate: Number(row.payment_fee_rate || 0),
+    travelerCount: Math.max(1, Number(row.traveler_count || 1)),
+    totals: {
+      supplierCostUsd: Number(row.supplier_cost_usd || 0),
+      markupRate: Number(row.markup_rate || 0),
+      markupAmountUsd: Number(row.markup_amount_usd || 0),
+      subtotalAfterMarkupUsd: Number(row.subtotal_after_markup_usd || 0),
+      paymentFeeRate: Number(row.payment_fee_rate || 0),
+      paymentFeeAmountUsd: Number(row.payment_fee_amount_usd || 0),
+      calculatedSellingPriceUsd: Number(row.calculated_selling_price_usd || 0),
+      publicPricePerPilgrimUsd: Number(row.public_price_per_pilgrim_usd || 0),
+      publicTotalUsd: Number(row.public_total_usd || 0),
+      roundingDifferenceUsd: Number(row.rounding_difference_usd || 0),
+      estimatedProfitUsd: Number(row.estimated_profit_usd || 0)
+    },
+    updatedBy: row.updated_by || null,
+    updatedAt: row.updated_at
+  };
+}
+
+async function bookingPricingOverride(env, bookingID) {
+  await ensureBookingPricingOverrideSchema(env);
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM booking_pricing_overrides WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  return bookingPricingOverrideMap(row);
+}
+
+function reportWithPricingOverride(report, override) {
+  if (!report || !override) return report;
+  return {
+    ...report,
+    components: override.components,
+    totals: override.totals,
+    businessOverride: true
+  };
+}
+
+async function bookingPricingOverrideDetail(request, env, bookingID) {
+  const resolved = await rawBookingForDetail(request, env, bookingID);
+  if (!resolved) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
+  const pricingReport = await generatorPricingReportForBooking(env, bookingID, resolved.raw);
+  if (!pricingReport) return json({ ok: false, error: 'GENERATOR_PRICING_NOT_FOUND' }, 409);
+  const override = await bookingPricingOverride(env, bookingID);
+  return json({ ok: true, pricing: override, basePricing: pricingReport });
+}
+
+function normalizedEditablePricingComponents(value, baseComponents) {
+  const baseByCode = new Map((Array.isArray(baseComponents) ? baseComponents : []).map(item => [String(item?.code || ''), item]));
+  if (!Array.isArray(value) || !value.length) return null;
+  const output = [];
+  const seen = new Set();
+  for (const raw of value) {
+    const code = cleanText(raw?.code, 80);
+    if (!code || seen.has(code) || !baseByCode.has(code)) continue;
+    const amount = Number(raw?.supplierCostUsd);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 1000000) return null;
+    const base = baseByCode.get(code);
+    output.push({ code, label: safeHumanText(base?.label || raw?.label || code, 180) || code, supplierCostUsd: Math.round(amount * 100) / 100 });
+    seen.add(code);
+  }
+  // Every original component is required, so saving cannot silently drop a cost.
+  if (output.length !== baseByCode.size) return null;
+  return output;
+}
+
+async function syncPricingOverrideToSourceBooking(env, bookingID, override) {
+  if (!env.BOOKINGS_DB) throw new Error('BOOKINGS_DB_NOT_CONFIGURED');
+  const source = await sourceBookingPayload(env, bookingID);
+  if (!source || !Object.keys(source).length) throw new Error('SOURCE_BOOKING_NOT_FOUND');
+  source.totalUsd = override.totals.publicTotalUsd;
+  source.perPilgrimUsd = override.totals.publicPricePerPilgrimUsd;
+  source.businessPricingOverride = {
+    currency: override.currency,
+    components: override.components,
+    markupRate: override.markupRate,
+    paymentFeeRate: override.paymentFeeRate,
+    totals: override.totals,
+    updatedAt: override.updatedAt
+  };
+  const sourceColumns = await env.BOOKINGS_DB.prepare("PRAGMA table_info('bookings')").all().catch(() => ({ results: [] }));
+  const sourceNames = new Set((sourceColumns.results || []).map(row => String(row?.name || '')));
+  if (sourceNames.has('updated_at')) {
+    await env.BOOKINGS_DB.prepare('UPDATE bookings SET payload_json=?, updated_at=? WHERE id=?').bind(JSON.stringify(source), override.updatedAt, bookingID).run();
+  } else {
+    await env.BOOKINGS_DB.prepare('UPDATE bookings SET payload_json=? WHERE id=?').bind(JSON.stringify(source), bookingID).run();
+  }
+
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  if (trip) {
+    const snapshot = parseJSONObject(trip.booking_snapshot_json);
+    snapshot.totalUsd = override.totals.publicTotalUsd;
+    snapshot.perPilgrimUsd = override.totals.publicPricePerPilgrimUsd;
+    snapshot.businessPricingOverride = source.businessPricingOverride;
+    const pricing = parseJSONObject(trip.pricing_snapshot_json);
+    pricing.businessPricingOverride = source.businessPricingOverride;
+    await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=? WHERE booking_id=?')
+      .bind(JSON.stringify(snapshot), JSON.stringify(pricing), override.updatedAt, bookingID).run();
+  }
+}
+
+async function saveBookingPricingOverride(request, env, bookingID, user) {
+  const resolved = await rawBookingForDetail(request, env, bookingID);
+  if (!resolved) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
+  const report = await generatorPricingReportForBooking(env, bookingID, resolved.raw);
+  if (!report) return json({ ok: false, error: 'GENERATOR_PRICING_NOT_FOUND' }, 409);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+
+  const components = normalizedEditablePricingComponents(payload.components, report.components);
+  if (!components) return json({ ok: false, error: 'INVALID_PRICING_COMPONENTS' }, 400);
+  const markupRate = Number(payload.markupRate);
+  const paymentFeeRate = Number(payload.paymentFeeRate);
+  if (!Number.isFinite(markupRate) || markupRate < 0 || markupRate > 5) return json({ ok: false, error: 'INVALID_MARKUP_RATE' }, 400);
+  if (!Number.isFinite(paymentFeeRate) || paymentFeeRate < 0 || paymentFeeRate >= 0.5) return json({ ok: false, error: 'INVALID_PAYMENT_FEE_RATE' }, 400);
+
+  const travelerCount = Math.max(1,
+    Number(report?.context?.travelers?.adults || 0) +
+    Number(report?.context?.travelers?.children || 0) +
+    Number(report?.context?.travelers?.infants || 0)
+  );
+  const supplierCostUsd = components.reduce((sum, item) => sum + Number(item.supplierCostUsd || 0), 0);
+  const markupAmountUsd = supplierCostUsd * markupRate;
+  const subtotalAfterMarkupUsd = supplierCostUsd + markupAmountUsd;
+  const calculatedSellingPriceUsd = subtotalAfterMarkupUsd / (1 - paymentFeeRate);
+  const paymentFeeAmountUsd = calculatedSellingPriceUsd - subtotalAfterMarkupUsd;
+  const publicPricePerPilgrimUsd = Math.max(5, Math.round((calculatedSellingPriceUsd / travelerCount) / 5) * 5);
+  const publicTotalUsd = publicPricePerPilgrimUsd * travelerCount;
+  const roundingDifferenceUsd = publicTotalUsd - calculatedSellingPriceUsd;
+  const estimatedProfitUsd = publicTotalUsd - supplierCostUsd - paymentFeeAmountUsd;
+  const now = new Date().toISOString();
+  const updatedBy = cleanText(user?.login, 180) || null;
+
+  await ensureBookingPricingOverrideSchema(env);
+  await env.HOTELS_DB.prepare(`INSERT INTO booking_pricing_overrides (
+    booking_id,currency,components_json,markup_rate,payment_fee_rate,supplier_cost_usd,markup_amount_usd,
+    subtotal_after_markup_usd,payment_fee_amount_usd,calculated_selling_price_usd,public_price_per_pilgrim_usd,
+    public_total_usd,rounding_difference_usd,estimated_profit_usd,traveler_count,updated_by,updated_at
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(booking_id) DO UPDATE SET
+    currency=excluded.currency,components_json=excluded.components_json,markup_rate=excluded.markup_rate,
+    payment_fee_rate=excluded.payment_fee_rate,supplier_cost_usd=excluded.supplier_cost_usd,
+    markup_amount_usd=excluded.markup_amount_usd,subtotal_after_markup_usd=excluded.subtotal_after_markup_usd,
+    payment_fee_amount_usd=excluded.payment_fee_amount_usd,calculated_selling_price_usd=excluded.calculated_selling_price_usd,
+    public_price_per_pilgrim_usd=excluded.public_price_per_pilgrim_usd,public_total_usd=excluded.public_total_usd,
+    rounding_difference_usd=excluded.rounding_difference_usd,estimated_profit_usd=excluded.estimated_profit_usd,
+    traveler_count=excluded.traveler_count,updated_by=excluded.updated_by,updated_at=excluded.updated_at`)
+    .bind(bookingID, report.currency || 'USD', JSON.stringify(components), markupRate, paymentFeeRate, supplierCostUsd, markupAmountUsd,
+      subtotalAfterMarkupUsd, paymentFeeAmountUsd, calculatedSellingPriceUsd, publicPricePerPilgrimUsd, publicTotalUsd,
+      roundingDifferenceUsd, estimatedProfitUsd, travelerCount, updatedBy, now).run();
+
+  const override = await bookingPricingOverride(env, bookingID);
+  await syncPricingOverrideToSourceBooking(env, bookingID, override);
+  return json({ ok: true, pricing: override });
+}
+
 async function generatorPricingReport(env, raw) {
   const trace = raw?.generatorTrace && typeof raw.generatorTrace === 'object' ? raw.generatorTrace : {};
   const quoteID = cleanText(trace?.quoteId || raw?.quoteId, 180);
@@ -1528,6 +1717,13 @@ async function generatorPricingReport(env, raw) {
   const audit = parseJSONObject(row?.audit_json);
   if (!audit || !Object.keys(audit).length) return null;
   return { ...audit, selection: trace };
+}
+
+
+async function generatorPricingReportForBooking(env, bookingID, raw) {
+  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const snapshot = parseJSONObject(trip?.booking_snapshot_json);
+  return generatorPricingReport(env, { ...snapshot, ...(raw && typeof raw === 'object' ? raw : {}) });
 }
 
 async function operationsBookingDetail(request, env, bookingID) {
@@ -1552,7 +1748,8 @@ async function operationsBookingDetail(request, env, bookingID) {
     operation: tripMap(trip),
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
-    pricingReport: await generatorPricingReport(env, pricingReportSource),
+    pricingReport: reportWithPricingOverride(await generatorPricingReport(env, pricingReportSource), await bookingPricingOverride(env, bookingID)),
+    pricingOverride: await bookingPricingOverride(env, bookingID),
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
     flights: (flightRows.results || []).map(mapTripFlight),

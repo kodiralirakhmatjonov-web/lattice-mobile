@@ -137,6 +137,16 @@ actor APIClient {
         return try decoder.decode(BookingItineraryResponse.self, from: data).items
     }
 
+    func saveBookingPricing(bookingID: String, components: [BookingPricingComponent], markupRate: Double, paymentFeeRate: Double) async throws -> BookingPricingOverride {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/pricing"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BookingPricingOverrideUpdatePayload(components: components, markupRate: markupRate, paymentFeeRate: paymentFeeRate))
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingPricingOverrideResponse.self, from: data).pricing
+    }
+
     func saveBookingItinerary(bookingID: String, items: [BookingItineraryItem]) async throws -> [BookingItineraryItem] {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/itinerary"))
         request.httpMethod = "PUT"

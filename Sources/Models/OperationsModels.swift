@@ -218,6 +218,29 @@ struct BookingPricingTotals: Codable, Hashable {
     let estimatedProfitUsd: Double
 }
 
+struct BookingPricingOverride: Codable, Hashable {
+    let bookingID: String
+    let currency: String
+    let components: [BookingPricingComponent]
+    let markupRate: Double
+    let paymentFeeRate: Double
+    let travelerCount: Int
+    let totals: BookingPricingTotals
+    let updatedBy: String?
+    let updatedAt: String
+}
+
+struct BookingPricingOverrideUpdatePayload: Encodable {
+    let components: [BookingPricingComponent]
+    let markupRate: Double
+    let paymentFeeRate: Double
+}
+
+struct BookingPricingOverrideResponse: Decodable {
+    let ok: Bool
+    let pricing: BookingPricingOverride
+}
+
 struct BookingGeneratorSelection: Codable, Hashable {
     let quoteId: String?
     let outbound: BookingGeneratorFlightSelection?
@@ -352,6 +375,7 @@ struct BookingDetailResponse: Codable {
     let pilgrim: PilgrimSummary?
     let pricingLines: [BookingPricingLine]
     let pricingReport: BookingPricingReport?
+    let pricingOverride: BookingPricingOverride?
     let requestFields: [BookingRequestField]
     let statusHistory: [BookingStatusHistoryItem]
     let flights: [BookingFlight]?

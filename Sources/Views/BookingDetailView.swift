@@ -14,6 +14,7 @@ struct BookingDetailView: View {
     @State private var confirmationNumber = ""
     @State private var internalNotes = ""
     @State private var showPricing = false
+    @State private var showPricingEditor = false
     @State private var editingFlight: BookingFlightDirection?
     @State private var editingHotelCity: String?
     @State private var showGuidePicker = false
@@ -96,6 +97,15 @@ struct BookingDetailView: View {
                 NavigationStack {
                     GuideAssignmentPicker(bookingID: bookingID, assignment: detail.assignment) {
                         showGuidePicker = false
+                        Task { await load() }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showPricingEditor) {
+            if let report = detail?.pricingReport {
+                NavigationStack {
+                    BookingPricingEditorSheet(bookingID: bookingID, report: report) {
                         Task { await load() }
                     }
                 }
@@ -405,6 +415,21 @@ struct BookingDetailView: View {
             if showPricing {
                 Divider().padding(.vertical, 14)
                 if let report = detail.pricingReport {
+                    Button {
+                        showPricingEditor = true
+                    } label: {
+                        HStack {
+                            Label("Изменить цены", systemImage: "slider.horizontal.3")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 14)
+                        .frame(height: 48)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 14)
                     pricingReportView(report)
                 } else if detail.pricingLines.isEmpty {
                     detailRow("Итого клиенту", detail.booking.totalUsd.formatted(.currency(code: "USD")))
@@ -463,9 +488,9 @@ struct BookingDetailView: View {
 
             Divider()
             pricingTotalRow("Себестоимость", report.totals.supplierCostUsd, currency: report.currency)
-            pricingTotalRow("Наценка 50%", report.totals.markupAmountUsd, currency: report.currency)
+            pricingTotalRow("Наценка \(Int((report.totals.markupRate * 100).rounded()))%", report.totals.markupAmountUsd, currency: report.currency)
             pricingTotalRow("После наценки", report.totals.subtotalAfterMarkupUsd, currency: report.currency)
-            pricingTotalRow("Комиссия 2%", report.totals.paymentFeeAmountUsd, currency: report.currency)
+            pricingTotalRow("Комиссия \(Int((report.totals.paymentFeeRate * 100).rounded()))%", report.totals.paymentFeeAmountUsd, currency: report.currency)
             pricingTotalRow("Расчёт до округления", report.totals.calculatedSellingPriceUsd, currency: report.currency)
             if abs(report.totals.roundingDifferenceUsd) > 0.001 { pricingTotalRow("Округление", report.totals.roundingDifferenceUsd, currency: report.currency) }
             pricingTotalRow("ИТОГО КЛИЕНТУ", report.totals.publicTotalUsd, currency: report.currency, emphasized: true)
