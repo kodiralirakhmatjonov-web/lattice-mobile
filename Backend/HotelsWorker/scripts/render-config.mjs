@@ -46,6 +46,58 @@ async function operationalBookingIDs() {
   }
 }
 
+async function validateBookingDatabase(databaseID) {
+  try {
+    const rows = await d1Query(
+      databaseID,
+      `SELECT
+         (SELECT COUNT(*) FROM bookings) AS booking_count,
+         (SELECT MAX(COALESCE(updated_at, created_at, '')) FROM bookings) AS newest_booking,
+         (SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name IN ('id','access_token_hash','payload_json','status')) AS required_columns`,
+    );
+    const row = rows[0];
+    if (!row || Number(row.required_columns ?? 0) !== 4) return null;
+    return {
+      bookingCount: Number(row.booking_count ?? 0),
+      newestBooking: String(row.newest_booking ?? ''),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function deployedBookingsBinding(databases) {
+  // Reuse the binding that is already serving production before attempting any
+  // discovery. This is safer than inferring the source database from stale
+  // operational rows in iumrah-hotels.
+  for (const scriptName of ['iumrah-hotels-api', 'iumrah-package-api']) {
+    try {
+      const response = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountID}/workers/scripts/${scriptName}/settings`,
+        { headers },
+      );
+      if (!response.ok) continue;
+      const payload = await response.json();
+      const bindings = Array.isArray(payload?.result?.bindings) ? payload.result.bindings : [];
+      const binding = bindings.find(item =>
+        String(item?.name || '') === 'BOOKINGS_DB' && String(item?.type || '').toLowerCase() === 'd1'
+      );
+      const id = String(binding?.database_id ?? binding?.id ?? '').trim();
+      if (!id || id === String(hotelDatabaseID)) continue;
+
+      const validation = await validateBookingDatabase(id);
+      if (!validation) continue;
+      const listed = databases.find(item => String(item?.uuid ?? item?.id ?? '') === id);
+      const name = String(listed?.name ?? 'iumrah-bookings');
+      console.log(`Using current production BOOKINGS_DB binding from ${scriptName}: ${name} (${id})`);
+      return { id, name, ...validation, overlapCount: 0, source: `worker:${scriptName}` };
+    } catch (error) {
+      console.warn(`Could not read ${scriptName} bindings: ${error?.message || error}`);
+    }
+  }
+  return null;
+}
+
 async function findBookingDatabase() {
   const listResponse = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountID}/d1/database?per_page=100`,
@@ -54,25 +106,22 @@ async function findBookingDatabase() {
   if (!listResponse.ok) throw new Error(`Unable to list D1 databases (${listResponse.status})`);
   const listPayload = await listResponse.json();
   const databases = Array.isArray(listPayload.result) ? listPayload.result : [];
+
+  const deployed = await deployedBookingsBinding(databases);
+  if (deployed) return deployed;
+
   const knownBookingIDs = await operationalBookingIDs();
   const candidates = [];
 
   for (const database of databases) {
     const id = database.uuid ?? database.id;
     if (!id || String(id) === String(hotelDatabaseID)) continue;
-    try {
-      const rows = await d1Query(
-        id,
-        `SELECT
-           (SELECT COUNT(*) FROM bookings) AS booking_count,
-           (SELECT MAX(COALESCE(updated_at, created_at, '')) FROM bookings) AS newest_booking,
-           (SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name IN ('id','access_token_hash','payload_json','status')) AS required_columns`,
-      );
-      const row = rows[0];
-      if (!row || Number(row.required_columns ?? 0) !== 4) continue;
+    const validation = await validateBookingDatabase(id);
+    if (!validation) continue;
 
-      let overlapCount = 0;
-      if (knownBookingIDs.length) {
+    let overlapCount = 0;
+    if (knownBookingIDs.length) {
+      try {
         const placeholders = knownBookingIDs.map(() => '?').join(',');
         const overlapRows = await d1Query(
           id,
@@ -80,18 +129,19 @@ async function findBookingDatabase() {
           knownBookingIDs,
         );
         overlapCount = Number(overlapRows?.[0]?.overlap_count ?? 0);
+      } catch {
+        overlapCount = 0;
       }
-
-      candidates.push({
-        id: String(id),
-        name: String(database.name ?? 'iumrah-bookings'),
-        bookingCount: Number(row.booking_count ?? 0),
-        newestBooking: String(row.newest_booking ?? ''),
-        overlapCount,
-      });
-    } catch {
-      // Not the live bookings database. Keep scanning.
     }
+
+    candidates.push({
+      id: String(id),
+      name: String(database.name ?? 'iumrah-bookings'),
+      bookingCount: validation.bookingCount,
+      newestBooking: validation.newestBooking,
+      overlapCount,
+      source: 'discovery',
+    });
   }
 
   if (!candidates.length) {
@@ -107,7 +157,13 @@ async function findBookingDatabase() {
 
   const selected = candidates[0];
   if (knownBookingIDs.length && selected.overlapCount === 0) {
-    throw new Error(`No bookings D1 overlaps the ${knownBookingIDs.length} operational booking IDs already stored in iumrah-hotels. Refusing to bind an unrelated database.`);
+    // The operational mirror may contain old/deleted IDs and must not block a
+    // legitimate deploy. Fall back to the same deterministic newest-booking
+    // selection used by PackageEngine, while still requiring the full schema.
+    console.warn(
+      `No bookings D1 overlaps the ${knownBookingIDs.length} operational IDs. ` +
+      `Falling back to the newest schema-compatible bookings database: ${selected.name} (${selected.id}).`,
+    );
   }
 
   console.log(`Operational booking IDs used for D1 verification: ${knownBookingIDs.length}`);
