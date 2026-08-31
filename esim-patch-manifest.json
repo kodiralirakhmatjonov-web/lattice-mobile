@@ -1,0 +1,41 @@
+{
+  "patch": "iumrah-business-update-002-esim-auto-usage",
+  "purpose": "Manual eSIM purchase/assignment with fully automatic eSIM Access usage/status sync for Business and authenticated clients.",
+  "files": [
+    {
+      "path": "BUSINESS_ESIM_002_APPLIED.txt",
+      "sha256": "0ad71bbe3286bb4d070a3fc43f048014a558355f895605b6385767ba01267e02",
+      "bytes": 799
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0016_booking_esims.sql",
+      "sha256": "39fb17bd1729de7ef882e3dc9861eab8e4d664ccb8f1ca88a644a2d572fd8363",
+      "bytes": 1118
+    },
+    {
+      "path": "Backend/HotelsWorker/src/index.js",
+      "sha256": "ce0ee23a9d860721707819c3cf518a7b9fcb0701ea01f2cf8c64d9d67bffac81",
+      "bytes": 290379
+    },
+    {
+      "path": "Sources/Models/OperationsModels.swift",
+      "sha256": "d3f9be12daeaef57bc0a69907b0d454dbdb8934d2e2fe847a28d12eba55ec39b",
+      "bytes": 18096
+    },
+    {
+      "path": "Sources/Networking/APIClient.swift",
+      "sha256": "840c99dd84e5b1a0274660fe5e9ef00fc09ab00e39cc22c390b30db136c1ae3f",
+      "bytes": 35070
+    },
+    {
+      "path": "Sources/Views/BookingDetailView.swift",
+      "sha256": "87a481a4bae3195c332e32af35fdb48d3649594cfd5e410017e6173c6c293af6",
+      "bytes": 57227
+    },
+    {
+      "path": "Sources/Views/BookingESIMAdminCard.swift",
+      "sha256": "780bf21252e9256052617cbf2821a834aeda9801b109b0d7f364289203a25b2a",
+      "bytes": 15980
+    }
+  ]
+}

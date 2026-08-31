@@ -33,6 +33,9 @@ struct BookingDetailView: View {
                     BookingCheckoutAdminCard(bookingID: bookingID, status: status, checkout: detail.checkout) {
                         Task { await load() }
                     }
+                    BookingESIMAdminCard(bookingID: bookingID, esims: detail.esims ?? []) {
+                        Task { await load() }
+                    }
 
                     sectionTitle("Перелёты", subtitle: "Рейс можно заменить только после проверки AeroDataBox.")
                     flightCard(.outbound, detail: detail)

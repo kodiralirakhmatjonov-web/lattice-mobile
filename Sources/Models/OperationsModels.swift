@@ -368,6 +368,71 @@ struct BusinessTravelDocument: Codable, Identifiable, Hashable {
     let mediaURL: String
 }
 
+struct BookingESIMProfile: Codable, Identifiable, Hashable {
+    let id: String
+    let bookingID: String
+    let travelerPosition: Int?
+    let label: String
+    let provider: String
+    let providerEsimID: String?
+    let iccid: String
+    let planName: String
+    let countryCode: String
+    let totalMB: Double
+    let usedMB: Double
+    let remainingMB: Double
+    let validityDays: Int?
+    let status: String
+    let providerStatus: String?
+    let providerSmdpStatus: String?
+    let smdpAddress: String
+    let activationCode: String
+    let lpaString: String
+    let qrCodeURL: String?
+    let activatedAt: String?
+    let expiresAt: String?
+    let lastUsageSyncAt: String?
+    let usageSource: String
+    let createdAt: String
+    let updatedAt: String
+
+    var totalGB: Double { totalMB / 1024 }
+    var usedGB: Double { usedMB / 1024 }
+    var remainingGB: Double { remainingMB / 1024 }
+    var usageAvailable: Bool { usageSource == "provider" || lastUsageSyncAt != nil }
+    var usageProgress: Double { usageAvailable && totalMB > 0 ? min(max(remainingMB / totalMB, 0), 1) : 0 }
+}
+
+struct BookingESIMListResponse: Codable {
+    let ok: Bool
+    let bookingID: String
+    let esims: [BookingESIMProfile]
+}
+
+struct BookingESIMResponse: Codable {
+    let ok: Bool
+    let esim: BookingESIMProfile
+}
+
+struct BookingESIMDeleteResponse: Codable {
+    let ok: Bool
+    let deletedEsimID: String
+}
+
+struct BookingESIMUpsertPayload: Encodable {
+    let travelerPosition: Int?
+    let label: String
+    let provider: String
+    let providerEsimID: String?
+    let iccid: String
+    let planName: String
+    let countryCode: String
+    let smdpAddress: String
+    let activationCode: String
+    let lpaString: String
+    let qrCodeURL: String?
+}
+
 struct BusinessCheckout: Codable, Hashable {
     let iumrahID: String
     let accountActive: Bool
@@ -399,6 +464,7 @@ struct BookingDetailResponse: Codable {
     let statusHistory: [BookingStatusHistoryItem]
     let flights: [BookingFlight]?
     let assignment: BookingAssignment?
+    let esims: [BookingESIMProfile]?
     let checkout: BusinessCheckout?
 }
 

@@ -521,6 +521,19 @@ async function handleBusinessOperations(request, env, url, parts, user) {
       return methodNotAllowed();
     }
     if (parts.length === 3 && parts[2] === 'assignments' && request.method === 'PATCH') return updateBookingAssignments(request, env, bookingID);
+    if (parts.length === 3 && parts[2] === 'esims') {
+      if (request.method === 'GET') return adminBookingEsims(env, bookingID);
+      if (request.method === 'POST') return saveBookingEsim(request, env, bookingID, null, user);
+      return methodNotAllowed();
+    }
+    if (parts.length === 4 && parts[2] === 'esims') {
+      if (request.method === 'PUT') return saveBookingEsim(request, env, bookingID, parts[3], user);
+      if (request.method === 'DELETE') return deleteBookingEsim(env, bookingID, parts[3]);
+      return methodNotAllowed();
+    }
+    if (parts.length === 5 && parts[2] === 'esims' && parts[4] === 'sync' && request.method === 'POST') {
+      return syncBookingEsim(request, env, bookingID, parts[3]);
+    }
     if (parts.length === 3 && parts[2] === 'payment' && request.method === 'PUT') return saveBookingPaymentInstructions(request, env, bookingID, user);
     if (parts.length === 3 && parts[2] === 'payment-qr' && request.method === 'POST') return uploadBookingPaymeQR(request, env, bookingID, user);
     if (parts.length === 4 && parts[2] === 'receipt' && parts[3] === 'media' && request.method === 'GET') return serveAdminPaymentReceipt(env, bookingID, url.searchParams.get('id'));
@@ -894,6 +907,7 @@ async function purgeOperationalBooking(env, bookingID) {
     env.HOTELS_DB.prepare('DELETE FROM trip_flights WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM booking_itinerary_items WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM trip_assignments WHERE booking_id=?').bind(bookingID),
+    env.HOTELS_DB.prepare('DELETE FROM booking_esims WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM pilgrim_trips WHERE booking_id=?').bind(bookingID),
     env.HOTELS_DB.prepare('DELETE FROM booking_tombstones WHERE booking_id=?').bind(bookingID)
   ]);
@@ -1754,8 +1768,232 @@ async function operationsBookingDetail(request, env, bookingID) {
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
     flights: (flightRows.results || []).map(mapTripFlight),
     assignment,
+    esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true }),
     checkout: await adminCheckoutDetail(env, bookingID, trip)
   });
+}
+
+
+const ESIM_PROVIDER_ESIM_ACCESS = 'esim_access';
+const ESIM_USAGE_SYNC_TTL_MS = 60 * 1000;
+
+function normalizedEsimProvider(value) {
+  const provider = String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  return provider || ESIM_PROVIDER_ESIM_ACCESS;
+}
+
+function esimNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function normalizeLpaString(value, smdpAddress = '', activationCode = '') {
+  const direct = String(value || '').trim();
+  if (direct) return direct;
+  const smdp = String(smdpAddress || '').trim();
+  const code = String(activationCode || '').trim();
+  return smdp && code ? `LPA:1$${smdp}$${code}` : '';
+}
+
+function lpaParts(value) {
+  const text = String(value || '').trim();
+  if (!/^LPA:1\$/i.test(text)) return { smdpAddress: '', activationCode: '' };
+  const parts = text.split('$');
+  return { smdpAddress: parts[1] || '', activationCode: parts[2] || '' };
+}
+
+function mapBookingEsim(row) {
+  if (!row) return null;
+  const totalMB = esimNumber(row.total_mb);
+  const usedMB = esimNumber(row.used_mb);
+  const remainingMB = row.remaining_mb == null ? Math.max(0, totalMB - usedMB) : esimNumber(row.remaining_mb);
+  return {
+    id: row.id,
+    bookingID: row.booking_id,
+    travelerPosition: row.traveler_position == null ? null : Number(row.traveler_position),
+    label: row.label || 'Saudi Arabia eSIM',
+    provider: row.provider || ESIM_PROVIDER_ESIM_ACCESS,
+    providerEsimID: row.provider_esim_id || null,
+    iccid: row.iccid || '',
+    planName: row.plan_name || '',
+    countryCode: row.country_code || 'SA',
+    totalMB,
+    usedMB,
+    remainingMB,
+    validityDays: row.validity_days == null ? null : Number(row.validity_days),
+    status: row.status || 'ready',
+    providerStatus: row.provider_status || null,
+    providerSmdpStatus: row.provider_smdp_status || null,
+    smdpAddress: row.smdp_address || '',
+    activationCode: row.activation_code || '',
+    lpaString: row.lpa_string || '',
+    qrCodeURL: row.qr_code_url || null,
+    activatedAt: row.activated_at || null,
+    expiresAt: row.expires_at || null,
+    lastUsageSyncAt: row.last_usage_sync_at || null,
+    usageSource: row.usage_source || 'pending',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || ''
+  };
+}
+
+async function bookingEsimRows(env, bookingID) {
+  const rows = await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE booking_id=? ORDER BY COALESCE(traveler_position, 9999), created_at').bind(bookingID).all();
+  return (rows.results || []).map(mapBookingEsim).filter(Boolean);
+}
+
+async function adminBookingEsims(env, bookingID) {
+  return json({ ok: true, bookingID, esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true }) });
+}
+
+async function saveBookingEsim(request, env, bookingID, rawEsimID, user) {
+  const trip = await env.HOTELS_DB.prepare('SELECT booking_id FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+
+  const existingID = rawEsimID ? safeID(rawEsimID) : null;
+  if (rawEsimID && !existingID) return json({ ok: false, error: 'INVALID_ESIM_ID' }, 400);
+  if (existingID) {
+    const existing = await env.HOTELS_DB.prepare('SELECT id FROM booking_esims WHERE id=? AND booking_id=? LIMIT 1').bind(existingID, bookingID).first();
+    if (!existing) return json({ ok: false, error: 'ESIM_NOT_FOUND' }, 404);
+  }
+
+  const id = existingID || `esim-${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  const travelerPositionRaw = payload.travelerPosition == null || payload.travelerPosition === '' ? null : Number(payload.travelerPosition);
+  const travelerPosition = Number.isInteger(travelerPositionRaw) && travelerPositionRaw > 0 ? travelerPositionRaw : null;
+  const provider = normalizedEsimProvider(payload.provider);
+  const iccid = cleanText(payload.iccid, 80) || '';
+  if (provider === ESIM_PROVIDER_ESIM_ACCESS && !iccid) return json({ ok: false, error: 'ESIM_ICCID_REQUIRED' }, 400);
+  const planName = safeHumanText(payload.planName, 180) || '';
+  const label = safeHumanText(payload.label, 180) || planName || 'Saudi Arabia eSIM';
+  const countryCode = (cleanText(payload.countryCode, 8) || 'SA').toUpperCase();
+  const smdpAddress = cleanText(payload.smdpAddress, 500) || '';
+  const activationCode = cleanText(payload.activationCode, 500) || '';
+  const lpaString = normalizeLpaString(payload.lpaString, smdpAddress, activationCode);
+  const parsed = lpaParts(lpaString);
+  const finalSmdp = smdpAddress || parsed.smdpAddress;
+  const finalActivationCode = activationCode || parsed.activationCode;
+  const providerEsimID = cleanText(payload.providerEsimID, 120) || null;
+  const qrCodeURL = cleanText(payload.qrCodeURL, 1500) || null;
+  const updatedBy = cleanText(user?.login, 180) || null;
+
+  if (existingID) {
+    await env.HOTELS_DB.prepare(`UPDATE booking_esims SET traveler_position=?,label=?,provider=?,provider_esim_id=?,iccid=?,plan_name=?,country_code=?,smdp_address=?,activation_code=?,lpa_string=?,qr_code_url=?,updated_by=?,updated_at=? WHERE id=? AND booking_id=?`)
+      .bind(travelerPosition,label,provider,providerEsimID,iccid,planName,countryCode,finalSmdp,finalActivationCode,lpaString,qrCodeURL,updatedBy,now,id,bookingID).run();
+  } else {
+    await env.HOTELS_DB.prepare(`INSERT INTO booking_esims(id,booking_id,traveler_position,label,provider,provider_esim_id,iccid,plan_name,country_code,total_mb,used_mb,remaining_mb,validity_days,status,smdp_address,activation_code,lpa_string,qr_code_url,usage_source,updated_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(id,bookingID,travelerPosition,label,provider,providerEsimID,iccid,planName,countryCode,0,0,0,null,'ready',finalSmdp,finalActivationCode,lpaString,qrCodeURL,'pending',updatedBy,now,now).run();
+  }
+
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=? AND booking_id=?').bind(id, bookingID).first();
+  if (row && normalizedEsimProvider(row.provider) === ESIM_PROVIDER_ESIM_ACCESS && row.iccid && String(env.ESIM_ACCESS_CODE || '').trim()) {
+    try { row = await syncEsimAccessRow(env, row); }
+    catch (error) { console.warn('ESIM_AUTO_SYNC_AFTER_SAVE_FAILED', bookingID, id, String(error?.message || error)); }
+  }
+  return json({ ok: true, esim: mapBookingEsim(row) }, existingID ? 200 : 201);
+}
+
+async function deleteBookingEsim(env, bookingID, rawEsimID) {
+  const esimID = safeID(rawEsimID);
+  if (!esimID) return json({ ok: false, error: 'INVALID_ESIM_ID' }, 400);
+  const result = await env.HOTELS_DB.prepare('DELETE FROM booking_esims WHERE id=? AND booking_id=?').bind(esimID, bookingID).run();
+  if (!Number(result?.meta?.changes || 0)) return json({ ok: false, error: 'ESIM_NOT_FOUND' }, 404);
+  return json({ ok: true, deletedEsimID: esimID });
+}
+
+function esimAccessProfileFromPayload(payload, iccid) {
+  const candidateLists = [payload?.obj?.esimList, payload?.esimList, payload?.data?.esimList, payload?.obj?.list, payload?.data?.list];
+  const list = candidateLists.find(Array.isArray) || [];
+  return list.find(item => String(item?.iccid || '') === String(iccid || '')) || list[0] || null;
+}
+
+function bytesToMB(value) {
+  const bytes = Number(value);
+  return Number.isFinite(bytes) && bytes >= 0 ? bytes / (1024 * 1024) : 0;
+}
+
+async function syncEsimAccessRow(env, row) {
+  const accessCode = String(env.ESIM_ACCESS_CODE || '').trim();
+  if (!accessCode) throw new Error('ESIM_ACCESS_NOT_CONFIGURED');
+  const iccid = String(row?.iccid || '').trim();
+  if (!iccid) throw new Error('ESIM_ICCID_REQUIRED');
+
+  const body = JSON.stringify({ iccid, pager: { pageNum: 1, pageSize: 20 } });
+  const response = await fetch('https://api.esimaccess.com/api/v1/open/esim/list', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'RT-AccessCode': accessCode },
+    body
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload) throw new Error(`ESIM_ACCESS_HTTP_${response.status}`);
+  const profile = esimAccessProfileFromPayload(payload, iccid);
+  if (!profile) throw new Error('ESIM_ACCESS_PROFILE_NOT_FOUND');
+
+  const totalMB = bytesToMB(profile.totalVolume);
+  const usedMB = bytesToMB(profile.orderUsage);
+  const remainingMB = Math.max(0, totalMB - usedMB);
+  const lpaString = String(profile.ac || row.lpa_string || '').trim();
+  const parsed = lpaParts(lpaString);
+  const now = new Date().toISOString();
+  const validityDays = Number.isFinite(Number(profile.totalDuration)) ? Math.max(0, Math.floor(Number(profile.totalDuration))) : row.validity_days;
+  await env.HOTELS_DB.prepare(`UPDATE booking_esims SET provider_esim_id=COALESCE(?,provider_esim_id),total_mb=?,used_mb=?,remaining_mb=?,validity_days=?,status=?,provider_status=?,provider_smdp_status=?,smdp_address=CASE WHEN smdp_address='' THEN ? ELSE smdp_address END,activation_code=CASE WHEN activation_code='' THEN ? ELSE activation_code END,lpa_string=CASE WHEN lpa_string='' THEN ? ELSE lpa_string END,qr_code_url=COALESCE(?,qr_code_url),expires_at=COALESCE(?,expires_at),last_usage_sync_at=?,usage_source='provider',updated_at=? WHERE id=? AND booking_id=?`)
+    .bind(
+      cleanText(profile.esimTranNo, 120) || null,
+      totalMB, usedMB, remainingMB, validityDays,
+      cleanText(profile.esimStatus, 60) || row.status || 'ready',
+      cleanText(profile.esimStatus, 60) || null,
+      cleanText(profile.smdpStatus, 60) || null,
+      parsed.smdpAddress,
+      parsed.activationCode,
+      lpaString,
+      cleanText(profile.qrCodeUrl, 1500) || null,
+      cleanText(profile.expiredTime, 80) || null,
+      now, now, row.id, row.booking_id
+    ).run();
+  return env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=? AND booking_id=?').bind(row.id, row.booking_id).first();
+}
+
+async function syncBookingEsim(request, env, bookingID, rawEsimID) {
+  const esimID = safeID(rawEsimID);
+  if (!esimID) return json({ ok: false, error: 'INVALID_ESIM_ID' }, 400);
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=? AND booking_id=? LIMIT 1').bind(esimID, bookingID).first();
+  if (!row) return json({ ok: false, error: 'ESIM_NOT_FOUND' }, 404);
+  if (normalizedEsimProvider(row.provider) !== ESIM_PROVIDER_ESIM_ACCESS) return json({ ok: false, error: 'ESIM_PROVIDER_SYNC_UNSUPPORTED' }, 409);
+  try {
+    row = await syncEsimAccessRow(env, row);
+    return json({ ok: true, esim: mapBookingEsim(row) });
+  } catch (error) {
+    console.error('ESIM_USAGE_SYNC_FAILED', bookingID, esimID, error);
+    const code = String(error?.message || 'ESIM_USAGE_SYNC_FAILED');
+    return json({ ok: false, error: code }, code === 'ESIM_ACCESS_NOT_CONFIGURED' ? 503 : 502);
+  }
+}
+
+function esimSyncIsStale(row) {
+  if (!row?.last_usage_sync_at) return true;
+  const when = Date.parse(row.last_usage_sync_at);
+  return !Number.isFinite(when) || Date.now() - when >= ESIM_USAGE_SYNC_TTL_MS;
+}
+
+async function clientBookingEsimRows(env, bookingID, options = {}) {
+  let rows = (await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE booking_id=? ORDER BY COALESCE(traveler_position, 9999), created_at').bind(bookingID).all()).results || [];
+  if (options.syncIfStale && String(env.ESIM_ACCESS_CODE || '').trim()) {
+    const refreshed = [];
+    for (const row of rows) {
+      if (normalizedEsimProvider(row.provider) === ESIM_PROVIDER_ESIM_ACCESS && row.iccid && esimSyncIsStale(row)) {
+        try { refreshed.push(await syncEsimAccessRow(env, row)); }
+        catch (error) { console.warn('ESIM_BACKGROUND_SYNC_SKIPPED', bookingID, row.id, String(error?.message || error)); refreshed.push(row); }
+      } else refreshed.push(row);
+    }
+    rows = refreshed;
+  }
+  return rows.map(mapBookingEsim).filter(Boolean);
+}
+
+async function clientBookingEsims(env, bookingID) {
+  return json({ ok: true, bookingID, esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true }) });
 }
 
 
@@ -2071,6 +2309,10 @@ async function handleClientOperations(request, env, parts) {
       const auth = await requireClientBooking(request, env, bookingID); if (!auth.ok) return auth.response;
       return bookingItineraryDetail(env, bookingID, auth.trip);
     }
+    if (parts.length === 3 && parts[2] === 'esims' && request.method === 'GET') {
+      const auth = await requireClientBooking(request, env, bookingID); if (!auth.ok) return auth.response;
+      return clientBookingEsims(env, bookingID);
+    }
     if (parts.length === 3 && parts[2] === 'checkout' && request.method === 'GET') {
       const auth=await requireClientBooking(request,env,bookingID); if(!auth.ok)return auth.response;
       return clientCheckoutDetail(env,bookingID,auth.trip);
@@ -2209,8 +2451,8 @@ async function handleClientAccount(request,env,parts){
 }
 async function recalcPilgrimStats(env,id){if(!id)return;const r=await env.HOTELS_DB.prepare('SELECT COUNT(*) count,MAX(COALESCE(end_date,created_at)) last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(id).first();await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(r?.count||0),r?.last_trip||null,new Date().toISOString(),id).run();}
 async function listAccountTrips(env,pilgrimID){const rows=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(pilgrimID).all();return json({ok:true,trips:(rows.results||[]).map(tripMap)});}
-async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID)});}
-async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);if(trip&&payload?.generatorTrace&&typeof payload.generatorTrace==='object'){const snapshot=parseJSONObject(trip.booking_snapshot_json);snapshot.generatorTrace=payload.generatorTrace;await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,updated_at=? WHERE id=?').bind(JSON.stringify(snapshot),new Date().toISOString(),trip.id).run();trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();}return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID)});}
+async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
+async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);if(trip&&payload?.generatorTrace&&typeof payload.generatorTrace==='object'){const snapshot=parseJSONObject(trip.booking_snapshot_json);snapshot.generatorTrace=payload.generatorTrace;await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,updated_at=? WHERE id=?').bind(JSON.stringify(snapshot),new Date().toISOString(),trip.id).run();trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();}return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
 
 function travelerCountsFromSnapshot(raw){const t=raw?.input?.travelers||raw?.travelers||{};return {adults:Math.max(1,Number(t.adults||1)),children:Math.max(0,Number(t.children||0)),infants:Math.max(0,Number(t.infants||0))};}
 async function ensureTravelerRows(env,bookingID,trip){const existing=await env.HOTELS_DB.prepare('SELECT COUNT(*) count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();if(Number(existing?.count||0)>0)return;const c=travelerCountsFromSnapshot(parseJSONObject(trip.booking_snapshot_json));let pos=0;const stm=[];for(const [type,count] of [['adult',c.adults],['child',c.children],['infant',c.infants]])for(let i=0;i<count;i++){pos++;stm.push(env.HOTELS_DB.prepare('INSERT OR IGNORE INTO booking_travelers(id,booking_id,position,traveler_type) VALUES(?,?,?,?)').bind(`traveler-${crypto.randomUUID()}`,bookingID,pos,type));}if(stm.length)await env.HOTELS_DB.batch(stm);}

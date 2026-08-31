@@ -157,6 +157,41 @@ actor APIClient {
         return try decoder.decode(BookingItineraryResponse.self, from: data).items
     }
 
+    func bookingESIMs(bookingID: String) async throws -> [BookingESIMProfile] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/esims")
+        let (data, response) = try await session.data(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BookingESIMListResponse.self, from: data).esims
+    }
+
+    func saveBookingESIM(bookingID: String, esimID: String?, payload: BookingESIMUpsertPayload) async throws -> BookingESIMProfile {
+        let path = esimID.map { "/api/admin/hotels/operations/bookings/\(bookingID)/esims/\($0)" }
+            ?? "/api/admin/hotels/operations/bookings/\(bookingID)/esims"
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: path))
+        request.httpMethod = esimID == nil ? "POST" : "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingESIMResponse.self, from: data).esim
+    }
+
+    func syncBookingESIM(bookingID: String, esimID: String) async throws -> BookingESIMProfile {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/esims/\(esimID)/sync"))
+        request.httpMethod = "POST"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingESIMResponse.self, from: data).esim
+    }
+
+    func deleteBookingESIM(bookingID: String, esimID: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/esims/\(esimID)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        _ = try? decoder.decode(BookingESIMDeleteResponse.self, from: data)
+    }
+
     func updateBookingOperation(id: String, status: TripStatus, paymentStatus: String, confirmationNumber: String, internalNotes: String) async throws -> BookingDetailResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)"))
         request.httpMethod = "PATCH"
