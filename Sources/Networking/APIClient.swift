@@ -22,39 +22,103 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["login": login, "password": password])
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         let result = try decoder.decode(LoginResponse.self, from: data)
         guard result.ok == true, let resolvedLogin = result.login else { throw APIError.server(result.error ?? "LOGIN_FAILED") }
+        BusinessSessionVault.clearSessionToken()
+        _ = try await ensureBusinessSession()
         return SessionUser(login: resolvedLogin, role: result.role ?? "superadmin", displayName: "Super Administrator")
     }
 
     func sessionUser() async throws -> SessionUser {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/auth/staff/session"))
+        let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/auth/staff/session"))
         try validate(response, data: data)
         let value = try decoder.decode(SessionResponse.self, from: data)
         guard let user = value.user else { throw APIError.unauthorized }
+        _ = try await ensureBusinessSession()
         return user
     }
 
     func logout() async {
+        if BusinessSessionVault.sessionToken != nil {
+            var sessionRequest = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/current"))
+            sessionRequest.httpMethod = "DELETE"
+            _ = try? await perform(sessionRequest)
+        }
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/auth/staff/logout"))
         request.httpMethod = "POST"
-        _ = try? await session.data(for: request)
+        _ = try? await perform(request)
+        BusinessSessionVault.clearSessionToken()
         HTTPCookieStorage.shared.cookies?.forEach { cookie in
             if cookie.domain.contains("iumrah.app") { HTTPCookieStorage.shared.deleteCookie(cookie) }
         }
     }
 
+    func clearLocalBusinessSession() {
+        BusinessSessionVault.clearSessionToken()
+    }
+
+    func businessSessions() async throws -> BusinessSessionsResponse {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessSessionsResponse.self, from: data)
+    }
+
+    func approveBusinessSession(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/\(id)/approve"))
+        request.httpMethod = "POST"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        _ = try decoder.decode(BusinessSessionActionResponse.self, from: data)
+    }
+
+    func terminateBusinessSession(id: String) async throws -> Bool {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/\(id)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        let result = try decoder.decode(BusinessSessionActionResponse.self, from: data)
+        if result.signedOut == true { BusinessSessionVault.clearSessionToken() }
+        return result.signedOut == true
+    }
+
+    func terminateOtherBusinessSessions() async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/others"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        _ = try decoder.decode(BusinessSessionActionResponse.self, from: data)
+    }
+
+    private func ensureBusinessSession() async throws -> BusinessAccountSession {
+        let identity = try BusinessSessionVault.installationIdentity()
+        let payload = BusinessDeviceDescriptor.registrationPayload(identity: identity)
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/register"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        let result = try decoder.decode(BusinessSessionRegistrationResponse.self, from: data)
+        if let token = result.sessionToken, !token.isEmpty {
+            try BusinessSessionVault.setSessionToken(token)
+        } else if BusinessSessionVault.sessionToken == nil {
+            throw APIError.server("BUSINESS_SESSION_TOKEN_MISSING")
+        }
+        return result.currentSession
+    }
+
     func bookings() async throws -> [BookingSummary] {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings"))
+        let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings"))
         try validate(response, data: data)
         return try decoder.decode(BookingsResponse.self, from: data).bookings
     }
 
     func businessProfile() async throws -> BusinessTeamMember {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/me")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
     }
@@ -64,14 +128,14 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
     }
 
     func businessTeam() async throws -> [BusinessTeamMember] {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamResponse.self, from: data).members
     }
@@ -81,7 +145,7 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
     }
@@ -91,7 +155,7 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BusinessTeamMemberPayload(member))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
     }
@@ -103,7 +167,7 @@ actor APIClient {
         request.timeoutInterval = 75
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
         request.httpBody = optimized
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
     }
@@ -111,7 +175,7 @@ actor APIClient {
     func deleteBusinessTeamPhoto(memberID: String) async throws -> BusinessTeamMember {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team/\(memberID)/photo"))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BusinessTeamMemberResponse.self, from: data).member
     }
@@ -119,20 +183,20 @@ actor APIClient {
     func deleteBusinessTeamMember(id: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/team/\(id)"))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
     }
 
     func bookingDetail(id: String) async throws -> BookingDetailResponse {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
 
     func bookingItinerary(bookingID: String) async throws -> [BookingItineraryItem] {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/itinerary")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BookingItineraryResponse.self, from: data).items
     }
@@ -142,7 +206,7 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BookingPricingOverrideUpdatePayload(components: components, markupRate: markupRate, paymentFeeRate: paymentFeeRate))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingPricingOverrideResponse.self, from: data).pricing
     }
@@ -152,14 +216,14 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BookingItineraryUpdatePayload(items: items))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingItineraryResponse.self, from: data).items
     }
 
     func bookingESIMs(bookingID: String) async throws -> [BookingESIMProfile] {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/esims")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BookingESIMListResponse.self, from: data).esims
     }
@@ -171,7 +235,7 @@ actor APIClient {
         request.httpMethod = esimID == nil ? "POST" : "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(payload)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingESIMResponse.self, from: data).esim
     }
@@ -179,7 +243,7 @@ actor APIClient {
     func syncBookingESIM(bookingID: String, esimID: String) async throws -> BookingESIMProfile {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/esims/\(esimID)/sync"))
         request.httpMethod = "POST"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingESIMResponse.self, from: data).esim
     }
@@ -187,7 +251,7 @@ actor APIClient {
     func deleteBookingESIM(bookingID: String, esimID: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/esims/\(esimID)"))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         _ = try? decoder.decode(BookingESIMDeleteResponse.self, from: data)
     }
@@ -197,7 +261,7 @@ actor APIClient {
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BookingOperationUpdatePayload(status: status.rawValue, paymentStatus: paymentStatus, confirmationNumber: confirmationNumber, internalNotes: internalNotes))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
@@ -207,7 +271,7 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(payload)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         struct Envelope: Decodable { let ok: Bool; let checkout: BusinessCheckout }
         return try decoder.decode(Envelope.self, from: data).checkout
@@ -218,7 +282,7 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.httpBody = data
-        let (body, response) = try await session.data(for: request)
+        let (body, response) = try await perform(request)
         try validate(response, data: body)
     }
 
@@ -229,7 +293,7 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.httpBody = data
-        let (body, response) = try await session.data(for: request)
+        let (body, response) = try await perform(request)
         try validate(response, data: body)
     }
 
@@ -237,7 +301,7 @@ actor APIClient {
         let url: URL
         if let direct = URL(string: path), direct.scheme != nil { url = direct }
         else { url = AppConfig.apiBaseURL.appending(path: path) }
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return data
     }
@@ -245,7 +309,7 @@ actor APIClient {
     func deleteBooking(id: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)"))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         _ = try? decoder.decode(BookingDeleteResponse.self, from: data)
     }
@@ -256,7 +320,7 @@ actor APIClient {
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(FlightVerificationPayload(flightNumber: number, dateLocal: dateLocal, force: force))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(FlightVerificationResponse.self, from: data)
     }
@@ -266,7 +330,7 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(SaveVerifiedFlightPayload(verificationKey: verificationKey, candidateID: candidateID))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingFlightResponse.self, from: data).flight
     }
@@ -276,7 +340,7 @@ actor APIClient {
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(BookingAssignmentPayload(makkahHotelID: makkahHotelID, madinahHotelID: madinahHotelID, guideID: guideID))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingAssignmentResponse.self, from: data).assignment
     }
@@ -287,14 +351,14 @@ actor APIClient {
         if archiveOnly { items.append(URLQueryItem(name: "archive", value: "1")) }
         if let query, !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
         components.queryItems = items.isEmpty ? nil : items
-        let (data, response) = try await session.data(from: components.url!)
+        let (data, response) = try await perform(from: components.url!)
         try validate(response, data: data)
         return try decoder.decode(PilgrimsResponse.self, from: data).pilgrims
     }
 
     func pilgrimDetail(id: String) async throws -> PilgrimDetailResponse {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/pilgrims/\(id)")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(PilgrimDetailResponse.self, from: data)
     }
@@ -302,7 +366,7 @@ actor APIClient {
     func primaryHotels(city: String? = nil) async throws -> [PrimaryHotelAssignment] {
         var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/primary-hotels"), resolvingAgainstBaseURL: false)!
         if let city { components.queryItems = [URLQueryItem(name: "city", value: city)] }
-        let (data, response) = try await session.data(from: components.url!)
+        let (data, response) = try await perform(from: components.url!)
         try validate(response, data: data)
         return try decoder.decode(PrimaryHotelsResponse.self, from: data).assignments
     }
@@ -312,20 +376,20 @@ actor APIClient {
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(PrimaryHotelsUpdatePayload(city: city, stars: stars, hotelIDs: hotelIDs))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(PrimaryHotelsResponse.self, from: data).assignments
     }
 
     func businessChatThreads() async throws -> [BusinessChatThreadSummary] {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats"))
+        let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats"))
         try validate(response, data: data)
         return try decoder.decode(BusinessChatThreadsResponse.self, from: data).threads
     }
 
     func businessChatMessages(bookingID: String) async throws -> [BusinessChatMessage] {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats/\(bookingID)/messages")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BusinessChatMessagesResponse.self, from: data).messages
     }
@@ -335,7 +399,7 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(SendBusinessChatMessagePayload(body: body, clientMessageID: clientMessageID))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BusinessChatMessageResponse.self, from: data).message
     }
@@ -346,7 +410,7 @@ actor APIClient {
         request.timeoutInterval = 75
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
         request.httpBody = data
-        let (responseData, response) = try await session.data(for: request)
+        let (responseData, response) = try await perform(request)
         try validate(response, data: responseData)
         return try decoder.decode(BusinessChatMessageResponse.self, from: responseData).message
     }
@@ -354,7 +418,7 @@ actor APIClient {
     func markBusinessChatRead(bookingID: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chats/\(bookingID)/read"))
         request.httpMethod = "POST"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
     }
 
@@ -363,25 +427,25 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(PushDeviceRegistrationPayload(deviceToken: token, environment: environment))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(PushDeviceRegistrationResponse.self, from: data)
     }
 
     func pushStatus() async throws -> PushStatusResponse {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/push/status"))
+        let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/push/status"))
         try validate(response, data: data)
         return try decoder.decode(PushStatusResponse.self, from: data)
     }
 
     func hotels() async throws -> [HotelListItem] {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels"))
+        let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels"))
         try validate(response, data: data)
         return try decoder.decode(HotelsResponse.self, from: data).hotels
     }
 
     func hotelCloudHealth() async throws -> HotelCloudHealthResponse {
-        let (data, response) = try await session.data(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/health"))
+        let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/health"))
         try validate(response, data: data)
         return try decoder.decode(HotelCloudHealthResponse.self, from: data)
     }
@@ -391,7 +455,7 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(HotelSourceDuplicatePayload(sourceURL: sourceURL))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
     }
@@ -402,7 +466,7 @@ actor APIClient {
         request.timeoutInterval = 35
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(SourceRoomRecoveryPayload(sourceURL: sourceURL))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(SourceRoomRecoveryResponse.self, from: data)
     }
@@ -412,7 +476,7 @@ actor APIClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(hotel)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
     }
@@ -437,7 +501,7 @@ actor APIClient {
                 allowPossibleDuplicate: allowPossibleDuplicate
             )
         )
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         if let http = response as? HTTPURLResponse, http.statusCode == 409,
            let conflict = try? decoder.decode(HotelImportConflictResponse.self, from: data),
            let duplicate = conflict.duplicate {
@@ -450,7 +514,7 @@ actor APIClient {
 
     func hotelImportJob(id: String) async throws -> HotelImportJob {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)")
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
     }
@@ -458,7 +522,7 @@ actor APIClient {
     func hotelImportJobs(activeOnly: Bool = false) async throws -> [HotelImportJob] {
         var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs"), resolvingAgainstBaseURL: false)!
         if activeOnly { components.queryItems = [URLQueryItem(name: "active", value: "1")] }
-        let (data, response) = try await session.data(from: components.url!)
+        let (data, response) = try await perform(from: components.url!)
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobsResponse.self, from: data).jobs
     }
@@ -470,7 +534,7 @@ actor APIClient {
     func retryHotelImportJob(id: String) async throws -> HotelImportJob {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)/retry"))
         request.httpMethod = "POST"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
     }
@@ -478,7 +542,7 @@ actor APIClient {
     func cancelHotelImportJob(id: String) async throws -> HotelImportJob {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)/cancel"))
         request.httpMethod = "POST"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(HotelImportJobResponse.self, from: data).job
     }
@@ -486,7 +550,7 @@ actor APIClient {
     func deleteHotelImportJob(id: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/import-jobs/\(id)"))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
     }
 
@@ -494,7 +558,7 @@ actor APIClient {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)"))
         request.httpMethod = "DELETE"
         request.timeoutInterval = 45
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
     }
 
@@ -504,7 +568,7 @@ actor APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if allowPossibleDuplicate { request.setValue("1", forHTTPHeaderField: "X-Iumrah-Allow-Possible-Duplicate") }
         request.httpBody = try encoder.encode(hotel)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         if let http = response as? HTTPURLResponse, http.statusCode == 409,
            let conflict = try? decoder.decode(HotelImportConflictResponse.self, from: data),
            let duplicate = conflict.duplicate {
@@ -518,7 +582,7 @@ actor APIClient {
     func clearHotelImages(hotelID: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(hotelID)/images"))
         request.httpMethod = "DELETE"
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
     }
 
@@ -531,7 +595,7 @@ actor APIClient {
         sourceRequest.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         sourceRequest.setValue(candidate.sourcePageURL, forHTTPHeaderField: "Referer")
 
-        let (imageData, sourceResponse) = try await session.data(for: sourceRequest)
+        let (imageData, sourceResponse) = try await perform(sourceRequest)
         guard let http = sourceResponse as? HTTPURLResponse, (200..<300).contains(http.statusCode), !imageData.isEmpty else {
             throw APIError.server("IMAGE_DOWNLOAD_FAILED")
         }
@@ -549,8 +613,23 @@ actor APIClient {
         request.setValue(String(position), forHTTPHeaderField: "X-Iumrah-Position")
         request.setValue(candidate.isCover ? "1" : "0", forHTTPHeaderField: "X-Iumrah-Cover")
         request.httpBody = optimized
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await perform(request)
         try validate(response, data: data)
+    }
+
+    private func perform(_ original: URLRequest) async throws -> (Data, URLResponse) {
+        var request = original
+        if let url = request.url,
+           url.host?.lowercased() == AppConfig.apiBaseURL.host?.lowercased(),
+           url.path.hasPrefix("/api/admin/hotels"),
+           let token = BusinessSessionVault.sessionToken {
+            request.setValue(token, forHTTPHeaderField: "X-Iumrah-Business-Session")
+        }
+        return try await session.data(for: request)
+    }
+
+    private func perform(from url: URL) async throws -> (Data, URLResponse) {
+        try await perform(URLRequest(url: url))
     }
 
     private func validate(_ response: URLResponse, data: Data) throws {
@@ -586,6 +665,11 @@ enum APIError: LocalizedError {
             case "PAYMENT_RECEIPT_REQUIRED": return "Паломник ещё не прикрепил чек оплаты."
             case "TRAVEL_DOCUMENT_REQUIRED": return "Перед статусом «Готово к поездке» загрузите хотя бы один документ поездки."
             case "INVALID_STATUS_TRANSITION": return "Этот переход статуса недоступен из текущего состояния поездки."
+            case "PRIMARY_SESSION_REQUIRED": return "Только основное устройство может завершать другие сеансы."
+            case "PRIMARY_SESSION_PROTECTED": return "Основной сеанс защищён и не может быть завершён с другого устройства."
+            case "DEVICE_BLOCKED": return "Это устройство было отключено с основного устройства."
+            case "DEVICE_PROOF_INVALID": return "Не удалось подтвердить защищённую идентичность этого устройства."
+            case "BUSINESS_SESSION_TOKEN_MISSING": return "Сервер не выдал защищённый ключ сеанса. Попробуйте войти снова."
             default: return value
             }
         }

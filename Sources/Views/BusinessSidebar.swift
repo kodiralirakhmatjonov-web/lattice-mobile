@@ -15,7 +15,7 @@ final class BusinessSidebarStore: ObservableObject {
 }
 
 enum BusinessSidebarRoute: String, Identifiable {
-    case profile, employees, archive, primaryHotels
+    case profile, sessions, employees, archive, primaryHotels
     var id: String { rawValue }
 }
 
@@ -85,6 +85,7 @@ struct BusinessSidebarHost<Content: View>: View {
             NavigationStack {
                 switch route {
                 case .profile: ProfileView()
+                case .sessions: BusinessSessionsView()
                 case .employees: EmployeesView()
                 case .archive: ClientArchiveView()
                 case .primaryHotels: PrimaryHotelsView()
@@ -108,6 +109,7 @@ struct BusinessSidebarHost<Content: View>: View {
             .padding(.bottom, 24)
 
             sidebarButton("Мой профиль", icon: "person.crop.circle", route: .profile)
+            sidebarButton("Устройства и сеансы", icon: "lock.shield", route: .sessions)
             sidebarButton("Сотрудники", icon: "person.2", route: .employees)
             sidebarButton("Архив клиентов", icon: "archivebox", route: .archive)
             sidebarButton("Primary Hotels", icon: "building.2.crop.circle", route: .primaryHotels)

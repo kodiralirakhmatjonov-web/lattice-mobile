@@ -22,9 +22,11 @@ export default {
       }
 
       if (url.pathname.startsWith('/api/admin/hotels')) {
-        const staff = await requireStaff(request, env);
+        const registrationPath = url.pathname.replace(/\/+$/, '') === '/api/admin/hotels/security/sessions/register'
+          && request.method === 'POST';
+        const staff = await requireStaff(request, env, { allowSessionRegistration: registrationPath });
         if (!staff.ok) return staff.response;
-        return withCors(await handleAdmin(request, env, url, staff.user), request);
+        return withCors(await handleAdmin(request, env, url, staff.user, staff.businessSession), request);
       }
 
       if (url.pathname.startsWith('/api/catalog/hotels')) {
@@ -39,7 +41,7 @@ export default {
   }
 };
 
-async function handleAdmin(request, env, url, user) {
+async function handleAdmin(request, env, url, user, businessSession = null) {
   const parts = pathParts(url.pathname, '/api/admin/hotels');
 
   if (parts.length === 0) {
@@ -84,7 +86,11 @@ async function handleAdmin(request, env, url, user) {
   }
 
   if (parts[0] === 'push') {
-    return handleBusinessPush(request, env, parts.slice(1), user);
+    return handleBusinessPush(request, env, parts.slice(1), user, businessSession);
+  }
+
+  if (parts[0] === 'security') {
+    return handleBusinessSecurity(request, env, parts.slice(1), user, businessSession);
   }
 
   if (parts[0] === 'operations') {
@@ -235,7 +241,7 @@ async function chatMessageDetail(env, id, status = 200, admin = true) {
   return json({ ok: true, message: mapChatMessage(row, admin) }, status);
 }
 
-async function handleBusinessPush(request, env, parts, user) {
+async function handleBusinessPush(request, env, parts, user, businessSession = null) {
   if (parts.length === 1 && parts[0] === 'devices' && request.method === 'POST') {
     const payload = await request.json().catch(() => null);
     const token = cleanText(payload?.deviceToken, 256)?.toLowerCase();
@@ -243,11 +249,12 @@ async function handleBusinessPush(request, env, parts, user) {
     const environment = payload?.environment === 'development' ? 'development' : 'production';
     const now = new Date().toISOString();
     await env.HOTELS_DB.prepare(`
-      INSERT INTO business_push_devices (device_token, staff_login, environment, app_bundle_id, enabled, created_at, updated_at, last_error)
-      VALUES (?, ?, ?, 'com.iumrah.business', 1, ?, ?, NULL)
+      INSERT INTO business_push_devices (device_token, staff_login, environment, app_bundle_id, enabled, created_at, updated_at, last_error, installation_id)
+      VALUES (?, ?, ?, 'com.iumrah.business', 1, ?, ?, NULL, ?)
       ON CONFLICT(device_token) DO UPDATE SET staff_login=excluded.staff_login, environment=excluded.environment,
-        app_bundle_id=excluded.app_bundle_id, enabled=1, updated_at=excluded.updated_at, last_error=NULL
-    `).bind(token, cleanText(user?.login, 180), environment, now, now).run();
+        app_bundle_id=excluded.app_bundle_id, enabled=1, updated_at=excluded.updated_at, last_error=NULL,
+        installation_id=excluded.installation_id
+    `).bind(token, cleanText(user?.login, 180), environment, now, now, businessSession?.installation_id || null).run();
     return json({ ok: true, ready: apnsConfigured(env) });
   }
   if (parts.length === 1 && parts[0] === 'status' && request.method === 'GET') {
@@ -255,6 +262,386 @@ async function handleBusinessPush(request, env, parts, user) {
     return json({ ok: true, configured: apnsConfigured(env), devices: Number(row?.count || 0) });
   }
   return methodNotAllowed();
+}
+
+const BUSINESS_SESSION_TTL_MS = 180 * 24 * 60 * 60_000;
+
+function businessSessionToken(request) {
+  return cleanText(request.headers.get('x-iumrah-business-session'), 512);
+}
+
+function businessStaffLogin(user) {
+  return cleanText(user?.login, 180)?.toLowerCase() || '';
+}
+
+function businessRequestLocation(request) {
+  return {
+    city: safeHumanText(request.cf?.city || '', 120) || '',
+    countryCode: cleanText(request.cf?.country, 8)?.toUpperCase() || ''
+  };
+}
+
+function businessDevicePayload(payload, request) {
+  const location = businessRequestLocation(request);
+  return {
+    installationID: cleanText(payload?.installationID, 128),
+    installationSecret: cleanText(payload?.installationSecret, 256),
+    deviceName: safeHumanText(payload?.deviceName || '', 180) || '',
+    deviceModel: safeHumanText(payload?.deviceModel || '', 120) || '',
+    hardwareIdentifier: cleanText(payload?.hardwareIdentifier, 120) || '',
+    platform: cleanText(payload?.platform, 32)?.toLowerCase() || 'ios',
+    osName: safeHumanText(payload?.osName || 'iOS', 40) || 'iOS',
+    osVersion: cleanText(payload?.osVersion, 40) || '',
+    appVersion: cleanText(payload?.appVersion, 40) || '',
+    appBuild: cleanText(payload?.appBuild, 40) || '',
+    locale: cleanText(payload?.locale, 40) || '',
+    timeZone: cleanText(payload?.timeZone, 80) || '',
+    city: location.city,
+    countryCode: location.countryCode
+  };
+}
+
+function validBusinessInstallation(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{16,128}$/.test(value);
+}
+
+function validBusinessInstallationSecret(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{32,256}$/.test(value);
+}
+
+function mapBusinessSession(row, currentSessionID = '') {
+  const isPrimary = Number(row.is_primary || 0) === 1;
+  const trusted = Number(row.trusted || 0) === 1;
+  return {
+    id: row.session_id,
+    deviceID: row.device_id,
+    deviceName: row.device_name || '',
+    deviceModel: row.device_model || '',
+    hardwareIdentifier: row.hardware_identifier || '',
+    platform: row.platform || 'ios',
+    osName: row.os_name || 'iOS',
+    osVersion: row.os_version || '',
+    appVersion: row.app_version || '',
+    appBuild: row.app_build || '',
+    locale: row.locale || '',
+    timeZone: row.time_zone || '',
+    city: row.city || '',
+    countryCode: row.country_code || '',
+    isCurrent: row.session_id === currentSessionID,
+    isPrimary,
+    trusted,
+    trustLevel: isPrimary ? 'primary' : (trusted ? 'trusted' : 'new'),
+    createdAt: row.session_created_at,
+    lastActiveAt: row.session_last_seen_at,
+    expiresAt: row.expires_at
+  };
+}
+
+const BUSINESS_SESSION_SELECT = `
+  SELECT
+    s.id AS session_id,
+    s.staff_login,
+    s.device_id,
+    s.created_at AS session_created_at,
+    s.last_seen_at AS session_last_seen_at,
+    s.expires_at,
+    d.installation_id,
+    d.device_name,
+    d.device_model,
+    d.hardware_identifier,
+    d.platform,
+    d.os_name,
+    d.os_version,
+    d.app_version,
+    d.app_build,
+    d.locale,
+    d.time_zone,
+    d.city,
+    d.country_code,
+    d.is_primary,
+    d.trusted
+  FROM business_staff_sessions s
+  JOIN business_security_devices d ON d.id=s.device_id
+`;
+
+async function businessSessionForRequest(request, env, user) {
+  const token = businessSessionToken(request);
+  if (!token) return null;
+  const tokenHash = await sha256Hex(token);
+  const staffLogin = businessStaffLogin(user);
+  const now = new Date();
+  const row = await env.HOTELS_DB.prepare(`${BUSINESS_SESSION_SELECT}
+    WHERE s.token_hash=? AND s.staff_login=? AND s.revoked_at IS NULL AND s.expires_at>?
+      AND d.revoked_at IS NULL
+    LIMIT 1
+  `).bind(tokenHash, staffLogin, now.toISOString()).first();
+  if (!row) return null;
+
+  const previous = Date.parse(row.session_last_seen_at || '');
+  if (!Number.isFinite(previous) || now.getTime() - previous >= 60_000) {
+    const seenAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + BUSINESS_SESSION_TTL_MS).toISOString();
+    const location = businessRequestLocation(request);
+    await env.HOTELS_DB.batch([
+      env.HOTELS_DB.prepare('UPDATE business_staff_sessions SET last_seen_at=?, expires_at=? WHERE id=? AND revoked_at IS NULL')
+        .bind(seenAt, expiresAt, row.session_id),
+      env.HOTELS_DB.prepare('UPDATE business_security_devices SET last_seen_at=?, city=?, country_code=? WHERE id=? AND revoked_at IS NULL')
+        .bind(seenAt, location.city, location.countryCode, row.device_id)
+    ]).catch(() => {});
+    row.session_last_seen_at = seenAt;
+    row.expires_at = expiresAt;
+    row.city = location.city || row.city;
+    row.country_code = location.countryCode || row.country_code;
+  }
+  return { ...row, tokenHash };
+}
+
+async function requireBusinessSession(request, env, user) {
+  const session = await businessSessionForRequest(request, env, user);
+  if (session) return { ok: true, session };
+
+  const staffLogin = businessStaffLogin(user);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT COUNT(*) AS count FROM business_security_devices
+    WHERE staff_login=? AND revoked_at IS NULL
+  `).bind(staffLogin).first().catch(() => null);
+
+  // Backward-compatible rollout: the old application continues to work until
+  // this account registers its first protected device. From that moment onward,
+  // every admin call requires an active per-device credential.
+  if (Number(row?.count || 0) === 0) return { ok: true, session: null, legacy: true };
+  return { ok: false, response: json({ ok: false, error: 'BUSINESS_SESSION_REQUIRED' }, 401) };
+}
+
+async function registerBusinessSession(request, env, user) {
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const value = businessDevicePayload(payload, request);
+  if (!validBusinessInstallation(value.installationID) || !validBusinessInstallationSecret(value.installationSecret)) {
+    return json({ ok: false, error: 'INVALID_DEVICE_IDENTITY' }, 400);
+  }
+
+  const staffLogin = businessStaffLogin(user);
+  if (!staffLogin) return json({ ok: false, error: 'INVALID_STAFF_SESSION' }, 401);
+  const now = new Date();
+  const nowISO = now.toISOString();
+  const secretHash = await sha256Hex(value.installationSecret);
+  let device = await env.HOTELS_DB.prepare(`
+    SELECT * FROM business_security_devices WHERE staff_login=? AND installation_id=? LIMIT 1
+  `).bind(staffLogin, value.installationID).first();
+  let createdDevice = false;
+
+  if (device) {
+    if (!constantTimeEqual(device.installation_secret_hash, secretHash)) {
+      return json({ ok: false, error: 'DEVICE_PROOF_INVALID' }, 403);
+    }
+    if (device.revoked_at) return json({ ok: false, error: 'DEVICE_BLOCKED' }, 403);
+    await env.HOTELS_DB.prepare(`
+      UPDATE business_security_devices SET
+        device_name=?, device_model=?, hardware_identifier=?, platform=?, os_name=?, os_version=?,
+        app_version=?, app_build=?, locale=?, time_zone=?, city=?, country_code=?, last_seen_at=?
+      WHERE id=?
+    `).bind(
+      value.deviceName, value.deviceModel, value.hardwareIdentifier, value.platform, value.osName,
+      value.osVersion, value.appVersion, value.appBuild, value.locale, value.timeZone,
+      value.city, value.countryCode, nowISO, device.id
+    ).run();
+  } else {
+    const primary = await env.HOTELS_DB.prepare(`
+      SELECT id FROM business_security_devices WHERE staff_login=? AND is_primary=1 AND revoked_at IS NULL LIMIT 1
+    `).bind(staffLogin).first();
+    let isPrimary = primary ? 0 : 1;
+    const deviceID = crypto.randomUUID();
+    const insert = primaryValue => env.HOTELS_DB.prepare(`
+      INSERT INTO business_security_devices (
+        id, staff_login, installation_id, installation_secret_hash, device_name, device_model,
+        hardware_identifier, platform, os_name, os_version, app_version, app_build, locale,
+        time_zone, city, country_code, is_primary, trusted, created_at, last_seen_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      deviceID, staffLogin, value.installationID, secretHash, value.deviceName, value.deviceModel,
+      value.hardwareIdentifier, value.platform, value.osName, value.osVersion, value.appVersion,
+      value.appBuild, value.locale, value.timeZone, value.city, value.countryCode,
+      primaryValue, primaryValue, nowISO, nowISO
+    ).run();
+    try {
+      await insert(isPrimary);
+    } catch (error) {
+      if (!isPrimary) throw error;
+      isPrimary = 0;
+      await insert(0);
+    }
+    device = await env.HOTELS_DB.prepare('SELECT * FROM business_security_devices WHERE id=?').bind(deviceID).first();
+    createdDevice = true;
+  }
+
+  const presented = await businessSessionForRequest(request, env, user);
+  if (presented) {
+    if (presented.device_id !== device.id) return json({ ok: false, error: 'SESSION_DEVICE_MISMATCH' }, 403);
+    const current = mapBusinessSession(presented, presented.session_id);
+    return json({ ok: true, sessionToken: null, currentSession: current });
+  }
+
+  await env.HOTELS_DB.prepare(`
+    UPDATE business_staff_sessions SET revoked_at=?, revocation_reason='replaced'
+    WHERE device_id=? AND revoked_at IS NULL
+  `).bind(nowISO, device.id).run();
+
+  const token = randomToken(32);
+  const tokenHash = await sha256Hex(token);
+  const sessionID = crypto.randomUUID();
+  const expiresAt = new Date(now.getTime() + BUSINESS_SESSION_TTL_MS).toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_staff_sessions (id,staff_login,device_id,token_hash,created_at,last_seen_at,expires_at)
+    VALUES (?,?,?,?,?,?,?)
+  `).bind(sessionID, staffLogin, device.id, tokenHash, nowISO, nowISO, expiresAt).run();
+
+  const row = await env.HOTELS_DB.prepare(`${BUSINESS_SESSION_SELECT} WHERE s.id=? LIMIT 1`).bind(sessionID).first();
+  if (createdDevice && Number(device.is_primary || 0) !== 1) {
+    const location = [value.city, value.countryCode].filter(Boolean).join(', ');
+    const label = value.deviceModel || value.deviceName || 'Новое устройство';
+    await sendBusinessSecurityPush(
+      env,
+      staffLogin,
+      value.installationID,
+      'Новый вход в iumrah Business',
+      location ? `${label} · ${location}` : label,
+      { type: 'security_new_session', sessionID }
+    ).catch(error => console.error('SECURITY_PUSH_FAILED', error));
+  }
+  return json({ ok: true, sessionToken: token, currentSession: mapBusinessSession(row, sessionID) }, 201);
+}
+
+async function listBusinessSessions(env, user, currentSession) {
+  const now = new Date().toISOString();
+  const rows = await env.HOTELS_DB.prepare(`${BUSINESS_SESSION_SELECT}
+    WHERE s.staff_login=? AND s.revoked_at IS NULL AND s.expires_at>? AND d.revoked_at IS NULL
+    ORDER BY d.is_primary DESC, (s.id=?) DESC, s.last_seen_at DESC
+  `).bind(businessStaffLogin(user), now, currentSession.session_id).all();
+  return json({
+    ok: true,
+    currentSessionID: currentSession.session_id,
+    sessions: (rows.results || []).map(row => mapBusinessSession(row, currentSession.session_id)),
+    inactivityDays: 180,
+    policy: 'primary_only_revocation'
+  });
+}
+
+async function revokeBusinessSession(env, user, currentSession, targetSessionID) {
+  const staffLogin = businessStaffLogin(user);
+  const target = await env.HOTELS_DB.prepare(`${BUSINESS_SESSION_SELECT}
+    WHERE s.id=? AND s.staff_login=? AND s.revoked_at IS NULL AND d.revoked_at IS NULL LIMIT 1
+  `).bind(targetSessionID, staffLogin).first();
+  if (!target) return json({ ok: false, error: 'SESSION_NOT_FOUND' }, 404);
+  const now = new Date().toISOString();
+
+  if (target.session_id === currentSession.session_id) {
+    await env.HOTELS_DB.prepare(`
+      UPDATE business_staff_sessions SET revoked_at=?, revoked_by_session_id=?, revocation_reason='self_logout'
+      WHERE id=? AND revoked_at IS NULL
+    `).bind(now, currentSession.session_id, target.session_id).run();
+    return json({ ok: true, signedOut: true });
+  }
+
+  if (Number(currentSession.is_primary || 0) !== 1) {
+    return json({ ok: false, error: 'PRIMARY_SESSION_REQUIRED' }, 403);
+  }
+  if (Number(target.is_primary || 0) === 1) {
+    return json({ ok: false, error: 'PRIMARY_SESSION_PROTECTED' }, 403);
+  }
+
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`
+      UPDATE business_staff_sessions SET revoked_at=?, revoked_by_session_id=?, revocation_reason='revoked_by_primary'
+      WHERE id=? AND revoked_at IS NULL
+    `).bind(now, currentSession.session_id, target.session_id),
+    env.HOTELS_DB.prepare(`
+      UPDATE business_security_devices SET revoked_at=?, revoked_by_device_id=?
+      WHERE id=? AND is_primary=0 AND revoked_at IS NULL
+    `).bind(now, currentSession.device_id, target.device_id)
+  ]);
+  return json({ ok: true, signedOut: false });
+}
+
+async function revokeOtherBusinessSessions(env, user, currentSession) {
+  if (Number(currentSession.is_primary || 0) !== 1) {
+    return json({ ok: false, error: 'PRIMARY_SESSION_REQUIRED' }, 403);
+  }
+  const staffLogin = businessStaffLogin(user);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`
+      UPDATE business_staff_sessions SET revoked_at=?, revoked_by_session_id=?, revocation_reason='revoked_by_primary'
+      WHERE staff_login=? AND id<>? AND revoked_at IS NULL
+    `).bind(now, currentSession.session_id, staffLogin, currentSession.session_id),
+    env.HOTELS_DB.prepare(`
+      UPDATE business_security_devices SET revoked_at=?, revoked_by_device_id=?
+      WHERE staff_login=? AND id<>? AND is_primary=0 AND revoked_at IS NULL
+    `).bind(now, currentSession.device_id, staffLogin, currentSession.device_id)
+  ]);
+  return json({ ok: true });
+}
+
+async function approveBusinessDevice(env, user, currentSession, targetSessionID) {
+  if (Number(currentSession.is_primary || 0) !== 1) {
+    return json({ ok: false, error: 'PRIMARY_SESSION_REQUIRED' }, 403);
+  }
+  const target = await env.HOTELS_DB.prepare(`${BUSINESS_SESSION_SELECT}
+    WHERE s.id=? AND s.staff_login=? AND s.revoked_at IS NULL AND d.revoked_at IS NULL LIMIT 1
+  `).bind(targetSessionID, businessStaffLogin(user)).first();
+  if (!target) return json({ ok: false, error: 'SESSION_NOT_FOUND' }, 404);
+  if (Number(target.is_primary || 0) === 1) return json({ ok: true });
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    UPDATE business_security_devices SET trusted=1, approved_at=?, approved_by_device_id=?
+    WHERE id=? AND revoked_at IS NULL
+  `).bind(now, currentSession.device_id, target.device_id).run();
+  return json({ ok: true });
+}
+
+async function handleBusinessSecurity(request, env, parts, user, currentSession) {
+  if (parts[0] !== 'sessions') return json({ ok: false, error: 'NOT_FOUND' }, 404);
+  if (parts.length === 2 && parts[1] === 'register' && request.method === 'POST') {
+    return registerBusinessSession(request, env, user);
+  }
+  if (!currentSession) return json({ ok: false, error: 'BUSINESS_SESSION_REQUIRED' }, 401);
+  if (parts.length === 1 && request.method === 'GET') return listBusinessSessions(env, user, currentSession);
+  if (parts.length === 2 && parts[1] === 'current' && request.method === 'DELETE') {
+    return revokeBusinessSession(env, user, currentSession, currentSession.session_id);
+  }
+  if (parts.length === 2 && parts[1] === 'others' && request.method === 'DELETE') {
+    return revokeOtherBusinessSessions(env, user, currentSession);
+  }
+  const sessionID = safeID(parts[1]);
+  if (!sessionID) return json({ ok: false, error: 'INVALID_SESSION_ID' }, 400);
+  if (parts.length === 2 && request.method === 'DELETE') {
+    return revokeBusinessSession(env, user, currentSession, sessionID);
+  }
+  if (parts.length === 3 && parts[2] === 'approve' && request.method === 'POST') {
+    return approveBusinessDevice(env, user, currentSession, sessionID);
+  }
+  return methodNotAllowed();
+}
+
+async function sendBusinessSecurityPush(env, staffLogin, excludedInstallationID, title, body, data = {}) {
+  if (!apnsConfigured(env)) return { ok: false, skipped: 'APNS_NOT_CONFIGURED' };
+  const devices = await env.HOTELS_DB.prepare(`
+    SELECT device_token, environment, COALESCE(NULLIF(app_bundle_id,''), 'com.iumrah.business') AS app_bundle_id
+    FROM business_push_devices
+    WHERE enabled=1 AND LOWER(COALESCE(staff_login,''))=?
+      AND (installation_id IS NULL OR installation_id<>?)
+    LIMIT 50
+  `).bind(staffLogin, excludedInstallationID).all();
+  return sendAPNsToRows(env, devices.results || [], title, body, data, async (device, result) => {
+    const now = new Date().toISOString();
+    if (result.ok) {
+      await env.HOTELS_DB.prepare('UPDATE business_push_devices SET last_success_at=?, last_error=NULL, updated_at=? WHERE device_token=?')
+        .bind(now, now, device.device_token).run().catch(() => {});
+    } else if (result.response) {
+      await env.HOTELS_DB.prepare('UPDATE business_push_devices SET enabled=?, last_error=?, updated_at=? WHERE device_token=?')
+        .bind(result.disable ? 0 : 1, result.error.slice(0, 900), now, device.device_token).run().catch(() => {});
+    }
+  });
 }
 
 function apnsConfigured(env) {
@@ -2570,7 +2957,7 @@ async function serveChatAttachment(env, bookingID, attachmentID) {
 }
 
 
-async function requireStaff(request, env) {
+async function requireStaff(request, env, options = {}) {
   const cookie = request.headers.get('cookie') || '';
   if (!cookie) {
     return { ok: false, response: json({ ok: false, error: 'UNAUTHORIZED' }, 401) };
@@ -2603,7 +2990,12 @@ async function requireStaff(request, env) {
     return { ok: false, response: json({ ok: false, error: 'FORBIDDEN' }, 403) };
   }
 
-  return { ok: true, user };
+  if (options.allowSessionRegistration === true) {
+    return { ok: true, user, businessSession: null };
+  }
+  const business = await requireBusinessSession(request, env, user);
+  if (!business.ok) return business;
+  return { ok: true, user, businessSession: business.session || null };
 }
 
 async function health(env, admin) {
@@ -5199,7 +5591,7 @@ function corsHeaders(request) {
     'access-control-allow-origin': allowed ? origin : 'https://iumrah.app',
     'access-control-allow-credentials': 'true',
     'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'access-control-allow-headers': 'Content-Type,Authorization,Idempotency-Key,X-Iumrah-Allow-Possible-Duplicate,X-Iumrah-Source,X-Iumrah-Position,X-Iumrah-Cover,X-Iumrah-Category,X-Iumrah-Source-URL,X-Iumrah-Label,X-Iumrah-Room',
+    'access-control-allow-headers': 'Content-Type,Authorization,Idempotency-Key,X-Iumrah-Business-Session,X-Iumrah-Allow-Possible-Duplicate,X-Iumrah-Source,X-Iumrah-Position,X-Iumrah-Cover,X-Iumrah-Category,X-Iumrah-Source-URL,X-Iumrah-Label,X-Iumrah-Room',
     'vary': 'Origin'
   };
 }
