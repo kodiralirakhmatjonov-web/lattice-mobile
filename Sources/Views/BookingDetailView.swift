@@ -245,7 +245,7 @@ struct BookingDetailView: View {
         let destination = direction == .outbound ? detail.booking.outboundDestination : detail.booking.originCode
         let fallbackDate = direction == .outbound ? detail.booking.startDate : detail.booking.endDate
         let departureDate = displayFlightDate(flight?.scheduledDepartureLocal ?? generated?.departureAt, fallback: fallbackDate)
-        let terminal = flight?.departureTerminal.nonEmpty ?? generated?.segments?.first?.originTerminal.nonEmpty ?? "—"
+        let terminal = flight?.departureTerminal.nonEmpty ?? generated?.segments?.first?.originTerminal?.nonEmpty ?? "—"
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
