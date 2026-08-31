@@ -38,11 +38,16 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
 
         func isLikelyHotelDetailURL(_ url: URL) -> Bool {
-            let value = url.absoluteString.lowercased()
             switch self {
             case .booking:
-                return value.contains("/hotel/")
+                // Booking share/app-interstitial URLs often carry the real hotel URL inside
+                // a query parameter. Looking at absoluteString therefore produced false
+                // positives and allowed the "View this property in the app" shell to be
+                // imported as a hotel. The path itself must be the property path.
+                let path = url.path.lowercased()
+                return path.hasPrefix("/hotel/")
             case .expedia:
+                let value = url.absoluteString.lowercased()
                 return value.contains("hotel-information") || value.contains(".hotel-information") || value.contains("/hotel/")
             }
         }
@@ -80,6 +85,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     private var extractionStarted = false
     private var completionReported = false
     private var isRoomProbeNavigation = false
+    private var bookingResolutionInFlight = false
 
     var onCompleted: ((HotelDraft) -> Void)?
     var onFailed: ((String) -> Void)?
@@ -118,6 +124,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         stage = .loading
         extractionStarted = false
         completionReported = false
+        bookingResolutionInFlight = false
+        webView.customUserAgent = Self.userAgent(for: provider)
         sourceURL = normalized
         currentProvider = provider
         draft = nil
@@ -145,6 +153,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 ? "Открываем ссылку \(provider.rawValue) и переходим к карточке отеля…"
                 : "Открываем карточку \(provider.rawValue)…"
             progress = 0.08
+
             var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
             request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
             request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
@@ -246,25 +255,18 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
 
         guard let currentURL = webView.url else { return }
+
+        // Booking may finish navigation on a Share-* / app-install interstitial even though
+        // the real property URL is embedded in the DOM, scripts or query parameters. Resolve
+        // that destination before any extraction. This is Booking-only by design.
+        if provider == .booking, !provider.isLikelyHotelDetailURL(currentURL) {
+            await resolveBookingDestination(from: currentURL)
+            return
+        }
+
         if provider.isShareRedirectURL(currentURL) {
             status = "Переходим из ссылки \(provider.rawValue) к карточке отеля…"
             progress = max(progress, 0.12)
-            if provider == .booking {
-                let target = try? await webView.evaluateJavaScript("""
-                (() => {
-                  const urls = [
-                    document.querySelector('link[rel=canonical]')?.href,
-                    document.querySelector('meta[property=\"og:url\"]')?.content,
-                    ...Array.from(document.querySelectorAll('a[href*=\"/hotel/\"]')).map(a => a.href)
-                  ].filter(Boolean);
-                  return urls.find(value => String(value).toLowerCase().includes('booking.com/hotel/')) || null;
-                })()
-                """) as? String
-                if let target, let resolved = URL(string: target), provider.isLikelyHotelDetailURL(resolved) {
-                    sourceURL = resolved
-                    webView.load(URLRequest(url: resolved, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45))
-                }
-            }
             return
         }
         guard provider.isProviderContentURL(currentURL) else {
@@ -376,6 +378,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 status = "Expedia открыла защитную страницу вместо карточки отеля. Пройдите проверку и нажмите «Продолжить»."
                 return
             }
+            if provider == .booking, Self.isBookingInterstitialIdentity(name) {
+                throw APIError.server("BOOKING_APP_INTERSTITIAL: Booking открыл экран приложения вместо карточки отеля.")
+            }
 
             var candidate = HotelNormalizer.makeDraft(snapshot: snapshot)
 
@@ -478,7 +483,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             )
         )
         let roomWebView = WKWebView(frame: .zero, configuration: config)
-        roomWebView.customUserAgent = Self.mobileSafariUserAgent
+        roomWebView.customUserAgent = Self.userAgent(for: provider)
 
         for (index, probeURL) in probeURLs.enumerated() {
             if recovered.count >= 4 { break }
@@ -605,7 +610,223 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         ].contains { text.contains($0) }
     }
 
+    private func resolveBookingDestination(from currentURL: URL) async {
+        guard !bookingResolutionInFlight, stage != .finished, stage != .failed else { return }
+        bookingResolutionInFlight = true
+        status = "Booking перенаправляет на точную карточку отеля…"
+        progress = max(progress, 0.12)
+
+        for attempt in 0..<14 {
+            if let pageURL = webView.url, Provider.booking.isLikelyHotelDetailURL(pageURL) {
+                bookingResolutionInFlight = false
+                sourceURL = pageURL
+                await beginExtractionIfPossible()
+                return
+            }
+
+            if let raw = try? await webView.evaluateJavaScript(Self.bookingDestinationScript),
+               let value = raw as? String,
+               let resolved = Self.bookingHotelURLCandidate(from: value, baseURL: webView.url ?? currentURL) {
+                bookingResolutionInFlight = false
+                sourceURL = resolved
+                var request = URLRequest(url: resolved, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
+                request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+                request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+                webView.load(request)
+                return
+            }
+
+            if attempt == 4 || attempt == 9 {
+                progress = min(0.18, progress + 0.02)
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        // Last Booking-only fallback: resolve the Share-* HTTP chain outside the WebView.
+        // This bypasses the mobile app-promotion shell when Booking returns the real hotel
+        // location in redirects or in the interstitial HTML.
+        let fallbackURL = sourceURL ?? currentURL
+        if let resolved = await Self.resolveBookingShareURL(fallbackURL) {
+            bookingResolutionInFlight = false
+            sourceURL = resolved
+            var request = URLRequest(url: resolved, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            webView.load(request)
+            return
+        }
+
+        bookingResolutionInFlight = false
+        fail("Booking не отдал прямую карточку отеля из этой Share-ссылки. Попробуйте ещё раз: importer больше не будет принимать экран «Посмотрите это жилье в приложении» за отель.")
+    }
+
+    private static func resolveBookingShareURL(_ url: URL) async -> URL? {
+        guard Provider.booking.isProviderContentURL(url) else { return nil }
+        if Provider.booking.isLikelyHotelDetailURL(url) { return url }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
+        request.setValue(bookingDesktopSafariUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let finalURL = response.url ?? url
+            return Provider.booking.isLikelyHotelDetailURL(finalURL) ? finalURL : nil
+        } catch {
+            return nil
+        }
+    }
+
+    private static func bookingHotelURLCandidate(from rawValue: String, baseURL: URL) -> URL? {
+        let normalized = rawValue
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "\\/", with: "/")
+            .replacingOccurrences(of: "\\u002F", with: "/", options: .caseInsensitive)
+            .replacingOccurrences(of: "\\u003A", with: ":", options: .caseInsensitive)
+
+        func validated(_ raw: String) -> URL? {
+            var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            for suffix in ["&quot;", "&#34;", "&#39;"] {
+                if let range = value.range(of: suffix) { value = String(value[..<range.lowerBound]) }
+            }
+            value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'<>),];"))
+            guard !value.isEmpty else { return nil }
+
+            let decoded = value.removingPercentEncoding ?? value
+            let candidate: URL?
+            if decoded.hasPrefix("//") {
+                candidate = URL(string: "https:\(decoded)")
+            } else if decoded.hasPrefix("/") {
+                candidate = URL(string: decoded, relativeTo: baseURL)?.absoluteURL
+            } else {
+                candidate = URL(string: decoded, relativeTo: baseURL)?.absoluteURL
+            }
+            guard let candidate else { return nil }
+            let host = (candidate.host ?? "").lowercased()
+            guard host == "booking.com" || host.hasSuffix(".booking.com") else { return nil }
+            guard Provider.booking.isLikelyHotelDetailURL(candidate) else { return nil }
+            return candidate
+        }
+
+        // A direct URL can be passed here by the JavaScript resolver.
+        if normalized.count < 8_192, let direct = validated(normalized) { return direct }
+
+        let variants = [normalized, normalized.removingPercentEncoding ?? normalized]
+        let patterns = [
+            #"https?://(?:[A-Za-z0-9-]+\.)*booking\.com/hotel/[^\s\"'<>\\]+"#,
+            #"//(?:[A-Za-z0-9-]+\.)*booking\.com/hotel/[^\s\"'<>\\]+"#,
+            #"/hotel/[A-Za-z]{2}/[^\s\"'<>\\]+"#
+        ]
+
+        for value in variants {
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+                let range = NSRange(value.startIndex..<value.endIndex, in: value)
+                for match in regex.matches(in: value, options: [], range: range).prefix(40) {
+                    guard let swiftRange = Range(match.range, in: value) else { continue }
+                    if let candidate = validated(String(value[swiftRange])) { return candidate }
+                }
+            }
+        }
+        return nil
+    }
+
+    private static let bookingDestinationScript = #"""
+    (() => {
+      const isHotel = raw => {
+        try {
+          let value = String(raw || '').trim()
+            .replace(/&amp;/g, '&')
+            .replace(/\\u002f/ig, '/')
+            .replace(/\\u003a/ig, ':')
+            .replace(/\\\//g, '/');
+          for (let i = 0; i < 3; i += 1) {
+            try {
+              const decoded = decodeURIComponent(value);
+              if (decoded === value) break;
+              value = decoded;
+            } catch (_) { break; }
+          }
+          const u = new URL(value, location.href);
+          const host = u.hostname.toLowerCase();
+          if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return null;
+          if (!u.pathname.toLowerCase().startsWith('/hotel/')) return null;
+          u.hash = '';
+          return u.toString();
+        } catch (_) { return null; }
+      };
+
+      const candidates = [
+        location.href,
+        document.querySelector('link[rel="canonical"]')?.href,
+        document.querySelector('meta[property="og:url"]')?.content,
+        document.querySelector('meta[name="twitter:url"]')?.content
+      ].filter(Boolean);
+
+      for (const el of document.querySelectorAll('a[href],link[href],form[action],[data-url],[data-href],[data-link],[data-target-url],meta[content]')) {
+        for (const attr of ['href','action','data-url','data-href','data-link','data-target-url','content']) {
+          const value = el.getAttribute?.(attr);
+          if (value) candidates.push(value);
+        }
+      }
+
+      const inspect = raw => {
+        const direct = isHotel(raw);
+        if (direct) return direct;
+        try {
+          const u = new URL(String(raw || ''), location.href);
+          for (const [, value] of u.searchParams) {
+            const nested = isHotel(value);
+            if (nested) return nested;
+          }
+        } catch (_) {}
+        return null;
+      };
+
+      for (const raw of candidates) {
+        const found = inspect(raw);
+        if (found) return found;
+      }
+
+      const source = String(document.documentElement?.innerHTML || '')
+        .replace(/\\u002f/ig, '/')
+        .replace(/\\u003a/ig, ':')
+        .replace(/\\\//g, '/');
+      const absolute = source.match(/https?:\/\/(?:[A-Za-z0-9-]+\.)*booking\.com\/hotel\/[^\s"'<>\\]+/ig) || [];
+      for (const raw of absolute.slice(0, 80)) {
+        const found = inspect(raw);
+        if (found) return found;
+      }
+      const relative = source.match(/\/hotel\/[A-Za-z]{2}\/[^\s"'<>\\]+/ig) || [];
+      for (const raw of relative.slice(0, 80)) {
+        const found = inspect(raw);
+        if (found) return found;
+      }
+      return null;
+    })();
+    """#
+
     private static let mobileSafariUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
+    private static let bookingDesktopSafariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
+
+    private static func userAgent(for provider: Provider) -> String {
+        provider == .booking ? bookingDesktopSafariUserAgent : mobileSafariUserAgent
+    }
+
+    private static func isBookingInterstitialIdentity(_ value: String?) -> Bool {
+        let text = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !text.isEmpty else { return false }
+        return [
+            "view this property in the app",
+            "see this property in the app",
+            "open this property in the app",
+            "посмотрите это жилье в приложении",
+            "посмотреть это жилье в приложении",
+            "откройте это жилье в приложении"
+        ].contains { text.contains($0) }
+    }
 
     private func fail(_ message: String) {
         stage = .failed
@@ -613,6 +834,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         status = message
         progress = 0
         extractionStarted = false
+        bookingResolutionInFlight = false
         if !completionReported {
             completionReported = true
             onFailed?(message)
@@ -1084,7 +1306,11 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           }
           try { walkJSON(window.__iumrahJSONResponses || []); } catch (_) {}
           const typeText = value => Array.isArray(value) ? value.join(' ') : String(value || '');
-          const visibleH1 = clean(document.querySelector('h1')?.innerText || '');
+          const visibleH1 = clean(
+            provider === 'Booking'
+              ? (document.querySelector('[data-testid="title"]')?.innerText || document.querySelector('h1')?.innerText || '')
+              : (document.querySelector('h1')?.innerText || '')
+          );
           const canonicalHint = document.querySelector('link[rel=\"canonical\"]')?.href || location.href || sourceURL;
           const identifierValue = candidate => {
             if (candidate == null) return null;
@@ -1197,13 +1423,21 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
           // Visible property identity wins. Embedded app-state is used only to enrich the
           // same URL-anchored hotel, never to rename the requested property.
-          const titleCandidates = [
-            visibleH1,
-            document.querySelector('[data-testid="title"]')?.innerText,
-            meta('og:title','property'),
-            hotel.name,
-            document.title
-          ];
+          const titleCandidates = provider === 'Booking'
+            ? [
+                document.querySelector('[data-testid="title"]')?.innerText,
+                hotel.name,
+                meta('og:title','property'),
+                visibleH1,
+                document.title
+              ]
+            : [
+                visibleH1,
+                document.querySelector('[data-testid="title"]')?.innerText,
+                meta('og:title','property'),
+                hotel.name,
+                document.title
+              ];
           let name = titleCandidates.map(clean).find(Boolean) || null;
           if (name) name = name.replace(/\\s*[|–—-]\\s*(booking\\.com|expedia).*$/i, '').trim();
 
