@@ -617,6 +617,31 @@ actor APIClient {
         try validate(response, data: data)
     }
 
+
+    func clientNotificationAudience() async throws -> BusinessNotificationAudienceCounts {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/notifications/audience")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessNotificationAudienceResponse.self, from: data).audience
+    }
+
+    func clientNotifications() async throws -> [BusinessClientNotification] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/notifications")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessClientNotificationsResponse.self, from: data).notifications
+    }
+
+    func sendClientNotification(_ payload: BusinessClientNotificationPayload) async throws -> BusinessClientNotificationSendResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/notifications"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessClientNotificationSendResponse.self, from: data)
+    }
+
     private func perform(_ original: URLRequest) async throws -> (Data, URLResponse) {
         var request = original
         if let url = request.url,

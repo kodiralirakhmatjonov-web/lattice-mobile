@@ -15,7 +15,7 @@ final class BusinessSidebarStore: ObservableObject {
 }
 
 enum BusinessSidebarRoute: String, Identifiable {
-    case profile, sessions, employees, archive, primaryHotels
+    case profile, sessions, employees, archive, primaryHotels, notifications
     var id: String { rawValue }
 }
 
@@ -89,6 +89,7 @@ struct BusinessSidebarHost<Content: View>: View {
                 case .employees: EmployeesView()
                 case .archive: ClientArchiveView()
                 case .primaryHotels: PrimaryHotelsView()
+                case .notifications: NotificationsComposerView()
                 }
             }
         }
@@ -113,6 +114,7 @@ struct BusinessSidebarHost<Content: View>: View {
             sidebarButton("Сотрудники", icon: "person.2", route: .employees)
             sidebarButton("Архив клиентов", icon: "archivebox", route: .archive)
             sidebarButton("Primary Hotels", icon: "building.2.crop.circle", route: .primaryHotels)
+            sidebarButton("Создать уведомление", icon: "bell.badge.fill", route: .notifications)
 
             Spacer()
 

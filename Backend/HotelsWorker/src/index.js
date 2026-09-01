@@ -890,6 +890,13 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     return verifyBusinessFlight(request, env);
   }
 
+  if (parts[0] === 'notifications') {
+    if (parts.length === 1 && request.method === 'GET') return listClientSystemNotifications(env);
+    if (parts.length === 1 && request.method === 'POST') return createClientSystemNotification(request, env, user);
+    if (parts.length === 2 && parts[1] === 'audience' && request.method === 'GET') return clientNotificationAudience(env);
+    return methodNotAllowed();
+  }
+
   if (parts[0] === 'bookings') {
     if (parts.length === 1 && request.method === 'GET') return operationsBookings(request, env);
     const bookingID = cleanText(parts[1], 180);
@@ -2729,6 +2736,7 @@ async function handleClientOperations(request, env, parts) {
     if(parts.length===2&&request.method==='DELETE'){const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false});if(!auth.ok)return auth.response;return deleteClientBooking(request,env,bookingID,auth);} return methodNotAllowed();
   }
   if(parts[0]==='push'&&parts.length===2&&parts[1]==='devices'&&request.method==='POST')return registerClientPushDevice(request,env);
+  if(parts[0]==='notifications')return handleClientSystemNotifications(request,env,parts.slice(1));
   if(parts[0]!=='chats')return json({ok:false,error:'NOT_FOUND'},404);
   const bookingID=cleanText(parts[1],180); if(!bookingID)return json({ok:false,error:'INVALID_BOOKING_ID'},400);
   const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false}); if(!auth.ok)return auth.response;
@@ -2743,6 +2751,296 @@ async function registerClientPushDevice(request,env){
  const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID||payload?.bookingId,180);const token=cleanText(payload?.deviceToken,256)?.toLowerCase();if(!bookingID)return json({ok:false,error:'BOOKING_ID_REQUIRED'},400);if(!token||!/^[0-9a-f]{32,256}$/.test(token))return json({ok:false,error:'INVALID_DEVICE_TOKEN'},400);
  const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false});if(!auth.ok)return auth.response;const environment=payload?.environment==='development'?'development':'production';const appBundleID=cleanText(payload?.appBundleID||payload?.appBundleId,220)||'com.iumrah.beta';if(appBundleID!=='com.iumrah.beta')return json({ok:false,error:'INVALID_APP_BUNDLE_ID'},400);const locale=cleanText(payload?.locale,32)||'ru';const now=new Date().toISOString();
  await env.HOTELS_DB.prepare(`INSERT INTO client_push_subscriptions(device_token,booking_id,environment,app_bundle_id,locale,enabled,created_at,updated_at,last_error) VALUES(?,?,?,?,?,1,?,?,NULL) ON CONFLICT(device_token,booking_id) DO UPDATE SET environment=excluded.environment,app_bundle_id=excluded.app_bundle_id,locale=excluded.locale,enabled=1,updated_at=excluded.updated_at,last_error=NULL`).bind(token,bookingID,environment,appBundleID,locale,now,now).run();return json({ok:true,ready:apnsConfigured(env),bookingID});
+}
+
+
+const CLIENT_NOTIFICATION_SCOPES = new Set(['all','authenticated','guest','has_trip']);
+const CLIENT_NOTIFICATION_DESTINATIONS = new Set(['home','hotels','bookings','care','account','booking']);
+
+function validClientInstallation(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{16,128}$/.test(value);
+}
+
+async function optionalIumrahAccount(request, env) {
+  const header = String(request.headers.get('authorization') || '');
+  if (!header.toLowerCase().startsWith('bearer ')) return { ok: true, authenticated: false, pilgrim: null };
+  const auth = await requireIumrahAccount(request, env);
+  if (!auth.ok) return { ok: false, response: auth.response };
+  return { ok: true, authenticated: true, pilgrim: auth.pilgrim };
+}
+
+function clientNotificationTargetSQL(scope, alias = 'd') {
+  if (scope === 'authenticated') return `${alias}.is_authenticated=1`;
+  if (scope === 'guest') return `${alias}.is_authenticated=0`;
+  if (scope === 'has_trip') return `${alias}.has_trip=1`;
+  return '1=1';
+}
+
+function mapClientSystemNotification(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    targetScope: row.target_scope,
+    destination: row.destination,
+    destinationBookingID: row.destination_booking_id || null,
+    createdBy: row.created_by || '',
+    status: row.status,
+    matchedDevices: Number(row.matched_devices || 0),
+    pushSentCount: Number(row.push_sent_count || 0),
+    pushFailedCount: Number(row.push_failed_count || 0),
+    createdAt: row.created_at,
+    sentAt: row.sent_at || null,
+    expiresAt: row.expires_at,
+    isRead: Number(row.is_read || 0) === 1
+  };
+}
+
+async function registerClientNotificationDevice(request, env) {
+  const payload = await request.json().catch(() => null);
+  const installationID = cleanText(payload?.installationID || payload?.installationId, 128);
+  if (!validClientInstallation(installationID)) return json({ ok: false, error: 'INVALID_INSTALLATION_ID' }, 400);
+
+  let deviceToken = cleanText(payload?.deviceToken, 256)?.toLowerCase() || null;
+  if (deviceToken && !/^[0-9a-f]{32,256}$/.test(deviceToken)) return json({ ok: false, error: 'INVALID_DEVICE_TOKEN' }, 400);
+  const environment = payload?.environment === 'development' ? 'development' : 'production';
+  const appBundleID = cleanText(payload?.appBundleID || payload?.appBundleId, 220) || 'com.iumrah.beta';
+  if (appBundleID !== 'com.iumrah.beta') return json({ ok: false, error: 'INVALID_APP_BUNDLE_ID' }, 400);
+  const locale = cleanText(payload?.locale, 32) || 'ru';
+  const hasTrip = payload?.hasTrip === true ? 1 : 0;
+  const account = await optionalIumrahAccount(request, env);
+  if (!account.ok) return account.response;
+  const pilgrimID = account.authenticated ? Number(account.pilgrim?.id || account.pilgrim?.pilgrim_id || 0) || null : null;
+  const authenticated = account.authenticated ? 1 : 0;
+  const now = new Date().toISOString();
+
+  if (deviceToken) {
+    await env.HOTELS_DB.prepare(`
+      DELETE FROM client_notification_devices
+      WHERE device_token=? AND installation_id<>?
+    `).bind(deviceToken, installationID).run().catch(() => {});
+  }
+
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO client_notification_devices(
+      installation_id,device_token,environment,app_bundle_id,locale,pilgrim_id,is_authenticated,has_trip,enabled,created_at,updated_at,last_seen_at,last_error
+    ) VALUES(?,?,?,?,?,?,?,?,1,?,?,?,NULL)
+    ON CONFLICT(installation_id) DO UPDATE SET
+      device_token=COALESCE(excluded.device_token,client_notification_devices.device_token),
+      environment=excluded.environment,
+      app_bundle_id=excluded.app_bundle_id,
+      locale=excluded.locale,
+      pilgrim_id=excluded.pilgrim_id,
+      is_authenticated=excluded.is_authenticated,
+      has_trip=excluded.has_trip,
+      enabled=CASE WHEN excluded.device_token IS NOT NULL THEN 1 ELSE client_notification_devices.enabled END,
+      updated_at=excluded.updated_at,
+      last_seen_at=excluded.last_seen_at,
+      last_error=NULL
+  `).bind(
+    installationID, deviceToken, environment, appBundleID, locale, pilgrimID, authenticated, hasTrip,
+    now, now, now
+  ).run();
+
+  return json({ ok: true, ready: apnsConfigured(env), installationID, authenticated: !!authenticated, hasTrip: !!hasTrip });
+}
+
+async function clientSystemNotificationFeed(request, env) {
+  const url = new URL(request.url);
+  const installationID = cleanText(url.searchParams.get('installationID') || url.searchParams.get('installationId'), 128);
+  if (!validClientInstallation(installationID)) return json({ ok: false, error: 'INVALID_INSTALLATION_ID' }, 400);
+  const account = await optionalIumrahAccount(request, env);
+  if (!account.ok) return account.response;
+
+  const device = await env.HOTELS_DB.prepare(`
+    SELECT installation_id,is_authenticated,has_trip FROM client_notification_devices WHERE installation_id=? LIMIT 1
+  `).bind(installationID).first();
+  if (!device) return json({ ok: true, notifications: [] });
+
+  const now = new Date().toISOString();
+  const rows = await env.HOTELS_DB.prepare(`
+    SELECT n.*, CASE WHEN r.notification_id IS NULL THEN 0 ELSE 1 END AS is_read
+    FROM client_system_notifications n
+    LEFT JOIN client_system_notification_reads r
+      ON r.notification_id=n.id AND r.installation_id=?
+    WHERE n.status='published' AND n.sent_at IS NOT NULL AND n.expires_at>?
+      AND (
+        n.target_scope='all'
+        OR (n.target_scope='authenticated' AND ?=1)
+        OR (n.target_scope='guest' AND ?=0)
+        OR (n.target_scope='has_trip' AND ?=1)
+      )
+    ORDER BY n.sent_at DESC
+    LIMIT 12
+  `).bind(
+    installationID,
+    now,
+    Number(device.is_authenticated || 0),
+    Number(device.is_authenticated || 0),
+    Number(device.has_trip || 0)
+  ).all();
+
+  return json({ ok: true, notifications: (rows.results || []).map(mapClientSystemNotification) });
+}
+
+async function markClientSystemNotificationRead(request, env, notificationID) {
+  const payload = await request.json().catch(() => null);
+  const installationID = cleanText(payload?.installationID || payload?.installationId, 128);
+  if (!validClientInstallation(installationID)) return json({ ok: false, error: 'INVALID_INSTALLATION_ID' }, 400);
+  const exists = await env.HOTELS_DB.prepare('SELECT id FROM client_system_notifications WHERE id=? LIMIT 1').bind(notificationID).first();
+  if (!exists) return json({ ok: false, error: 'NOTIFICATION_NOT_FOUND' }, 404);
+  const device = await env.HOTELS_DB.prepare('SELECT installation_id FROM client_notification_devices WHERE installation_id=? LIMIT 1').bind(installationID).first();
+  if (!device) return json({ ok: false, error: 'INSTALLATION_NOT_REGISTERED' }, 404);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO client_system_notification_reads(notification_id,installation_id,opened_at)
+    VALUES(?,?,?)
+    ON CONFLICT(notification_id,installation_id) DO UPDATE SET opened_at=excluded.opened_at
+  `).bind(notificationID, installationID, now).run();
+  return json({ ok: true });
+}
+
+async function handleClientSystemNotifications(request, env, parts) {
+  if (parts.length === 1 && parts[0] === 'devices' && request.method === 'POST') {
+    return registerClientNotificationDevice(request, env);
+  }
+  if (parts.length === 1 && parts[0] === 'feed' && request.method === 'GET') {
+    return clientSystemNotificationFeed(request, env);
+  }
+  if (parts.length === 3 && parts[0] === 'feed' && parts[2] === 'read' && request.method === 'POST') {
+    const notificationID = safeID(parts[1]);
+    if (!notificationID) return json({ ok: false, error: 'INVALID_NOTIFICATION_ID' }, 400);
+    return markClientSystemNotificationRead(request, env, notificationID);
+  }
+  return methodNotAllowed();
+}
+
+async function clientNotificationAudience(env) {
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT
+      COUNT(*) AS all_count,
+      SUM(CASE WHEN is_authenticated=1 THEN 1 ELSE 0 END) AS authenticated_count,
+      SUM(CASE WHEN is_authenticated=0 THEN 1 ELSE 0 END) AS guest_count,
+      SUM(CASE WHEN has_trip=1 THEN 1 ELSE 0 END) AS has_trip_count,
+      SUM(CASE WHEN enabled=1 AND device_token IS NOT NULL AND device_token<>'' THEN 1 ELSE 0 END) AS push_capable_count
+    FROM client_notification_devices
+  `).first();
+  return json({
+    ok: true,
+    audience: {
+      all: Number(row?.all_count || 0),
+      authenticated: Number(row?.authenticated_count || 0),
+      guest: Number(row?.guest_count || 0),
+      hasTrip: Number(row?.has_trip_count || 0),
+      pushCapable: Number(row?.push_capable_count || 0)
+    }
+  });
+}
+
+async function listClientSystemNotifications(env) {
+  const rows = await env.HOTELS_DB.prepare(`
+    SELECT * FROM client_system_notifications ORDER BY created_at DESC LIMIT 50
+  `).all();
+  return json({ ok: true, notifications: (rows.results || []).map(mapClientSystemNotification) });
+}
+
+async function sendClientSystemNotificationPush(env, scope, notification) {
+  if (!apnsConfigured(env)) return { ok: false, skipped: 'APNS_NOT_CONFIGURED', sent: 0, total: 0 };
+  let lastInstallationID = '';
+  let sent = 0;
+  let total = 0;
+  const where = clientNotificationTargetSQL(scope, 'd');
+
+  for (let page = 0; page < 100; page += 1) {
+    const rows = await env.HOTELS_DB.prepare(`
+      SELECT installation_id,device_token,environment,app_bundle_id,locale
+      FROM client_notification_devices d
+      WHERE d.enabled=1 AND d.device_token IS NOT NULL AND d.device_token<>''
+        AND d.installation_id>? AND ${where}
+      ORDER BY d.installation_id ASC
+      LIMIT 200
+    `).bind(lastInstallationID).all();
+    const devices = rows.results || [];
+    if (!devices.length) break;
+    lastInstallationID = devices[devices.length - 1].installation_id;
+
+    const data = {
+      type: 'system_notification',
+      notificationID: notification.id,
+      destination: notification.destination,
+      ...(notification.destinationBookingID ? { destinationBookingID: notification.destinationBookingID } : {})
+    };
+    const result = await sendAPNsToRows(env, devices, notification.title, notification.body, data, async (device, delivery) => {
+      const now = new Date().toISOString();
+      if (delivery.ok) {
+        await env.HOTELS_DB.prepare(`
+          UPDATE client_notification_devices SET last_success_at=?,last_error=NULL,updated_at=? WHERE installation_id=?
+        `).bind(now, now, device.installation_id).run().catch(() => {});
+      } else if (delivery.response) {
+        await env.HOTELS_DB.prepare(`
+          UPDATE client_notification_devices SET enabled=?,last_error=?,updated_at=? WHERE installation_id=?
+        `).bind(delivery.disable ? 0 : 1, delivery.error.slice(0, 900), now, device.installation_id).run().catch(() => {});
+      }
+    });
+    sent += Number(result.sent || 0);
+    total += Number(result.total || 0);
+    if (devices.length < 200) break;
+  }
+  return { ok: sent > 0, sent, total };
+}
+
+async function createClientSystemNotification(request, env, user) {
+  const payload = await request.json().catch(() => null);
+  const title = safeHumanText(payload?.title || '', 120) || '';
+  const body = safeHumanText(payload?.body || '', 600) || '';
+  const targetScope = cleanText(payload?.targetScope, 32)?.toLowerCase() || 'all';
+  const destination = cleanText(payload?.destination, 32)?.toLowerCase() || 'home';
+  const destinationBookingID = cleanText(payload?.destinationBookingID || payload?.destinationBookingId, 180) || null;
+  if (!title || !body) return json({ ok: false, error: 'NOTIFICATION_COPY_REQUIRED' }, 400);
+  if (!CLIENT_NOTIFICATION_SCOPES.has(targetScope)) return json({ ok: false, error: 'INVALID_NOTIFICATION_SCOPE' }, 400);
+  if (!CLIENT_NOTIFICATION_DESTINATIONS.has(destination)) return json({ ok: false, error: 'INVALID_NOTIFICATION_DESTINATION' }, 400);
+  if (destination === 'booking' && !destinationBookingID) return json({ ok: false, error: 'DESTINATION_BOOKING_ID_REQUIRED' }, 400);
+
+  const id = `signal-${crypto.randomUUID()}`;
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const expiresAt = new Date(now.getTime() + 14 * 86400_000).toISOString();
+  const createdBy = businessStaffLogin(user) || safeHumanText(user?.displayName || '', 180) || 'iumrah-business';
+  const countRow = await env.HOTELS_DB.prepare(`
+    SELECT COUNT(*) AS count FROM client_notification_devices d WHERE ${clientNotificationTargetSQL(targetScope, 'd')}
+  `).first();
+  const matchedDevices = Number(countRow?.count || 0);
+
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO client_system_notifications(
+      id,title,body,target_scope,destination,destination_booking_id,created_by,status,matched_devices,push_sent_count,push_failed_count,created_at,sent_at,expires_at
+    ) VALUES(?,?,?,?,?,?,?,'sending',?,0,0,?,NULL,?)
+  `).bind(
+    id,title,body,targetScope,destination,destinationBookingID,createdBy,matchedDevices,createdAt,expiresAt
+  ).run();
+
+  let delivery;
+  try {
+    delivery = await sendClientSystemNotificationPush(env, targetScope, {
+      id, title, body, destination, destinationBookingID
+    });
+  } catch (error) {
+    console.error('CLIENT_SYSTEM_NOTIFICATION_PUSH_FAILED', id, error);
+    delivery = { ok: false, sent: 0, total: 0, error: String(error?.message || error) };
+  }
+
+  const sentAt = new Date().toISOString();
+  const sentCount = Number(delivery?.sent || 0);
+  const attempted = Number(delivery?.total || 0);
+  const failedCount = Math.max(0, attempted - sentCount);
+  await env.HOTELS_DB.prepare(`
+    UPDATE client_system_notifications
+    SET status='published',sent_at=?,push_sent_count=?,push_failed_count=?
+    WHERE id=?
+  `).bind(sentAt, sentCount, failedCount, id).run();
+
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM client_system_notifications WHERE id=?').bind(id).first();
+  return json({ ok: true, notification: mapClientSystemNotification(row), delivery: { sent: sentCount, attempted, pushReady: apnsConfigured(env) } }, 201);
 }
 
 async function requireBookingToken(request,env,bookingID,options={}){
