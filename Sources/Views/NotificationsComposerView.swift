@@ -98,47 +98,63 @@ struct NotificationsComposerView: View {
     }
 
     private var signalPreview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
                 Label("iumrah Signal", systemImage: "bell.badge.fill")
                     .font(.caption.weight(.bold))
-                    .tracking(0.5)
+                    .tracking(0.45)
                 Spacer()
                 Text("PREVIEW")
-                    .font(.caption2.weight(.bold))
+                    .font(.caption2.weight(.black))
                     .padding(.horizontal, 9)
-                    .frame(height: 25)
-                    .background(Color.white.opacity(0.16), in: Capsule())
+                    .frame(height: 22)
+                    .background(Color.white.opacity(0.9), in: Capsule())
+                    .foregroundStyle(Color(red: 0.055, green: 0.30, blue: 0.18))
             }
 
             Text(title.isEmpty ? "Важное обновление для вашей поездки" : title)
-                .font(.system(size: 23, weight: .bold, design: .rounded))
+                .font(.system(size: 21, weight: .bold, design: .rounded))
                 .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
 
             Text(message.isEmpty ? "Сообщение будет показано как push и как заметная карточка на главной странице iumrah." : message)
                 .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.82))
+                .foregroundStyle(.white.opacity(0.84))
                 .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(3)
 
-            HStack {
-                Text(destination.title)
+            HStack(spacing: 8) {
+                Label(destination.title, systemImage: destination.icon)
                     .font(.caption.weight(.semibold))
                 Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.caption.weight(.bold))
+                HStack(spacing: 6) {
+                    Text("Открыть")
+                        .font(.caption.weight(.bold))
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption.weight(.bold))
+                }
             }
         }
         .foregroundStyle(.white)
-        .padding(20)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
         .background {
             LinearGradient(
-                colors: [Color(red: 0.055, green: 0.31, blue: 0.19), Color(red: 0.16, green: 0.52, blue: 0.31)],
+                colors: [
+                    Color(red: 0.040, green: 0.255, blue: 0.150),
+                    Color(red: 0.090, green: 0.430, blue: 0.235),
+                    Color(red: 0.340, green: 0.630, blue: 0.450)
+                ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-        .shadow(color: .black.opacity(0.12), radius: 24, y: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 22, y: 10)
     }
 
     private var copyEditor: some View {
