@@ -102,18 +102,17 @@ struct NotificationsComposerView: View {
             HStack(spacing: 10) {
                 Label("iumrah Signal", systemImage: "bell.badge.fill")
                     .font(.caption.weight(.bold))
-                    .tracking(0.45)
+                    .tracking(0.35)
                 Spacer()
-                Text("PREVIEW")
-                    .font(.caption2.weight(.black))
-                    .padding(.horizontal, 9)
-                    .frame(height: 22)
-                    .background(Color.white.opacity(0.9), in: Capsule())
-                    .foregroundStyle(Color(red: 0.055, green: 0.30, blue: 0.18))
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
 
             Text(title.isEmpty ? "Важное обновление для вашей поездки" : title)
-                .font(.system(size: 21, weight: .bold, design: .rounded))
+                .font(.system(size: 19, weight: .bold, design: .rounded))
                 .fixedSize(horizontal: false, vertical: true)
                 .lineLimit(2)
 
@@ -122,6 +121,8 @@ struct NotificationsComposerView: View {
                 .foregroundStyle(.white.opacity(0.84))
                 .fixedSize(horizontal: false, vertical: true)
                 .lineLimit(3)
+
+            Spacer(minLength: 0)
 
             HStack(spacing: 8) {
                 Label(destination.title, systemImage: destination.icon)
@@ -136,25 +137,27 @@ struct NotificationsComposerView: View {
             }
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, minHeight: 158, maxHeight: 158, alignment: .topLeading)
+        .padding(16)
         .background {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.040, green: 0.255, blue: 0.150),
-                    Color(red: 0.090, green: 0.430, blue: 0.235),
-                    Color(red: 0.340, green: 0.630, blue: 0.450)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.050, green: 0.255, blue: 0.160),
+                            Color(red: 0.100, green: 0.430, blue: 0.245),
+                            Color(red: 0.355, green: 0.635, blue: 0.455)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .shadow(color: .black.opacity(0.12), radius: 18, x: 0, y: 8)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         }
-        .shadow(color: .black.opacity(0.12), radius: 22, y: 10)
     }
 
     private var copyEditor: some View {

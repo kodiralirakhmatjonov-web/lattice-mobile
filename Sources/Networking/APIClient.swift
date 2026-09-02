@@ -116,13 +116,6 @@ actor APIClient {
         return try decoder.decode(BookingsResponse.self, from: data).bookings
     }
 
-    func ignavUsage() async throws -> IgnavUsageSnapshot {
-        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/ignav-usage")
-        let (data, response) = try await perform(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(IgnavUsageResponse.self, from: data).usage
-    }
-
     func businessProfile() async throws -> BusinessTeamMember {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/me")
         let (data, response) = try await perform(from: url)
