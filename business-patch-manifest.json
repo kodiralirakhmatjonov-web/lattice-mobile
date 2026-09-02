@@ -1,0 +1,15 @@
+{
+  "patch": "iumrah-business-019-pricing-ignav-usage",
+  "description": "Restored editable generator cost report and shared Ignav monthly usage visibility.",
+  "deployment_order": ["apply_patch", "apply_d1_migration_0019", "deploy_hotels_worker", "build_testflight"],
+  "files": [
+    {"path":"BUSINESS_PRICING_IGNAV_019_APPLIED.txt","sha256":"239f4ff9f43b4273aed8e0e3b5582859a0c457d9329a7df7272b0b2fdf809556","bytes":811},
+    {"path":"Backend/HotelsWorker/migrations/0019_ignav_api_usage.sql","sha256":"35df14cd7b43edf51452f8c0f6e1f240bc29b04258648ac6755dd113d012f484","bytes":209},
+    {"path":"Backend/HotelsWorker/src/index.js","sha256":"7bb9ef4e1f8297c8cdf9a7ae078176899545856089f18d001833d3ebddefe012","bytes":325142},
+    {"path":"Backend/HotelsWorker/wrangler.template.jsonc","sha256":"fce676d95ad10c2bf88130613959dee4089faf3065ee266ca2112b4f7e428c0d","bytes":1360},
+    {"path":"Sources/Models/OperationsModels.swift","sha256":"56be68f1c56f30668b75f76c86ffdce49223847784fe3965efa67135cc680d29","bytes":18542},
+    {"path":"Sources/Networking/APIClient.swift","sha256":"f4e82349288c4eec4d90e82bc7ad583f6d3151802c4bd929ae9295d9eb601884","bytes":41170},
+    {"path":"Sources/Views/BookingDetailView.swift","sha256":"6f5a649d4b384079e14622e4a9c4735c814306ff5b07ff2d56b91cbdc12c6e6b","bytes":57617},
+    {"path":"Sources/Views/OverviewView.swift","sha256":"f245c84f49128b2623e903059c1d079ceeba53c3498a7f73cd5dd268bd94b82f","bytes":13786}
+  ]
+}

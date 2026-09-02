@@ -552,8 +552,12 @@ struct BookingDetailView: View {
             }
 
             Text("ИСТОЧНИКИ ЦЕНЫ").font(.caption2.bold()).tracking(1.2).foregroundStyle(.secondary)
-            fareAuditRow("Перелёт туда", report.selectedPricingInputs.outbound, currency: report.currency)
-            fareAuditRow("Перелёт обратно", report.selectedPricingInputs.inbound, currency: report.currency)
+            if let journeyFare = report.selectedPricingInputs.journeyFare {
+                fareAuditRow(report.context.tripType == "oneWay" ? "Авиабилет в одну сторону" : "Полный билет туда и обратно", journeyFare, currency: report.currency)
+            } else {
+                if let outbound = report.selectedPricingInputs.outbound { fareAuditRow("Перелёт туда", outbound, currency: report.currency) }
+                if let inbound = report.selectedPricingInputs.inbound { fareAuditRow("Перелёт обратно", inbound, currency: report.currency) }
+            }
             hotelAuditRow("Отель Мекки", report.selectedPricingInputs.makkahHotel, currency: report.currency)
             if let madinah = report.selectedPricingInputs.madinahHotel { hotelAuditRow("Отель Медины", madinah, currency: report.currency) }
 

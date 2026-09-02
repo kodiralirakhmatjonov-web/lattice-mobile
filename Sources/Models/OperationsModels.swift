@@ -156,6 +156,7 @@ struct BookingPricingReport: Codable, Hashable {
 
 struct BookingPricingContext: Codable, Hashable {
     let tier: String
+    let tripType: String?
     let includeMadinah: Bool
     let totalDays: Int
     let travelers: BookingPricingTravelers
@@ -171,8 +172,9 @@ struct BookingPricingTravelers: Codable, Hashable {
 }
 
 struct BookingPricingInputs: Codable, Hashable {
-    let outbound: BookingPricingFare
-    let inbound: BookingPricingFare
+    let journeyFare: BookingPricingFare?
+    let outbound: BookingPricingFare?
+    let inbound: BookingPricingFare?
     let makkahHotel: BookingPricingHotelInput
     let madinahHotel: BookingPricingHotelInput?
 }
@@ -239,6 +241,22 @@ struct BookingPricingOverrideUpdatePayload: Encodable {
 struct BookingPricingOverrideResponse: Decodable {
     let ok: Bool
     let pricing: BookingPricingOverride
+}
+
+struct IgnavUsageResponse: Decodable {
+    let ok: Bool
+    let usage: IgnavUsageSnapshot
+}
+
+struct IgnavUsageSnapshot: Codable, Hashable {
+    let period: String
+    let monthlyBudget: Int
+    let successfulRequests: Int
+    let remainingRequests: Int
+    let usedFraction: Double
+    let firstSuccessAt: String?
+    let lastSuccessAt: String?
+    let trackingNote: String
 }
 
 struct BookingGeneratorSelection: Codable, Hashable {

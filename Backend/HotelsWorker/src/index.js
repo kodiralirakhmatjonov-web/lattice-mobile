@@ -868,6 +868,11 @@ const TRIP_TRANSITIONS = {
 };
 
 async function handleBusinessOperations(request, env, url, parts, user) {
+  if (parts.length === 1 && parts[0] === 'ignav-usage') {
+    if (request.method === 'GET') return businessIgnavUsage(env);
+    return methodNotAllowed();
+  }
+
   if (parts.length === 1 && parts[0] === 'me') {
     if (request.method === 'GET') return businessProfileMe(env, user);
     if (request.method === 'PUT') return saveBusinessProfileMe(request, env, user);
@@ -1567,6 +1572,17 @@ function extractPricingSnapshot(raw) {
   return {};
 }
 
+function validGeneratorPricingReport(value) {
+  return Boolean(
+    value && typeof value === 'object' &&
+    cleanText(value.quoteId, 180) &&
+    value.context && typeof value.context === 'object' &&
+    value.selectedPricingInputs && typeof value.selectedPricingInputs === 'object' &&
+    Array.isArray(value.components) && value.components.length > 0 &&
+    value.totals && typeof value.totals === 'object'
+  );
+}
+
 function normalizedTripStatus(value) {
   const raw = String(value || '').toUpperCase();
   const map = {
@@ -2117,6 +2133,10 @@ async function saveBookingPricingOverride(request, env, bookingID, user) {
 
 async function generatorPricingReport(env, raw) {
   const trace = raw?.generatorTrace && typeof raw.generatorTrace === 'object' ? raw.generatorTrace : {};
+  const embedded = extractPricingSnapshot(raw);
+  if (validGeneratorPricingReport(embedded)) {
+    return { ...embedded, selection: embedded.selection || trace };
+  }
   const quoteID = cleanText(trace?.quoteId || raw?.quoteId, 180);
   if (!quoteID) return null;
   let row;
@@ -2129,9 +2149,47 @@ async function generatorPricingReport(env, raw) {
 
 
 async function generatorPricingReportForBooking(env, bookingID, raw) {
-  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json,pricing_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
   const snapshot = parseJSONObject(trip?.booking_snapshot_json);
-  return generatorPricingReport(env, { ...snapshot, ...(raw && typeof raw === 'object' ? raw : {}) });
+  const storedPricing = parseJSONObject(trip?.pricing_snapshot_json);
+  return generatorPricingReport(env, {
+    ...snapshot,
+    ...(raw && typeof raw === 'object' ? raw : {}),
+    ...(validGeneratorPricingReport(storedPricing) ? { pricingSnapshot: storedPricing } : {})
+  });
+}
+
+async function ensureIgnavUsageSchema(env) {
+  await env.HOTELS_DB.prepare(`CREATE TABLE IF NOT EXISTS ignav_api_usage_monthly (
+    period TEXT PRIMARY KEY,
+    successful_requests INTEGER NOT NULL DEFAULT 0,
+    first_success_at TEXT,
+    last_success_at TEXT,
+    updated_at TEXT NOT NULL
+  )`).run();
+}
+
+async function businessIgnavUsage(env) {
+  await ensureIgnavUsageSchema(env);
+  const period = new Date().toISOString().slice(0, 7);
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM ignav_api_usage_monthly WHERE period=? LIMIT 1').bind(period).first();
+  const requestedBudget = Number(env.IGNAV_MONTHLY_REQUEST_BUDGET || 3000);
+  const monthlyBudget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.trunc(requestedBudget) : 3000;
+  const successfulRequests = Math.max(0, Number(row?.successful_requests || 0));
+  const remainingRequests = Math.max(0, monthlyBudget - successfulRequests);
+  return json({
+    ok: true,
+    usage: {
+      period,
+      monthlyBudget,
+      successfulRequests,
+      remainingRequests,
+      usedFraction: monthlyBudget > 0 ? successfulRequests / monthlyBudget : 0,
+      firstSuccessAt: row?.first_success_at || null,
+      lastSuccessAt: row?.last_success_at || null,
+      trackingNote: 'Внутренний бюджет iumrah. Счётчик учитывает успешные ответы Ignav с момента установки этого обновления.'
+    }
+  });
 }
 
 async function operationsBookingDetail(request, env, bookingID) {
@@ -2156,7 +2214,7 @@ async function operationsBookingDetail(request, env, bookingID) {
     operation: tripMap(trip),
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
-    pricingReport: reportWithPricingOverride(await generatorPricingReport(env, pricingReportSource), await bookingPricingOverride(env, bookingID)),
+    pricingReport: reportWithPricingOverride(await generatorPricingReportForBooking(env, bookingID, pricingReportSource), await bookingPricingOverride(env, bookingID)),
     pricingOverride: await bookingPricingOverride(env, bookingID),
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),

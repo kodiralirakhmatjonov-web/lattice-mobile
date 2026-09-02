@@ -6,14 +6,17 @@ import UIKit
 final class OverviewStore: ObservableObject {
     @Published var bookings: [BookingSummary] = []
     @Published var unreadChats = 0
+    @Published var ignavUsage: IgnavUsageSnapshot?
     @Published var loading = false
 
     func reload() async {
         loading = true
         async let bookingsTask = APIClient.shared.bookings()
         async let chatsTask = APIClient.shared.businessChatThreads()
+        async let usageTask = APIClient.shared.ignavUsage()
         bookings = (try? await bookingsTask) ?? []
         unreadChats = ((try? await chatsTask) ?? []).filter(\.unreadForStaff).count
+        ignavUsage = try? await usageTask
         loading = false
     }
 }
@@ -70,6 +73,9 @@ struct OverviewView: View {
                     StatCard(title: "В РАБОТЕ", value: active, subtitle: "активных")
                 }
 
+
+                IgnavUsageCard(usage: store.ignavUsage, loading: store.loading)
+
                 VStack(alignment: .leading, spacing: 12) {
                     HStack { Text("Последние бронирования").font(.title2.bold()); Spacer(); if store.loading { ProgressView() } }
                     ForEach(store.bookings.prefix(5)) { booking in
@@ -102,6 +108,74 @@ struct OverviewView: View {
             Task { await store.reload() }
         }
         .refreshable { await store.reload() }
+    }
+}
+
+private struct IgnavUsageCard: View {
+    let usage: IgnavUsageSnapshot?
+    let loading: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: "airplane.circle.fill")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(BusinessDesign.accent)
+                    .frame(width: 48, height: 48)
+                    .background(BusinessDesign.softOrange, in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("IGNAV API").font(.caption2.bold()).tracking(1.5).foregroundStyle(.secondary)
+                    Text("Бюджет поисковых запросов").font(.headline)
+                }
+                Spacer()
+                if loading && usage == nil { ProgressView() }
+            }
+
+            if let usage {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(usage.remainingRequests)")
+                            .font(.system(size: 38, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                        Text("осталось в \(usage.period)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text("\(usage.successfulRequests) / \(usage.monthlyBudget)")
+                            .font(.headline.monospacedDigit())
+                        Text("успешных запросов")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                ProgressView(value: min(1, max(0, usage.usedFraction)))
+                    .tint(usage.usedFraction >= 0.85 ? Color.red : BusinessDesign.accent)
+
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle")
+                    Text(usage.trackingNote)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if let last = usage.lastSuccessAt, !last.isEmpty {
+                    Text("Последний успешный запрос: \(last.replacingOccurrences(of: "T", with: " ").prefix(16)) UTC")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+            } else if !loading {
+                Text("Статистика Ignav временно недоступна.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(18)
+        .businessCard(radius: 30)
     }
 }
 
