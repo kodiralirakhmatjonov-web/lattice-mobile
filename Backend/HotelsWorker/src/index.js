@@ -868,6 +868,11 @@ const TRIP_TRANSITIONS = {
 };
 
 async function handleBusinessOperations(request, env, url, parts, user) {
+  if (parts.length === 1 && parts[0] === 'ignav-usage') {
+    if (request.method === 'GET') return businessIgnavUsage(env);
+    return methodNotAllowed();
+  }
+
   if (parts.length === 1 && parts[0] === 'me') {
     if (request.method === 'GET') return businessProfileMe(env, user);
     if (request.method === 'PUT') return saveBusinessProfileMe(request, env, user);
@@ -1560,11 +1565,58 @@ function bookingIdentity(raw) {
 }
 
 function extractPricingSnapshot(raw) {
-  const candidates = ['pricingSnapshot','pricing_snapshot','pricing','priceBreakdown','pricingBreakdown','costBreakdown','generationReport','packagePricing','quote'];
-  for (const key of candidates) {
-    if (raw && typeof raw === 'object' && raw[key] && typeof raw[key] === 'object') return raw[key];
+  if (!raw || typeof raw !== 'object') return {};
+  const directKeys = ['pricingSnapshot','pricing_snapshot','pricing','priceBreakdown','pricingBreakdown','costBreakdown','generationReport','packagePricing'];
+  const containers = [raw, raw.booking, raw.data, raw.payload, raw.quote].filter(value => value && typeof value === 'object');
+  for (const container of containers) {
+    if (validGeneratorPricingReport(container)) return container;
+    for (const key of directKeys) {
+      const value = container[key];
+      if (value && typeof value === 'object' && validGeneratorPricingReport(value)) return value;
+    }
   }
   return {};
+}
+
+function finiteNonNegative(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function nearlyEqualPricing(a, b, tolerance = 0.08) {
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= tolerance;
+}
+
+function validGeneratorPricingReport(value) {
+  if (!(value && typeof value === 'object' && cleanText(value.quoteId, 180))) return false;
+  if (!(value.context && typeof value.context === 'object')) return false;
+  if (!(value.selectedPricingInputs && typeof value.selectedPricingInputs === 'object')) return false;
+  if (!(Array.isArray(value.components) && value.components.length > 0)) return false;
+  if (!(value.totals && typeof value.totals === 'object')) return false;
+
+  let componentSum = 0;
+  for (const component of value.components) {
+    if (!component || typeof component !== 'object' || !cleanText(component.code, 120) || !cleanText(component.label, 240)) return false;
+    const amount = finiteNonNegative(component.supplierCostUsd);
+    if (amount == null) return false;
+    componentSum += amount;
+  }
+
+  const supplier = finiteNonNegative(value.totals.supplierCostUsd);
+  const markupRate = finiteNonNegative(value.totals.markupRate);
+  const markupAmount = finiteNonNegative(value.totals.markupAmountUsd);
+  const subtotal = finiteNonNegative(value.totals.subtotalAfterMarkupUsd);
+  const feeRate = finiteNonNegative(value.totals.paymentFeeRate);
+  const calculated = finiteNonNegative(value.totals.calculatedSellingPriceUsd);
+  const publicTotal = finiteNonNegative(value.totals.publicTotalUsd);
+  const perPilgrim = finiteNonNegative(value.totals.publicPricePerPilgrimUsd);
+  if ([supplier,markupRate,markupAmount,subtotal,feeRate,calculated,publicTotal,perPilgrim].some(v => v == null)) return false;
+  if (supplier <= 0 || publicTotal <= 0 || perPilgrim <= 0 || markupRate > 5 || feeRate >= 1) return false;
+  if (!nearlyEqualPricing(componentSum, supplier)) return false;
+  if (!nearlyEqualPricing(supplier * markupRate, markupAmount)) return false;
+  if (!nearlyEqualPricing(supplier + markupAmount, subtotal)) return false;
+  if (!nearlyEqualPricing(subtotal / (1 - feeRate), calculated)) return false;
+  return true;
 }
 
 function normalizedTripStatus(value) {
@@ -2117,6 +2169,10 @@ async function saveBookingPricingOverride(request, env, bookingID, user) {
 
 async function generatorPricingReport(env, raw) {
   const trace = raw?.generatorTrace && typeof raw.generatorTrace === 'object' ? raw.generatorTrace : {};
+  const embedded = extractPricingSnapshot(raw);
+  if (validGeneratorPricingReport(embedded)) {
+    return { ...embedded, selection: embedded.selection || trace };
+  }
   const quoteID = cleanText(trace?.quoteId || raw?.quoteId, 180);
   if (!quoteID) return null;
   let row;
@@ -2129,9 +2185,47 @@ async function generatorPricingReport(env, raw) {
 
 
 async function generatorPricingReportForBooking(env, bookingID, raw) {
-  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json,pricing_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
   const snapshot = parseJSONObject(trip?.booking_snapshot_json);
-  return generatorPricingReport(env, { ...snapshot, ...(raw && typeof raw === 'object' ? raw : {}) });
+  const storedPricing = parseJSONObject(trip?.pricing_snapshot_json);
+  return generatorPricingReport(env, {
+    ...snapshot,
+    ...(raw && typeof raw === 'object' ? raw : {}),
+    ...(validGeneratorPricingReport(storedPricing) ? { pricingSnapshot: storedPricing } : {})
+  });
+}
+
+async function ensureIgnavUsageSchema(env) {
+  await env.HOTELS_DB.prepare(`CREATE TABLE IF NOT EXISTS ignav_api_usage_monthly (
+    period TEXT PRIMARY KEY,
+    successful_requests INTEGER NOT NULL DEFAULT 0,
+    first_success_at TEXT,
+    last_success_at TEXT,
+    updated_at TEXT NOT NULL
+  )`).run();
+}
+
+async function businessIgnavUsage(env) {
+  await ensureIgnavUsageSchema(env);
+  const period = new Date().toISOString().slice(0, 7);
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM ignav_api_usage_monthly WHERE period=? LIMIT 1').bind(period).first();
+  const requestedBudget = Number(env.IGNAV_MONTHLY_REQUEST_BUDGET || 3000);
+  const monthlyBudget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.trunc(requestedBudget) : 3000;
+  const successfulRequests = Math.max(0, Number(row?.successful_requests || 0));
+  const remainingRequests = Math.max(0, monthlyBudget - successfulRequests);
+  return json({
+    ok: true,
+    usage: {
+      period,
+      monthlyBudget,
+      successfulRequests,
+      remainingRequests,
+      usedFraction: monthlyBudget > 0 ? successfulRequests / monthlyBudget : 0,
+      firstSuccessAt: row?.first_success_at || null,
+      lastSuccessAt: row?.last_success_at || null,
+      trackingNote: 'Внутренний бюджет iumrah. Счётчик учитывает успешные ответы Ignav с момента установки этого обновления.'
+    }
+  });
 }
 
 async function operationsBookingDetail(request, env, bookingID) {
@@ -2156,7 +2250,7 @@ async function operationsBookingDetail(request, env, bookingID) {
     operation: tripMap(trip),
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
-    pricingReport: reportWithPricingOverride(await generatorPricingReport(env, pricingReportSource), await bookingPricingOverride(env, bookingID)),
+    pricingReport: reportWithPricingOverride(await generatorPricingReportForBooking(env, bookingID, pricingReportSource), await bookingPricingOverride(env, bookingID)),
     pricingOverride: await bookingPricingOverride(env, bookingID),
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
@@ -3137,7 +3231,59 @@ async function handleClientAccount(request,env,parts){
 async function recalcPilgrimStats(env,id){if(!id)return;const r=await env.HOTELS_DB.prepare('SELECT COUNT(*) count,MAX(COALESCE(end_date,created_at)) last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(id).first();await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(r?.count||0),r?.last_trip||null,new Date().toISOString(),id).run();}
 async function listAccountTrips(env,pilgrimID){const rows=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(pilgrimID).all();return json({ok:true,trips:(rows.results||[]).map(tripMap)});}
 async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
-async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);if(trip&&payload?.generatorTrace&&typeof payload.generatorTrace==='object'){const snapshot=parseJSONObject(trip.booking_snapshot_json);snapshot.generatorTrace=payload.generatorTrace;await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,updated_at=? WHERE id=?').bind(JSON.stringify(snapshot),new Date().toISOString(),trip.id).run();trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();}return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
+async function syncBookingProfileByToken(request, env, bookingID, auth) {
+  const payload = await request.json().catch(() => ({}));
+  let trip = auth.trip;
+  let pilgrim = trip ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first() : null;
+
+  const hasIdentityPayload = ['firstName','lastName','whatsapp','phone','email'].some(key => cleanText(payload?.[key], 220));
+  if (pilgrim && hasIdentityPayload) {
+    const identity = {
+      firstName: safeHumanText(payload?.firstName || '', 120) || '',
+      lastName: safeHumanText(payload?.lastName || '', 120) || '',
+      displayName: [payload?.firstName, payload?.lastName].filter(Boolean).join(' ').trim(),
+      phone: cleanText(payload?.whatsapp || payload?.phone, 100) || '',
+      email: cleanText(payload?.email, 220) || ''
+    };
+    pilgrim = await updatePilgrimIdentityFields(env, pilgrim, identity);
+  }
+
+  if (trip) {
+    const bookingSnapshot = parseJSONObject(trip.booking_snapshot_json);
+    let bookingSnapshotChanged = false;
+    if (payload?.generatorTrace && typeof payload.generatorTrace === 'object') {
+      bookingSnapshot.generatorTrace = payload.generatorTrace;
+      bookingSnapshotChanged = true;
+    }
+
+    let pricingJSON = trip.pricing_snapshot_json || '{}';
+    if (payload?.pricingSnapshot && typeof payload.pricingSnapshot === 'object') {
+      if (!validGeneratorPricingReport(payload.pricingSnapshot)) {
+        return json({ ok: false, error: 'INVALID_GENERATOR_PRICING_REPORT' }, 422);
+      }
+      // Store the immutable generator report both in its dedicated column and in the
+      // booking snapshot. The dedicated column powers "Цена под капотом"; embedding
+      // it also protects the report across future source-booking re-syncs.
+      pricingJSON = JSON.stringify(payload.pricingSnapshot);
+      bookingSnapshot.pricingSnapshot = payload.pricingSnapshot;
+      bookingSnapshotChanged = true;
+    }
+
+    if (bookingSnapshotChanged || pricingJSON !== (trip.pricing_snapshot_json || '{}')) {
+      await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,pricing_snapshot_json=?,updated_at=? WHERE id=?')
+        .bind(JSON.stringify(bookingSnapshot), pricingJSON, new Date().toISOString(), trip.id).run();
+      trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();
+    }
+  }
+
+  return json({
+    ok: true,
+    pilgrimID: pilgrim ? pilgrimPublicID(pilgrim.id) : null,
+    trip: tripMap(trip),
+    assignment: await clientBookingAssignmentDetail(env, bookingID),
+    esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true })
+  });
+}
 
 function travelerCountsFromSnapshot(raw){const t=raw?.input?.travelers||raw?.travelers||{};return {adults:Math.max(1,Number(t.adults||1)),children:Math.max(0,Number(t.children||0)),infants:Math.max(0,Number(t.infants||0))};}
 async function ensureTravelerRows(env,bookingID,trip){const existing=await env.HOTELS_DB.prepare('SELECT COUNT(*) count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();if(Number(existing?.count||0)>0)return;const c=travelerCountsFromSnapshot(parseJSONObject(trip.booking_snapshot_json));let pos=0;const stm=[];for(const [type,count] of [['adult',c.adults],['child',c.children],['infant',c.infants]])for(let i=0;i<count;i++){pos++;stm.push(env.HOTELS_DB.prepare('INSERT OR IGNORE INTO booking_travelers(id,booking_id,position,traveler_type) VALUES(?,?,?,?)').bind(`traveler-${crypto.randomUUID()}`,bookingID,pos,type));}if(stm.length)await env.HOTELS_DB.batch(stm);}
