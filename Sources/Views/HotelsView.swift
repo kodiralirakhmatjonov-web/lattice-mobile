@@ -13,6 +13,7 @@ struct HotelsView: View {
     @State private var hotelPendingDeletion: HotelListItem?
     @State private var deletingHotelID: String?
     @State private var jobActionID: String?
+    @State private var refreshingPriceHotelID: String?
 
     var body: some View {
         ScrollView {
@@ -234,6 +235,8 @@ struct HotelsView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.82)
 
+                hotelPriceLine(hotel)
+
                 HStack(spacing: 7) {
                     if let rating = hotel.rating {
                         Label(rating.formatted(.number.precision(.fractionLength(1))), systemImage: "star.fill")
@@ -247,11 +250,18 @@ struct HotelsView: View {
             .layoutPriority(1)
 
             Menu {
+                Button { Task { await refreshHotelPrice(hotel) } } label: {
+                    Label("Обновить цену", systemImage: "arrow.clockwise")
+                }
+                .disabled(refreshingPriceHotelID == hotel.id)
+
+                Divider()
+
                 Button(role: .destructive) { hotelPendingDeletion = hotel } label: {
                     Label("Удалить отель", systemImage: "trash")
                 }
             } label: {
-                if deletingHotelID == hotel.id {
+                if deletingHotelID == hotel.id || refreshingPriceHotelID == hotel.id {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: "ellipsis")
@@ -265,6 +275,47 @@ struct HotelsView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func hotelPriceLine(_ hotel: HotelListItem) -> some View {
+        if let price = hotel.price, let nightly = price.nightlyUSD, price.hasUsablePrice {
+            HStack(spacing: 6) {
+                Text(nightly.formatted(.currency(code: "USD").precision(.fractionLength(0))))
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+                Text("/ ночь")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let provider = price.provider {
+                    Text("· \(provider)")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                if price.status == "stale" {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+        } else if let price = hotel.price, price.status == "pending" {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Обновляем цену")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        } else if hotel.price?.status == "failed" {
+            Label("Цена пока недоступна", systemImage: "exclamationmark.triangle")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+        } else {
+            Text("Цена появится после импорта")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
     }
 
     private func statusPill(_ hotel: HotelListItem) -> some View {
@@ -508,6 +559,19 @@ struct HotelsView: View {
             try await APIClient.shared.deleteHotelImportJob(id: job.id)
             importJobs.removeAll { $0.id == job.id }
         } catch { importJobsError = error.localizedDescription }
+    }
+
+    @MainActor private func refreshHotelPrice(_ hotel: HotelListItem) async {
+        refreshingPriceHotelID = hotel.id
+        defer { refreshingPriceHotelID = nil }
+        do {
+            _ = try await APIClient.shared.refreshHotelPrice(id: hotel.id)
+            hotels = try await APIClient.shared.hotels()
+            backendMessage = nil
+        } catch {
+            backendMessage = "Не удалось обновить цену \(hotel.name): \(error.localizedDescription)"
+            if let refreshed = try? await APIClient.shared.hotels() { hotels = refreshed }
+        }
     }
 
     @MainActor private func deleteHotel(_ hotel: HotelListItem) async {

@@ -1,4 +1,11 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
+import {
+  HOTEL_PRICE_TTL_MS,
+  HOTEL_PRICE_RETRY_MS,
+  buildHotelPriceProbeURLs,
+  quoteContextFromProbeURL,
+  extractHotelPriceFromHTML
+} from './hotel-price.js';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -38,6 +45,10 @@ export default {
       console.error('HOTELS_API_UNHANDLED', error);
       return json({ ok: false, error: 'INTERNAL_ERROR' }, 500);
     }
+  },
+
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(runHotelPriceScheduler(env));
   }
 };
 
@@ -104,6 +115,16 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
     if (request.method === 'GET') return hotelDetail(env, hotelID, true, url);
     if (request.method === 'DELETE') return deleteHotel(env, hotelID);
     return methodNotAllowed();
+  }
+
+  if (parts.length === 2 && parts[1] === 'price') {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return hotelPriceDetail(env, hotelID);
+  }
+
+  if (parts.length === 3 && parts[1] === 'price' && parts[2] === 'refresh') {
+    if (request.method !== 'POST') return methodNotAllowed();
+    return refreshHotelPriceResponse(env, hotelID);
   }
 
   if (parts.length === 2 && parts[1] === 'images') {
@@ -868,6 +889,11 @@ const TRIP_TRANSITIONS = {
 };
 
 async function handleBusinessOperations(request, env, url, parts, user) {
+  if (parts.length === 1 && parts[0] === 'ignav-usage') {
+    if (request.method === 'GET') return businessIgnavUsage(env);
+    return methodNotAllowed();
+  }
+
   if (parts.length === 1 && parts[0] === 'me') {
     if (request.method === 'GET') return businessProfileMe(env, user);
     if (request.method === 'PUT') return saveBusinessProfileMe(request, env, user);
@@ -1560,11 +1586,58 @@ function bookingIdentity(raw) {
 }
 
 function extractPricingSnapshot(raw) {
-  const candidates = ['pricingSnapshot','pricing_snapshot','pricing','priceBreakdown','pricingBreakdown','costBreakdown','generationReport','packagePricing','quote'];
-  for (const key of candidates) {
-    if (raw && typeof raw === 'object' && raw[key] && typeof raw[key] === 'object') return raw[key];
+  if (!raw || typeof raw !== 'object') return {};
+  const directKeys = ['pricingSnapshot','pricing_snapshot','pricing','priceBreakdown','pricingBreakdown','costBreakdown','generationReport','packagePricing'];
+  const containers = [raw, raw.booking, raw.data, raw.payload, raw.quote].filter(value => value && typeof value === 'object');
+  for (const container of containers) {
+    if (validGeneratorPricingReport(container)) return container;
+    for (const key of directKeys) {
+      const value = container[key];
+      if (value && typeof value === 'object' && validGeneratorPricingReport(value)) return value;
+    }
   }
   return {};
+}
+
+function finiteNonNegative(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function nearlyEqualPricing(a, b, tolerance = 0.08) {
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= tolerance;
+}
+
+function validGeneratorPricingReport(value) {
+  if (!(value && typeof value === 'object' && cleanText(value.quoteId, 180))) return false;
+  if (!(value.context && typeof value.context === 'object')) return false;
+  if (!(value.selectedPricingInputs && typeof value.selectedPricingInputs === 'object')) return false;
+  if (!(Array.isArray(value.components) && value.components.length > 0)) return false;
+  if (!(value.totals && typeof value.totals === 'object')) return false;
+
+  let componentSum = 0;
+  for (const component of value.components) {
+    if (!component || typeof component !== 'object' || !cleanText(component.code, 120) || !cleanText(component.label, 240)) return false;
+    const amount = finiteNonNegative(component.supplierCostUsd);
+    if (amount == null) return false;
+    componentSum += amount;
+  }
+
+  const supplier = finiteNonNegative(value.totals.supplierCostUsd);
+  const markupRate = finiteNonNegative(value.totals.markupRate);
+  const markupAmount = finiteNonNegative(value.totals.markupAmountUsd);
+  const subtotal = finiteNonNegative(value.totals.subtotalAfterMarkupUsd);
+  const feeRate = finiteNonNegative(value.totals.paymentFeeRate);
+  const calculated = finiteNonNegative(value.totals.calculatedSellingPriceUsd);
+  const publicTotal = finiteNonNegative(value.totals.publicTotalUsd);
+  const perPilgrim = finiteNonNegative(value.totals.publicPricePerPilgrimUsd);
+  if ([supplier,markupRate,markupAmount,subtotal,feeRate,calculated,publicTotal,perPilgrim].some(v => v == null)) return false;
+  if (supplier <= 0 || publicTotal <= 0 || perPilgrim <= 0 || markupRate > 5 || feeRate >= 1) return false;
+  if (!nearlyEqualPricing(componentSum, supplier)) return false;
+  if (!nearlyEqualPricing(supplier * markupRate, markupAmount)) return false;
+  if (!nearlyEqualPricing(supplier + markupAmount, subtotal)) return false;
+  if (!nearlyEqualPricing(subtotal / (1 - feeRate), calculated)) return false;
+  return true;
 }
 
 function normalizedTripStatus(value) {
@@ -2117,6 +2190,10 @@ async function saveBookingPricingOverride(request, env, bookingID, user) {
 
 async function generatorPricingReport(env, raw) {
   const trace = raw?.generatorTrace && typeof raw.generatorTrace === 'object' ? raw.generatorTrace : {};
+  const embedded = extractPricingSnapshot(raw);
+  if (validGeneratorPricingReport(embedded)) {
+    return { ...embedded, selection: embedded.selection || trace };
+  }
   const quoteID = cleanText(trace?.quoteId || raw?.quoteId, 180);
   if (!quoteID) return null;
   let row;
@@ -2129,9 +2206,47 @@ async function generatorPricingReport(env, raw) {
 
 
 async function generatorPricingReportForBooking(env, bookingID, raw) {
-  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json,pricing_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
   const snapshot = parseJSONObject(trip?.booking_snapshot_json);
-  return generatorPricingReport(env, { ...snapshot, ...(raw && typeof raw === 'object' ? raw : {}) });
+  const storedPricing = parseJSONObject(trip?.pricing_snapshot_json);
+  return generatorPricingReport(env, {
+    ...snapshot,
+    ...(raw && typeof raw === 'object' ? raw : {}),
+    ...(validGeneratorPricingReport(storedPricing) ? { pricingSnapshot: storedPricing } : {})
+  });
+}
+
+async function ensureIgnavUsageSchema(env) {
+  await env.HOTELS_DB.prepare(`CREATE TABLE IF NOT EXISTS ignav_api_usage_monthly (
+    period TEXT PRIMARY KEY,
+    successful_requests INTEGER NOT NULL DEFAULT 0,
+    first_success_at TEXT,
+    last_success_at TEXT,
+    updated_at TEXT NOT NULL
+  )`).run();
+}
+
+async function businessIgnavUsage(env) {
+  await ensureIgnavUsageSchema(env);
+  const period = new Date().toISOString().slice(0, 7);
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM ignav_api_usage_monthly WHERE period=? LIMIT 1').bind(period).first();
+  const requestedBudget = Number(env.IGNAV_MONTHLY_REQUEST_BUDGET || 3000);
+  const monthlyBudget = Number.isFinite(requestedBudget) && requestedBudget > 0 ? Math.trunc(requestedBudget) : 3000;
+  const successfulRequests = Math.max(0, Number(row?.successful_requests || 0));
+  const remainingRequests = Math.max(0, monthlyBudget - successfulRequests);
+  return json({
+    ok: true,
+    usage: {
+      period,
+      monthlyBudget,
+      successfulRequests,
+      remainingRequests,
+      usedFraction: monthlyBudget > 0 ? successfulRequests / monthlyBudget : 0,
+      firstSuccessAt: row?.first_success_at || null,
+      lastSuccessAt: row?.last_success_at || null,
+      trackingNote: 'Внутренний бюджет iumrah. Счётчик учитывает успешные ответы Ignav с момента установки этого обновления.'
+    }
+  });
 }
 
 async function operationsBookingDetail(request, env, bookingID) {
@@ -2156,7 +2271,7 @@ async function operationsBookingDetail(request, env, bookingID) {
     operation: tripMap(trip),
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
-    pricingReport: reportWithPricingOverride(await generatorPricingReport(env, pricingReportSource), await bookingPricingOverride(env, bookingID)),
+    pricingReport: reportWithPricingOverride(await generatorPricingReportForBooking(env, bookingID, pricingReportSource), await bookingPricingOverride(env, bookingID)),
     pricingOverride: await bookingPricingOverride(env, bookingID),
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
@@ -3137,7 +3252,59 @@ async function handleClientAccount(request,env,parts){
 async function recalcPilgrimStats(env,id){if(!id)return;const r=await env.HOTELS_DB.prepare('SELECT COUNT(*) count,MAX(COALESCE(end_date,created_at)) last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(id).first();await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(r?.count||0),r?.last_trip||null,new Date().toISOString(),id).run();}
 async function listAccountTrips(env,pilgrimID){const rows=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(pilgrimID).all();return json({ok:true,trips:(rows.results||[]).map(tripMap)});}
 async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
-async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);if(trip&&payload?.generatorTrace&&typeof payload.generatorTrace==='object'){const snapshot=parseJSONObject(trip.booking_snapshot_json);snapshot.generatorTrace=payload.generatorTrace;await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,updated_at=? WHERE id=?').bind(JSON.stringify(snapshot),new Date().toISOString(),trip.id).run();trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();}return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
+async function syncBookingProfileByToken(request, env, bookingID, auth) {
+  const payload = await request.json().catch(() => ({}));
+  let trip = auth.trip;
+  let pilgrim = trip ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first() : null;
+
+  const hasIdentityPayload = ['firstName','lastName','whatsapp','phone','email'].some(key => cleanText(payload?.[key], 220));
+  if (pilgrim && hasIdentityPayload) {
+    const identity = {
+      firstName: safeHumanText(payload?.firstName || '', 120) || '',
+      lastName: safeHumanText(payload?.lastName || '', 120) || '',
+      displayName: [payload?.firstName, payload?.lastName].filter(Boolean).join(' ').trim(),
+      phone: cleanText(payload?.whatsapp || payload?.phone, 100) || '',
+      email: cleanText(payload?.email, 220) || ''
+    };
+    pilgrim = await updatePilgrimIdentityFields(env, pilgrim, identity);
+  }
+
+  if (trip) {
+    const bookingSnapshot = parseJSONObject(trip.booking_snapshot_json);
+    let bookingSnapshotChanged = false;
+    if (payload?.generatorTrace && typeof payload.generatorTrace === 'object') {
+      bookingSnapshot.generatorTrace = payload.generatorTrace;
+      bookingSnapshotChanged = true;
+    }
+
+    let pricingJSON = trip.pricing_snapshot_json || '{}';
+    if (payload?.pricingSnapshot && typeof payload.pricingSnapshot === 'object') {
+      if (!validGeneratorPricingReport(payload.pricingSnapshot)) {
+        return json({ ok: false, error: 'INVALID_GENERATOR_PRICING_REPORT' }, 422);
+      }
+      // Store the immutable generator report both in its dedicated column and in the
+      // booking snapshot. The dedicated column powers "Цена под капотом"; embedding
+      // it also protects the report across future source-booking re-syncs.
+      pricingJSON = JSON.stringify(payload.pricingSnapshot);
+      bookingSnapshot.pricingSnapshot = payload.pricingSnapshot;
+      bookingSnapshotChanged = true;
+    }
+
+    if (bookingSnapshotChanged || pricingJSON !== (trip.pricing_snapshot_json || '{}')) {
+      await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,pricing_snapshot_json=?,updated_at=? WHERE id=?')
+        .bind(JSON.stringify(bookingSnapshot), pricingJSON, new Date().toISOString(), trip.id).run();
+      trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();
+    }
+  }
+
+  return json({
+    ok: true,
+    pilgrimID: pilgrim ? pilgrimPublicID(pilgrim.id) : null,
+    trip: tripMap(trip),
+    assignment: await clientBookingAssignmentDetail(env, bookingID),
+    esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true })
+  });
+}
 
 function travelerCountsFromSnapshot(raw){const t=raw?.input?.travelers||raw?.travelers||{};return {adults:Math.max(1,Number(t.adults||1)),children:Math.max(0,Number(t.children||0)),infants:Math.max(0,Number(t.infants||0))};}
 async function ensureTravelerRows(env,bookingID,trip){const existing=await env.HOTELS_DB.prepare('SELECT COUNT(*) count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();if(Number(existing?.count||0)>0)return;const c=travelerCountsFromSnapshot(parseJSONObject(trip.booking_snapshot_json));let pos=0;const stm=[];for(const [type,count] of [['adult',c.adults],['child',c.children],['infant',c.infants]])for(let i=0;i<count;i++){pos++;stm.push(env.HOTELS_DB.prepare('INSERT OR IGNORE INTO booking_travelers(id,booking_id,position,traveler_type) VALUES(?,?,?,?)').bind(`traveler-${crypto.randomUUID()}`,bookingID,pos,type));}if(stm.length)await env.HOTELS_DB.batch(stm);}
@@ -3355,8 +3522,30 @@ async function listHotels(env, url, publishedOnly) {
         WHERE hi.hotel_id = h.id
         ORDER BY hi.is_cover DESC, hi.position ASC, hi.created_at ASC
         LIMIT 1
-      ) AS cover_image_id
+      ) AS cover_image_id,
+      hp.provider AS price_provider,
+      hp.source_url AS price_source_url,
+      hp.resolved_url AS price_resolved_url,
+      hp.amount_original AS price_amount_original,
+      hp.currency_original AS price_currency_original,
+      hp.price_basis AS price_basis,
+      hp.nightly_price_usd AS price_nightly_usd,
+      hp.quote_total_usd AS price_quote_total_usd,
+      hp.quote_check_in AS price_quote_check_in,
+      hp.quote_check_out AS price_quote_check_out,
+      hp.quote_nights AS price_quote_nights,
+      hp.quote_adults AS price_quote_adults,
+      hp.quote_rooms AS price_quote_rooms,
+      hp.confidence AS price_confidence,
+      hp.method AS price_method,
+      hp.status AS price_status,
+      hp.fetched_at AS price_fetched_at,
+      hp.expires_at AS price_expires_at,
+      hp.last_attempt_at AS price_last_attempt_at,
+      hp.next_retry_at AS price_next_retry_at,
+      hp.error AS price_error
     FROM hotels h
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id = h.id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY
       CASE LOWER(h.city) WHEN 'makkah' THEN 0 WHEN 'madinah' THEN 1 ELSE 2 END,
@@ -3365,7 +3554,11 @@ async function listHotels(env, url, publishedOnly) {
   `;
 
   const result = await env.HOTELS_DB.prepare(sql).bind(...values).all();
-  const hotels = (result.results || []).map(row => hotelSummary(row));
+  const hotels = (result.results || []).map(row => {
+    const summary = hotelSummary(row);
+    if (publishedOnly && summary?.price) summary.price = publicHotelPrice(summary.price);
+    return summary;
+  });
   return json({ hotels }, 200, publishedOnly ? PUBLIC_CACHE_HEADERS : undefined);
 }
 
@@ -3376,13 +3569,14 @@ async function hotelDetail(env, hotelID, admin, url = null) {
 
   if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
 
-  const [amenitiesResult, roomsResult, imagesResult, sourcesResult] = await Promise.all([
+  const [amenitiesResult, roomsResult, imagesResult, sourcesResult, priceResult] = await Promise.all([
     env.HOTELS_DB.prepare('SELECT amenity FROM hotel_amenities WHERE hotel_id = ? ORDER BY position ASC, amenity ASC').bind(hotelID).all(),
     env.HOTELS_DB.prepare('SELECT id, name, max_guests, size_m2, beds, view, description, amenities_json, smoking, accessibility_json, category, bathroom_json FROM hotel_rooms WHERE hotel_id = ? ORDER BY position ASC, name ASC').bind(hotelID).all(),
     env.HOTELS_DB.prepare('SELECT id, source_provider, category, label, room_name, position, is_cover, width, height, byte_size, original_byte_size, content_type, transform_version FROM hotel_images WHERE hotel_id = ? ORDER BY is_cover DESC, position ASC, created_at ASC').bind(hotelID).all(),
     admin
       ? env.HOTELS_DB.prepare('SELECT * FROM hotel_sources WHERE hotel_id = ? ORDER BY provider ASC').bind(hotelID).all()
-      : Promise.resolve({ results: [] })
+      : Promise.resolve({ results: [] }),
+    env.HOTELS_DB.prepare('SELECT * FROM hotel_price_cache WHERE hotel_id=? LIMIT 1').bind(hotelID).first()
   ]);
 
   const images = (imagesResult.results || []).map(row => ({
@@ -3453,6 +3647,7 @@ async function hotelDetail(env, hotelID, admin, url = null) {
       bathroom: parseJSONArray(row.bathroom_json)
     })),
     images,
+    price: admin ? hotelPriceRow(priceResult) : publicHotelPrice(hotelPriceRow(priceResult)),
     sources: admin ? (sourcesResult.results || []).map(sourceRow) : [],
     createdAt: hotel.created_at,
     updatedAt: hotel.updated_at
@@ -3907,6 +4102,460 @@ function isRepairableDuplicate(duplicate) {
   return ['draft','failed','ready','archived'].includes(status) || ['draft','failed','ready','archived'].includes(lifecycle);
 }
 
+
+
+const HOTEL_PRICE_FETCH_HEADERS = {
+  'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
+  'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'accept-language': 'en-US,en;q=0.9',
+  'cache-control': 'no-cache'
+};
+
+async function runHotelPriceScheduler(env) {
+  try {
+    await runHotelCatalogMaintenance(env);
+  } catch (error) {
+    console.error('HOTEL_CATALOG_MAINTENANCE_FAILED', String(error?.message || error));
+  }
+
+  try {
+    await refreshDueHotelPrices(env);
+  } catch (error) {
+    console.error('HOTEL_PRICE_SCHEDULER_FAILED', String(error?.message || error));
+  }
+}
+
+async function refreshDueHotelPrices(env) {
+  const now = new Date().toISOString();
+  const due = await env.HOTELS_DB.prepare(`
+    SELECT h.id
+    FROM hotels h
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id = h.id
+    WHERE h.status != 'archived'
+      AND EXISTS (
+        SELECT 1 FROM hotel_sources hs
+        WHERE hs.hotel_id = h.id AND LOWER(hs.provider) IN ('booking','expedia')
+      )
+      AND (
+        hp.hotel_id IS NULL
+        OR (hp.status = 'fresh' AND (hp.expires_at IS NULL OR hp.expires_at <= ?))
+        OR (hp.status IN ('stale','failed','pending') AND (hp.next_retry_at IS NULL OR hp.next_retry_at <= ?))
+      )
+    ORDER BY COALESCE(hp.next_retry_at, hp.expires_at, h.created_at) ASC
+    LIMIT 12
+  `).bind(now, now).all();
+
+  const hotelIDs = (due.results || []).map(row => safeID(row.id)).filter(Boolean);
+  for (let start = 0; start < hotelIDs.length; start += 3) {
+    const group = hotelIDs.slice(start, start + 3);
+    await Promise.allSettled(group.map(hotelID => refreshHotelPrice(env, hotelID, { reason: 'scheduled' })));
+  }
+  return { attempted: hotelIDs.length };
+}
+
+async function refreshHotelPriceResponse(env, hotelID) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+  const result = await refreshHotelPrice(env, hotelID, { reason: 'manual', force: true });
+  return json({ ok: result.ok, price: await hotelPriceRecord(env, hotelID), error: result.error || null }, result.ok ? 200 : 502);
+}
+
+async function hotelPriceDetail(env, hotelID) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+  return json({ ok: true, price: await hotelPriceRecord(env, hotelID) });
+}
+
+async function refreshHotelPrice(env, hotelID, options = {}) {
+  const id = safeID(hotelID);
+  if (!id) return { ok: false, error: 'INVALID_HOTEL_ID' };
+
+  const source = await env.HOTELS_DB.prepare(`
+    SELECT id, hotel_id, provider, source_url, canonical_url, checked_at
+    FROM hotel_sources
+    WHERE hotel_id=? AND LOWER(provider) IN ('booking','expedia')
+    ORDER BY
+      CASE LOWER(provider) WHEN 'booking' THEN 0 WHEN 'expedia' THEN 1 ELSE 2 END,
+      checked_at DESC
+    LIMIT 1
+  `).bind(id).first();
+
+  if (!source?.source_url) {
+    await markHotelPriceFailure(env, id, null, 'PRICE_SOURCE_MISSING');
+    return { ok: false, error: 'PRICE_SOURCE_MISSING' };
+  }
+
+  const sourceURL = cleanURL(source.canonical_url) || cleanURL(source.source_url);
+  if (!sourceURL) {
+    await markHotelPriceFailure(env, id, source, 'PRICE_SOURCE_INVALID_URL');
+    return { ok: false, error: 'PRICE_SOURCE_INVALID_URL' };
+  }
+
+  let parsedSource;
+  try { parsedSource = new URL(sourceURL); }
+  catch (_) {
+    await markHotelPriceFailure(env, id, source, 'PRICE_SOURCE_INVALID_URL');
+    return { ok: false, error: 'PRICE_SOURCE_INVALID_URL' };
+  }
+
+  const provider = canonicalPriceProvider(source.provider, parsedSource);
+  if (!provider) {
+    await markHotelPriceFailure(env, id, source, 'PRICE_PROVIDER_UNSUPPORTED');
+    return { ok: false, error: 'PRICE_PROVIDER_UNSUPPORTED' };
+  }
+
+  const attemptedAt = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, status, last_attempt_at, next_retry_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=excluded.source_id,
+      provider=excluded.provider,
+      source_url=excluded.source_url,
+      status=CASE WHEN hotel_price_cache.nightly_price_usd IS NULL THEN 'pending' ELSE hotel_price_cache.status END,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=excluded.next_retry_at,
+      updated_at=excluded.updated_at
+  `).bind(
+    id,
+    cleanText(source.id, 180),
+    provider,
+    sourceURL,
+    attemptedAt,
+    new Date(Date.now() + HOTEL_PRICE_RETRY_MS).toISOString(),
+    attemptedAt
+  ).run();
+
+  const probes = buildHotelPriceProbeURLs(parsedSource, provider);
+  let lastError = 'PRICE_NOT_FOUND';
+  let lastHTTPStatus = null;
+
+  for (const probeURL of probes) {
+    let response;
+    try {
+      response = await fetch(probeURL, {
+        headers: HOTEL_PRICE_FETCH_HEADERS,
+        redirect: 'follow',
+        cf: { cacheTtl: 0 }
+      });
+    } catch (error) {
+      lastError = `PRICE_FETCH_FAILED: ${String(error?.message || error).slice(0, 320)}`;
+      continue;
+    }
+
+    lastHTTPStatus = response.status;
+    if (!response.ok) {
+      lastError = `PRICE_HTTP_${response.status}`;
+      continue;
+    }
+
+    const finalURL = response.url || probeURL;
+    let parsedFinal;
+    try { parsedFinal = new URL(finalURL); }
+    catch (_) {
+      lastError = 'PRICE_BAD_REDIRECT';
+      continue;
+    }
+    if (!samePricePropertyIdentity(parsedFinal, parsedSource, provider)) {
+      lastError = 'PRICE_SOURCE_IDENTITY_MISMATCH';
+      continue;
+    }
+
+    const html = await response.text();
+    if (!html || html.length < 500) {
+      lastError = 'PRICE_EMPTY_PAGE';
+      continue;
+    }
+    if (html.length > 8_000_000) {
+      lastError = 'PRICE_PAGE_TOO_LARGE';
+      continue;
+    }
+    if (isProviderChallengeHTML(html)) {
+      lastError = 'PRICE_PROVIDER_CHALLENGE';
+      continue;
+    }
+
+    const quote = extractHotelPriceFromHTML(html, provider);
+    if (!quote) {
+      lastError = 'PRICE_NOT_FOUND_IN_PROPERTY_PAGE';
+      continue;
+    }
+
+    const context = quoteContextFromProbeURL(probeURL, provider);
+    const fetchedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + HOTEL_PRICE_TTL_MS).toISOString();
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO hotel_price_cache (
+        hotel_id, source_id, provider, source_url, resolved_url,
+        amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+        quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+        confidence, method, status, fetched_at, expires_at, last_attempt_at,
+        next_retry_at, last_http_status, error, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fresh', ?, ?, ?, NULL, ?, NULL, ?)
+      ON CONFLICT(hotel_id) DO UPDATE SET
+        source_id=excluded.source_id,
+        provider=excluded.provider,
+        source_url=excluded.source_url,
+        resolved_url=excluded.resolved_url,
+        amount_original=excluded.amount_original,
+        currency_original=excluded.currency_original,
+        price_basis=excluded.price_basis,
+        nightly_price_usd=excluded.nightly_price_usd,
+        quote_total_usd=excluded.quote_total_usd,
+        quote_check_in=excluded.quote_check_in,
+        quote_check_out=excluded.quote_check_out,
+        quote_nights=excluded.quote_nights,
+        quote_adults=excluded.quote_adults,
+        quote_rooms=excluded.quote_rooms,
+        confidence=excluded.confidence,
+        method=excluded.method,
+        status='fresh',
+        fetched_at=excluded.fetched_at,
+        expires_at=excluded.expires_at,
+        last_attempt_at=excluded.last_attempt_at,
+        next_retry_at=NULL,
+        last_http_status=excluded.last_http_status,
+        error=NULL,
+        updated_at=excluded.updated_at
+    `).bind(
+      id,
+      cleanText(source.id, 180),
+      provider,
+      sourceURL,
+      finalURL,
+      quote.amount,
+      quote.currency,
+      quote.priceBasis,
+      quote.nightlyUSD,
+      quote.stayTotalUSD,
+      context.checkIn,
+      context.checkOut,
+      context.nights,
+      context.adults,
+      context.rooms,
+      quote.confidence,
+      cleanText(quote.method, 160),
+      fetchedAt,
+      expiresAt,
+      fetchedAt,
+      lastHTTPStatus,
+      fetchedAt
+    ).run();
+
+    console.log('HOTEL_PRICE_REFRESHED', {
+      hotelID: id,
+      provider,
+      nightlyUSD: quote.nightlyUSD,
+      quoteTotalUSD: quote.stayTotalUSD,
+      checkIn: context.checkIn,
+      checkOut: context.checkOut,
+      reason: options.reason || 'unknown'
+    });
+    return { ok: true, price: quote, provider, context };
+  }
+
+  await markHotelPriceFailure(env, id, source, lastError, lastHTTPStatus);
+  console.warn('HOTEL_PRICE_REFRESH_FAILED', { hotelID: id, provider, error: lastError, reason: options.reason || 'unknown' });
+  return { ok: false, error: lastError };
+}
+
+async function markHotelPriceFailure(env, hotelID, source, error, httpStatus = null) {
+  const now = new Date().toISOString();
+  const nextRetry = new Date(Date.now() + HOTEL_PRICE_RETRY_MS).toISOString();
+  const provider = source ? canonicalPriceProvider(source.provider, safeURLObject(source.source_url)) : null;
+  const sourceURL = source ? cleanURL(source.canonical_url) || cleanURL(source.source_url) : null;
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, status, last_attempt_at,
+      next_retry_at, last_http_status, error, updated_at
+    ) VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=COALESCE(excluded.source_id, hotel_price_cache.source_id),
+      provider=COALESCE(excluded.provider, hotel_price_cache.provider),
+      source_url=COALESCE(excluded.source_url, hotel_price_cache.source_url),
+      status=CASE WHEN hotel_price_cache.nightly_price_usd IS NULL THEN 'failed' ELSE 'stale' END,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=excluded.next_retry_at,
+      last_http_status=excluded.last_http_status,
+      error=excluded.error,
+      updated_at=excluded.updated_at
+  `).bind(
+    hotelID,
+    cleanText(source?.id, 180),
+    provider,
+    sourceURL,
+    now,
+    nextRetry,
+    httpStatus,
+    cleanText(error, 900) || 'PRICE_REFRESH_FAILED',
+    now
+  ).run();
+}
+
+async function hotelPriceRecord(env, hotelID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM hotel_price_cache WHERE hotel_id=? LIMIT 1').bind(hotelID).first();
+  return hotelPriceRow(row);
+}
+
+function hotelPriceRow(row) {
+  if (!row) return null;
+  const prefixed = Object.prototype.hasOwnProperty.call(row, 'price_status')
+    || Object.prototype.hasOwnProperty.call(row, 'price_nightly_usd')
+    || Object.prototype.hasOwnProperty.call(row, 'price_provider');
+  const directCache = Object.prototype.hasOwnProperty.call(row, 'hotel_id')
+    && (Object.prototype.hasOwnProperty.call(row, 'nightly_price_usd') || Object.prototype.hasOwnProperty.call(row, 'fetched_at'));
+  if (!prefixed && !directCache) return null;
+  if (prefixed && row.price_status == null && row.price_nightly_usd == null && row.price_provider == null) return null;
+  return {
+    provider: prefixed ? (row.price_provider || null) : (row.provider || null),
+    sourceURL: row.price_source_url || row.source_url || null,
+    resolvedURL: row.price_resolved_url || row.resolved_url || null,
+    amountOriginal: nullableRowNumber(row.price_amount_original ?? row.amount_original),
+    currencyOriginal: row.price_currency_original || row.currency_original || null,
+    priceBasis: row.price_basis || null,
+    nightlyUSD: nullableRowNumber(row.price_nightly_usd ?? row.nightly_price_usd),
+    quoteTotalUSD: nullableRowNumber(row.price_quote_total_usd ?? row.quote_total_usd),
+    checkIn: row.price_quote_check_in || row.quote_check_in || null,
+    checkOut: row.price_quote_check_out || row.quote_check_out || null,
+    nights: nullableRowInteger(row.price_quote_nights ?? row.quote_nights),
+    adults: nullableRowInteger(row.price_quote_adults ?? row.quote_adults),
+    rooms: nullableRowInteger(row.price_quote_rooms ?? row.quote_rooms),
+    confidence: nullableRowNumber(row.price_confidence ?? row.confidence),
+    method: row.price_method || row.method || null,
+    status: prefixed ? (row.price_status || 'pending') : (row.status || 'pending'),
+    fetchedAt: row.price_fetched_at || row.fetched_at || null,
+    expiresAt: row.price_expires_at || row.expires_at || null,
+    lastAttemptAt: row.price_last_attempt_at || row.last_attempt_at || null,
+    nextRetryAt: row.price_next_retry_at || row.next_retry_at || null,
+    error: row.price_error || row.error || null
+  };
+}
+
+function publicHotelPrice(price) {
+  if (!price) return null;
+  return {
+    provider: price.provider || null,
+    nightlyUSD: price.nightlyUSD == null ? null : Number(price.nightlyUSD),
+    status: price.status || 'pending',
+    fetchedAt: price.fetchedAt || null,
+    expiresAt: price.expiresAt || null,
+    checkIn: price.checkIn || null,
+    checkOut: price.checkOut || null,
+    nights: price.nights == null ? null : Number(price.nights),
+    adults: price.adults == null ? null : Number(price.adults),
+    rooms: price.rooms == null ? null : Number(price.rooms)
+  };
+}
+
+function nullableRowNumber(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function nullableRowInteger(value) {
+  const number = nullableRowNumber(value);
+  return number == null ? null : Math.trunc(number);
+}
+
+function canonicalPriceProvider(rawProvider, sourceURL) {
+  const provider = String(rawProvider || '').trim().toLowerCase();
+  if (provider === 'booking') return 'Booking';
+  if (provider === 'expedia') return 'Expedia';
+  return sourceURL ? detectRoomProvider(sourceURL) : null;
+}
+
+function safeURLObject(value) {
+  try { return value ? new URL(String(value)) : null; }
+  catch (_) { return null; }
+}
+
+function samePricePropertyIdentity(candidateURL, expectedURL, provider) {
+  if (!providerRoomHostAllowed(candidateURL, provider)) return false;
+  if (provider === 'Expedia') return sameProviderPropertyIdentity(candidateURL, expectedURL, provider);
+  const bookingSlug = url => {
+    const match = String(url?.pathname || '').match(/\/hotel\/[^/]+\/([^/?#]+?)(?:\.html)?\/?$/i);
+    return match ? match[1].replace(/\.html$/i, '').toLowerCase() : null;
+  };
+  const expected = bookingSlug(expectedURL);
+  const actual = bookingSlug(candidateURL);
+  return !expected || !actual || expected === actual;
+}
+
+async function runHotelCatalogMaintenance(env) {
+  const task = await env.HOTELS_DB.prepare(`
+    SELECT id, status, cutoff_at, attempt_count
+    FROM catalog_maintenance_tasks
+    WHERE status IN ('pending','failed')
+      AND (next_retry_at IS NULL OR next_retry_at <= ?)
+    ORDER BY created_at ASC
+    LIMIT 1
+  `).bind(new Date().toISOString()).first().catch(() => null);
+  if (!task?.id) return { ok: true, task: null };
+
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    UPDATE catalog_maintenance_tasks
+    SET status='running', attempt_count=attempt_count+1, started_at=COALESCE(started_at, ?), updated_at=?, error=NULL
+    WHERE id=?
+  `).bind(now, now, task.id).run();
+
+  try {
+    let deletedObjects = 0;
+    if (task.id === 'reset-hotel-media-clean-start-v1') {
+      deletedObjects = await purgeHotelMediaBefore(env, task.cutoff_at || now);
+    }
+    const completedAt = new Date().toISOString();
+    await env.HOTELS_DB.prepare(`
+      UPDATE catalog_maintenance_tasks
+      SET status='completed', deleted_objects=?, completed_at=?, updated_at=?, next_retry_at=NULL, error=NULL
+      WHERE id=?
+    `).bind(deletedObjects, completedAt, completedAt, task.id).run();
+    console.log('HOTEL_CATALOG_MAINTENANCE_COMPLETED', { taskID: task.id, deletedObjects });
+    return { ok: true, task: task.id, deletedObjects };
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    await env.HOTELS_DB.prepare(`
+      UPDATE catalog_maintenance_tasks
+      SET status='failed', next_retry_at=?, error=?, updated_at=?
+      WHERE id=?
+    `).bind(
+      new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      cleanText(String(error?.message || error), 900),
+      failedAt,
+      task.id
+    ).run();
+    throw error;
+  }
+}
+
+async function purgeHotelMediaBefore(env, cutoffISO) {
+  const cutoffMs = Date.parse(cutoffISO);
+  const effectiveCutoff = Number.isFinite(cutoffMs) ? cutoffMs : Date.now();
+  let cursor = undefined;
+  let deleted = 0;
+  let pages = 0;
+  do {
+    const listing = await env.HOTELS_MEDIA.list({ prefix: 'hotels/', limit: 1000, cursor });
+    const keys = (listing.objects || [])
+      .filter(object => {
+        const uploaded = object?.uploaded instanceof Date ? object.uploaded.getTime() : Date.parse(object?.uploaded || '');
+        return !Number.isFinite(uploaded) || uploaded <= effectiveCutoff;
+      })
+      .map(object => object.key)
+      .filter(Boolean);
+    for (let start = 0; start < keys.length; start += 100) {
+      const chunk = keys.slice(start, start + 100);
+      if (chunk.length) await env.HOTELS_MEDIA.delete(chunk);
+      deleted += chunk.length;
+    }
+    cursor = listing.truncated ? listing.cursor : undefined;
+    pages += 1;
+    if (pages > 500) throw new Error('HOTEL_MEDIA_PURGE_PAGE_LIMIT');
+  } while (cursor);
+  return deleted;
+}
 
 async function recoverSourceRooms(request, env) {
   const payload = await readJSON(request, 100_000);
@@ -4811,6 +5460,17 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       return { completed, stored, failed, total, hotelID, roomCount, coverCount, warning };
     });
 
+    if (finalState.completed) {
+      await step.do('refresh hotel price cache', { retries: { limit: 1, delay: '5 seconds' }, timeout: '45 seconds' }, async () => {
+        try {
+          return await refreshHotelPrice(this.env, hotelID, { reason: 'post-import' });
+        } catch (error) {
+          console.error('HOTEL_PRICE_POST_IMPORT_FAILED', { hotelID, error: String(error?.message || error) });
+          return { ok: false, error: String(error?.message || error).slice(0, 500) };
+        }
+      });
+    }
+
     if (finalState.completed && publishWhenComplete) {
       await step.do('prewarm hotel translations', { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '2 minutes' }, async () => {
         try {
@@ -5453,8 +6113,30 @@ async function summaryRow(env, hotelID) {
         WHERE hi.hotel_id = h.id
         ORDER BY hi.is_cover DESC, hi.position ASC, hi.created_at ASC
         LIMIT 1
-      ) AS cover_image_id
+      ) AS cover_image_id,
+      hp.provider AS price_provider,
+      hp.source_url AS price_source_url,
+      hp.resolved_url AS price_resolved_url,
+      hp.amount_original AS price_amount_original,
+      hp.currency_original AS price_currency_original,
+      hp.price_basis AS price_basis,
+      hp.nightly_price_usd AS price_nightly_usd,
+      hp.quote_total_usd AS price_quote_total_usd,
+      hp.quote_check_in AS price_quote_check_in,
+      hp.quote_check_out AS price_quote_check_out,
+      hp.quote_nights AS price_quote_nights,
+      hp.quote_adults AS price_quote_adults,
+      hp.quote_rooms AS price_quote_rooms,
+      hp.confidence AS price_confidence,
+      hp.method AS price_method,
+      hp.status AS price_status,
+      hp.fetched_at AS price_fetched_at,
+      hp.expires_at AS price_expires_at,
+      hp.last_attempt_at AS price_last_attempt_at,
+      hp.next_retry_at AS price_next_retry_at,
+      hp.error AS price_error
     FROM hotels h
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
     WHERE h.id = ?
   `).bind(hotelID).first();
 }
@@ -5473,6 +6155,7 @@ function hotelSummary(row) {
     coverImageURL: row.cover_image_id ? publicImagePath(row.id, row.cover_image_id) : null,
     imageCount: Number(row.image_count || 0),
     roomCount: Number(row.room_count || 0),
+    price: hotelPriceRow(row),
     updatedAt: row.updated_at
   };
 }

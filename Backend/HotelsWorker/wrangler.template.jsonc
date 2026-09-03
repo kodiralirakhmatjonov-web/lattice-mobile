@@ -52,5 +52,10 @@
   },
   "images": {
     "binding": "IMAGES"
+  },
+  "triggers": {
+    "crons": [
+      "17 * * * *"
+    ]
   }
 }

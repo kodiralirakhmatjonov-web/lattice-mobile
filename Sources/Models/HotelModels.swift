@@ -408,6 +408,39 @@ struct HotelDraft: Codable, Identifiable {
     var suspiciousSelectedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .other } }
 }
 
+
+struct HotelCachedPrice: Codable, Hashable {
+    let provider: String?
+    let sourceURL: String?
+    let resolvedURL: String?
+    let amountOriginal: Double?
+    let currencyOriginal: String?
+    let priceBasis: String?
+    let nightlyUSD: Double?
+    let quoteTotalUSD: Double?
+    let checkIn: String?
+    let checkOut: String?
+    let nights: Int?
+    let adults: Int?
+    let rooms: Int?
+    let confidence: Double?
+    let method: String?
+    let status: String
+    let fetchedAt: String?
+    let expiresAt: String?
+    let lastAttemptAt: String?
+    let nextRetryAt: String?
+    let error: String?
+
+    var hasUsablePrice: Bool { nightlyUSD != nil && (status == "fresh" || status == "stale") }
+}
+
+struct HotelPriceResponse: Codable {
+    let ok: Bool
+    let price: HotelCachedPrice?
+    let error: String?
+}
+
 struct HotelListItem: Codable, Identifiable {
     let id: String
     let name: String
@@ -421,6 +454,7 @@ struct HotelListItem: Codable, Identifiable {
     let updatedAt: String
     let rating: Double?
     let reviewCount: Int?
+    let price: HotelCachedPrice?
 }
 
 struct HotelsResponse: Codable { let hotels: [HotelListItem] }
