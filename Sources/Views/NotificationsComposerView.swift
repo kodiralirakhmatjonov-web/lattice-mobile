@@ -99,14 +99,14 @@ struct NotificationsComposerView: View {
 
     private var signalPreview: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Label("iumrah Signal", systemImage: "bell.badge.fill")
                     .font(.caption.weight(.bold))
                     .tracking(0.35)
                 Spacer()
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.9))
+                    .foregroundStyle(Color.white.opacity(0.92))
                     .frame(width: 28, height: 28)
                     .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
@@ -137,25 +137,25 @@ struct NotificationsComposerView: View {
             }
         }
         .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, minHeight: 158, maxHeight: 158, alignment: .topLeading)
-        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 164, maxHeight: 164, alignment: .topLeading)
+        .padding(18)
         .background {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [
                             Color(red: 0.050, green: 0.255, blue: 0.160),
-                            Color(red: 0.100, green: 0.430, blue: 0.245),
-                            Color(red: 0.355, green: 0.635, blue: 0.455)
+                            Color(red: 0.095, green: 0.420, blue: 0.240),
+                            Color(red: 0.330, green: 0.610, blue: 0.435)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
-                .shadow(color: .black.opacity(0.12), radius: 18, x: 0, y: 8)
+                .shadow(color: .black.opacity(0.10), radius: 16, x: 0, y: 8)
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         }
     }
