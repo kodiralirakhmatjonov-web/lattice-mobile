@@ -98,48 +98,7 @@ struct NotificationsComposerView: View {
     }
 
     private var signalPreview: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 10) {
-                Label("iumrah Signal", systemImage: "bell.badge.fill")
-                    .font(.caption.weight(.bold))
-                    .tracking(0.35)
-                Spacer()
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .frame(width: 28, height: 28)
-                    .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-
-            Text(title.isEmpty ? "Важное обновление для вашей поездки" : title)
-                .font(.system(size: 19, weight: .bold, design: .rounded))
-                .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(2)
-
-            Text(message.isEmpty ? "Сообщение будет показано как push и как заметная карточка на главной странице iumrah." : message)
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.84))
-                .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(3)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 8) {
-                Label(destination.title, systemImage: destination.icon)
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                HStack(spacing: 6) {
-                    Text("Открыть")
-                        .font(.caption.weight(.bold))
-                    Image(systemName: "arrow.up.right")
-                        .font(.caption.weight(.bold))
-                }
-            }
-        }
-        .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, minHeight: 164, maxHeight: 164, alignment: .topLeading)
-        .padding(18)
-        .background {
+        ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(
                     LinearGradient(
@@ -152,12 +111,56 @@ struct NotificationsComposerView: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .shadow(color: .black.opacity(0.10), radius: 16, x: 0, y: 8)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .center, spacing: 10) {
+                    Label("iumrah Signal", systemImage: "bell.badge.fill")
+                        .font(.caption.weight(.bold))
+                        .tracking(0.35)
+                    Spacer()
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                Text(title.isEmpty ? "Важное обновление для вашей поездки" : title)
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
+
+                Text(message.isEmpty ? "Сообщение будет показано как push и как заметная карточка на главной странице iumrah." : message)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.84))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3)
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 8) {
+                    Label(destination.title, systemImage: destination.icon)
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Text("Открыть")
+                            .font(.caption.weight(.bold))
+                        Image(systemName: "arrow.up.right")
+                            .font(.caption.weight(.bold))
+                    }
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 176)
+        .shadow(color: .black.opacity(0.10), radius: 16, x: 0, y: 8)
     }
 
     private var copyEditor: some View {

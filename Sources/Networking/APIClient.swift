@@ -460,15 +460,6 @@ actor APIClient {
         return try decoder.decode(HotelDuplicateResponse.self, from: data).duplicate
     }
 
-    func refreshHotelPrice(id: String) async throws -> HotelCachedPrice? {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/refresh"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 65
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(HotelPriceResponse.self, from: data).price
-    }
-
     func recoverSourceRooms(sourceURL: String) async throws -> SourceRoomRecoveryResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/source-rooms"))
         request.httpMethod = "POST"
