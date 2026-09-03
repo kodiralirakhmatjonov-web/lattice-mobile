@@ -122,6 +122,27 @@ struct ProviderFact: Codable, Hashable, Identifiable {
     }
 }
 
+
+struct ProviderPriceSnapshot: Codable, Hashable {
+    let amount: Double
+    let currency: String
+    let totalAmount: Double?
+    let totalCurrency: String?
+    let priceBasis: String
+    let checkIn: String?
+    let checkOut: String?
+    let nights: Int
+    let adults: Int
+    let rooms: Int
+    let roomName: String?
+    let method: String
+    let confidence: Double
+
+    var isUsable: Bool {
+        amount.isFinite && amount > 0 && !currency.isEmpty && nights > 0 && adults > 0 && rooms > 0
+    }
+}
+
 struct ProviderSnapshot: Codable, Identifiable, Hashable {
     let id: UUID
     let provider: String
@@ -162,6 +183,7 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
     let parkingTransport: [ProviderFact]?
     let accessibility: [String]?
     let rawIdentity: [String: String]?
+    var price: ProviderPriceSnapshot?
 
     init(
         id: UUID = UUID(),
@@ -202,7 +224,8 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
         food: [ProviderFact]? = nil,
         parkingTransport: [ProviderFact]? = nil,
         accessibility: [String]? = nil,
-        rawIdentity: [String: String]? = nil
+        rawIdentity: [String: String]? = nil,
+        price: ProviderPriceSnapshot? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -243,6 +266,7 @@ struct ProviderSnapshot: Codable, Identifiable, Hashable {
         self.parkingTransport = parkingTransport
         self.accessibility = accessibility
         self.rawIdentity = rawIdentity
+        self.price = price
     }
 }
 
@@ -406,6 +430,12 @@ struct HotelDraft: Codable, Identifiable {
     var selectedRoomImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .room || $0.kind == .bathroom } }
     var selectedTrustedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind.trusted } }
     var suspiciousSelectedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .other } }
+    var importedPrice: ProviderPriceSnapshot? {
+        sources.compactMap(\.price).filter(\.isUsable).sorted { lhs, rhs in
+            if abs(lhs.confidence - rhs.confidence) > 0.001 { return lhs.confidence > rhs.confidence }
+            return lhs.amount < rhs.amount
+        }.first
+    }
 }
 
 

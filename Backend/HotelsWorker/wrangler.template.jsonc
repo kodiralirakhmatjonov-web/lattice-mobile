@@ -57,5 +57,8 @@
     "crons": [
       "17 * * * *"
     ]
+  },
+  "browser": {
+    "binding": "BROWSER"
   }
 }

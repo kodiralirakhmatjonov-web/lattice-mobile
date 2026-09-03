@@ -1,6 +1,6 @@
 export const HOTEL_PRICE_TTL_MS = 48 * 60 * 60 * 1000;
 export const HOTEL_PRICE_RETRY_MS = 6 * 60 * 60 * 1000;
-export const HOTEL_PRICE_QUOTE_NIGHTS = 2;
+export const HOTEL_PRICE_QUOTE_NIGHTS = 1;
 export const HOTEL_PRICE_QUOTE_ADULTS = 2;
 export const HOTEL_PRICE_QUOTE_ROOMS = 1;
 
@@ -106,7 +106,9 @@ function collectBookingCandidates(html, readable, out, nights) {
     const lower = htmlToReadableText(segment.context).toLowerCase();
     if (/per\s+night|nightly/.test(lower)) {
       out.push({ ...money, basis: 'nightly', confidence: 0.97, method: 'booking-price-testid-nightly' });
-    } else if (new RegExp(`\b${nights}\s+nights?\b`, 'i').test(lower)) {
+    } else if (nights === 1) {
+      out.push({ ...money, basis: 'nightly', confidence: 0.95, method: 'booking-price-testid-one-night' });
+    } else if (new RegExp(`\\b${nights}\\s+nights?\\b`, 'i').test(lower)) {
       out.push({ ...money, basis: 'stay_total', confidence: 0.95, method: 'booking-price-testid-stay' });
     }
   }
@@ -139,6 +141,7 @@ function collectExpediaCandidates(html, readable, out, nights) {
     if (!money) continue;
     const lower = segment.toLowerCase();
     if (/per\s+night|nightly/.test(lower)) out.push({ ...money, basis: 'nightly', confidence: 0.96, method: 'expedia-price-lockup' });
+    else if (nights === 1) out.push({ ...money, basis: 'nightly', confidence: 0.995, method: 'expedia-price-lockup-one-night' });
     else if (/total|nights?/.test(lower)) out.push({ ...money, basis: 'stay_total', confidence: 0.92, method: 'expedia-price-lockup-total' });
   }
 }

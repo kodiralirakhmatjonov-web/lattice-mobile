@@ -20,6 +20,7 @@ struct HotelReviewView: View {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     hotelHero(draft)
                     sourceCard(draft)
+                    priceCard(draft)
                     hotelFacts(draft)
                     gallery(draft)
                     rooms(draft)
@@ -150,6 +151,47 @@ struct HotelReviewView: View {
             .padding(16)
             .businessCard(radius: 26)
         }
+    }
+
+    @ViewBuilder private func priceCard(_ draft: HotelDraft) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(draft.importedPrice == nil ? Color.orange.opacity(0.12) : Color.green.opacity(0.12))
+                        .frame(width: 46, height: 46)
+                    Image(systemName: draft.importedPrice == nil ? "exclamationmark.triangle.fill" : "banknote.fill")
+                        .foregroundStyle(draft.importedPrice == nil ? .orange : .green)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Цена для генератора")
+                        .font(.headline)
+                    if let price = draft.importedPrice {
+                        Text("\(price.currency) \(price.amount.formatted(.number.precision(.fractionLength(0...2)))) · 1 номер / \(price.nights) ночь")
+                            .font(.subheadline.weight(.semibold))
+                        if let room = price.roomName, !room.isEmpty {
+                            Text(room)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    } else {
+                        Text("Цена не получена — отель нельзя публиковать и использовать в генераторе.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            if let price = draft.importedPrice, let total = price.totalAmount, total > price.amount {
+                Text("Итого у источника: \(price.totalCurrency ?? price.currency) \(total.formatted(.number.precision(.fractionLength(0...2))))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .businessCard(radius: 26)
     }
 
     @ViewBuilder private func hotelFacts(_ draft: HotelDraft) -> some View {
@@ -617,7 +659,7 @@ struct HotelReviewView: View {
     }
 
     @ViewBuilder private func publishBlock(_ draft: HotelDraft) -> some View {
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty
+        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty && draft.importedPrice != nil
 
         VStack(spacing: 12) {
             if let duplicate = coordinator.duplicateCandidate, duplicate.isPossible {
@@ -734,7 +776,7 @@ struct HotelReviewView: View {
     }
 
     private func submit(_ draft: HotelDraft, allowPossibleDuplicate: Bool) {
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty
+        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty && draft.importedPrice != nil
         publishing = true
         publishStatus = draft.selectedImages.isEmpty ? "Сохраняем серверный черновик…" : "Передаём отель в защищённую фоновую очередь…"
         Task { @MainActor in
@@ -757,7 +799,9 @@ struct HotelReviewView: View {
                 importJob = job
                 await BusinessNotifications.hotelImportStarted(job)
                 publishing = false
-                publishStatus = "Фоновый импорт запущен. Можно закрыть приложение — Cloudflare продолжит загрузку."
+                publishStatus = canPublish
+                    ? "Фоновый импорт запущен. Цена уже сохранена вместе с карточкой; Cloudflare продолжит загрузку фото."
+                    : "Отель сохранится черновиком. Для публикации обязательны подтверждённые номера, фото и цена."
                 await monitor(jobID: job.id)
             } catch let APIError.possibleDuplicate(duplicate) {
                 coordinator.duplicateCandidate = duplicate

@@ -43,11 +43,11 @@ The active mobile identity model is documented in `CLIENT_INTEGRATION.md`. Legac
 
 Hotel catalog prices are refreshed independently from package generation. The original Booking/Expedia property URL remains in `hotel_sources`; `hotel_price_cache` stores one normalized benchmark quote per hotel.
 
-- Benchmark: 2 adults, 1 room, 2 nights, first probe 14 days ahead (45-day fallback).
+- Price probe: 2 adults, 1 room, 1 night, first probe 14 days ahead (45-day fallback). The importer prefers the first normal Double/Twin/Standard/Classic room rate when it can identify the room.
 - Successful price: cached for 48 hours.
 - Failed refresh: last known price is preserved as `stale` and retried after 6 hours.
 - Cron: hourly at minute 17; only due hotels are fetched, up to 12 per run with concurrency 3.
-- A completed hotel import also attempts one price refresh, but a price failure never fails the hotel import.
-- The admin API exposes `POST /api/admin/hotels/:id/price/refresh` for an explicit retry.
+- The iOS Hotel Importer captures the first usable live room rate in the same verified WKWebView session that reads hotel data and rooms. The server seeds the 48-hour cache from that rate. A hotel requested for publication is not published unless a fresh price exists.
+- The admin API exposes `POST /api/admin/hotels/:id/price/refresh` for an explicit retry. Manual/scheduled refresh uses the Cloudflare Browser binding first so JavaScript-rendered Booking/Expedia prices are available; static HTML is only a fallback.
 
 Migration `0021_reset_hotel_catalog_clean_start.sql` is an intentional one-time destructive clean start: it deletes canonical hotel rows and cascaded catalog data. Old `hotels/` R2 media is queued for cleanup with a cutoff timestamp so media uploaded after the reset is protected.

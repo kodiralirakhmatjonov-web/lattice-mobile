@@ -463,7 +463,7 @@ actor APIClient {
     func refreshHotelPrice(id: String) async throws -> HotelCachedPrice? {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/refresh"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 45
+        request.timeoutInterval = 65
         let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(HotelPriceResponse.self, from: data).price

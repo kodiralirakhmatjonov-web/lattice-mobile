@@ -3497,7 +3497,13 @@ async function listHotels(env, url, publishedOnly) {
   const values = [];
   const where = [];
 
-  if (publishedOnly) where.push("h.status = 'published'");
+  if (publishedOnly) {
+    where.push("h.status = 'published'");
+    where.push("hp.status = 'fresh'");
+    where.push('hp.nightly_price_usd IS NOT NULL');
+    where.push('hp.expires_at > ?');
+    values.push(new Date().toISOString());
+  }
   if (city) {
     where.push('LOWER(h.city) = LOWER(?)');
     values.push(city);
@@ -3579,6 +3585,11 @@ async function hotelDetail(env, hotelID, admin, url = null) {
     env.HOTELS_DB.prepare('SELECT * FROM hotel_price_cache WHERE hotel_id=? LIMIT 1').bind(hotelID).first()
   ]);
 
+  const effectivePublicPrice = publicHotelPrice(hotelPriceRow(priceResult));
+  if (!admin && !effectivePublicPrice) {
+    return json({ ok: false, error: 'HOTEL_PRICE_UNAVAILABLE' }, 404, PUBLIC_CACHE_HEADERS);
+  }
+
   const images = (imagesResult.results || []).map(row => ({
     id: row.id,
     provider: row.source_provider,
@@ -3647,7 +3658,7 @@ async function hotelDetail(env, hotelID, admin, url = null) {
       bathroom: parseJSONArray(row.bathroom_json)
     })),
     images,
-    price: admin ? hotelPriceRow(priceResult) : publicHotelPrice(hotelPriceRow(priceResult)),
+    price: admin ? hotelPriceRow(priceResult) : effectivePublicPrice,
     sources: admin ? (sourcesResult.results || []).map(sourceRow) : [],
     createdAt: hotel.created_at,
     updatedAt: hotel.updated_at
@@ -3948,6 +3959,11 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     ).run();
   }
 
+  const importedPriceSeed = await seedHotelPriceFromDraft(env, id, draft);
+  if (!importedPriceSeed.ok) {
+    console.warn('HOTEL_IMPORT_PRICE_NOT_SEEDED', { hotelID: id, error: importedPriceSeed.error });
+  }
+
   console.log('HOTEL_SAVED', {
     hotelID: id,
     status,
@@ -4111,6 +4127,163 @@ const HOTEL_PRICE_FETCH_HEADERS = {
   'cache-control': 'no-cache'
 };
 
+async function loadRenderedHotelPricePage(env, probeURL) {
+  if (env.BROWSER?.quickAction) {
+    try {
+      const response = await env.BROWSER.quickAction('content', {
+        url: probeURL,
+        userAgent: HOTEL_PRICE_FETCH_HEADERS['user-agent'],
+        setExtraHTTPHeaders: {
+          'Accept-Language': HOTEL_PRICE_FETCH_HEADERS['accept-language']
+        },
+        gotoOptions: {
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        },
+        waitForTimeout: 1800
+      });
+      const httpStatus = response.status;
+      if (response.ok) {
+        const payload = await response.json();
+        const html = payload?.success && typeof payload.result === 'string' ? payload.result : null;
+        if (html && html.length >= 500) {
+          return { ok: true, html, resolvedURL: probeURL, httpStatus, transport: 'browser-run' };
+        }
+        return { ok: false, error: 'PRICE_BROWSER_EMPTY_PAGE', httpStatus, transport: 'browser-run' };
+      }
+      const detail = (await response.text()).slice(0, 300);
+      console.warn('HOTEL_PRICE_BROWSER_RUN_HTTP', { status: httpStatus, detail });
+    } catch (error) {
+      console.warn('HOTEL_PRICE_BROWSER_RUN_FAILED', String(error?.message || error));
+    }
+  }
+
+  try {
+    const response = await fetch(probeURL, {
+      headers: HOTEL_PRICE_FETCH_HEADERS,
+      redirect: 'follow',
+      cf: { cacheTtl: 0 }
+    });
+    if (!response.ok) return { ok: false, error: `PRICE_HTTP_${response.status}`, httpStatus: response.status, transport: 'static-fetch' };
+    const html = await response.text();
+    return { ok: true, html, resolvedURL: response.url || probeURL, httpStatus: response.status, transport: 'static-fetch' };
+  } catch (error) {
+    return { ok: false, error: `PRICE_FETCH_FAILED: ${String(error?.message || error).slice(0, 320)}`, httpStatus: null, transport: 'static-fetch' };
+  }
+}
+
+function importedPriceUSD(amount, currency) {
+  const value = Number(amount);
+  const token = String(currency || '').trim().toUpperCase();
+  if (!Number.isFinite(value) || value <= 0) return null;
+  if (token === 'USD' || token === 'US$' || token === '$') return value;
+  if (token === 'SAR' || token === 'SR') return value / 3.75;
+  if (token === 'AED') return value / 3.6725;
+  return null;
+}
+
+function importedPriceCandidate(draft) {
+  const sources = Array.isArray(draft?.sources) ? draft.sources : [];
+  const candidates = [];
+  for (const source of sources) {
+    const price = source?.price;
+    const provider = canonicalPriceProvider(source?.provider, safeURLObject(source?.sourceURL));
+    const sourceURL = cleanURL(source?.canonicalURL) || cleanURL(source?.sourceURL);
+    if (!price || !provider || !sourceURL) continue;
+    const amount = Number(price.amount);
+    const currency = cleanText(price.currency, 12)?.toUpperCase();
+    const nights = nullableInteger(price.nights, 1, 30) || 1;
+    const adults = nullableInteger(price.adults, 1, 20) || 2;
+    const rooms = nullableInteger(price.rooms, 1, 20) || 1;
+    const basis = price.priceBasis === 'stay_total' ? 'stay_total' : 'nightly';
+    const amountUSD = importedPriceUSD(amount, currency);
+    if (!amountUSD) continue;
+    const nightlyUSD = basis === 'stay_total' ? amountUSD / nights : amountUSD;
+    if (!Number.isFinite(nightlyUSD) || nightlyUSD < 15 || nightlyUSD > 5000) continue;
+    const totalAmount = Number(price.totalAmount);
+    const totalCurrency = cleanText(price.totalCurrency, 12)?.toUpperCase() || currency;
+    const explicitTotalUSD = Number.isFinite(totalAmount) && totalAmount > 0 ? importedPriceUSD(totalAmount, totalCurrency) : null;
+    const quoteTotalUSD = explicitTotalUSD || (basis === 'stay_total' ? amountUSD : nightlyUSD * nights);
+    const confidence = Math.max(0.5, Math.min(0.999, Number(price.confidence) || 0.9));
+    const roomName = cleanText(price.roomName, 240) || '';
+    const preferred = /(double|twin|standard|classic)/i.test(roomName);
+    candidates.push({ source, price, provider, sourceURL, amount, currency, basis, nights, adults, rooms, nightlyUSD, quoteTotalUSD, confidence, preferred });
+  }
+  candidates.sort((a, b) => {
+    if (a.preferred !== b.preferred) return a.preferred ? -1 : 1;
+    if (Math.abs(b.confidence - a.confidence) > 0.03) return b.confidence - a.confidence;
+    return a.nightlyUSD - b.nightlyUSD;
+  });
+  return candidates[0] || null;
+}
+
+async function seedHotelPriceFromDraft(env, hotelID, draft) {
+  const candidate = importedPriceCandidate(draft);
+  if (!candidate) return { ok: false, error: 'IMPORT_PRICE_MISSING' };
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + HOTEL_PRICE_TTL_MS).toISOString();
+  const sourceID = cleanText(candidate.source?.id, 180);
+  const resolvedURL = cleanURL(candidate.source?.canonicalURL) || candidate.sourceURL;
+  const method = cleanText(`importer:${candidate.price?.method || 'verified-browser'}`, 160);
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, resolved_url,
+      amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+      quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+      confidence, method, status, fetched_at, expires_at, last_attempt_at,
+      next_retry_at, last_http_status, error, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fresh', ?, ?, ?, NULL, NULL, NULL, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=excluded.source_id,
+      provider=excluded.provider,
+      source_url=excluded.source_url,
+      resolved_url=excluded.resolved_url,
+      amount_original=excluded.amount_original,
+      currency_original=excluded.currency_original,
+      price_basis=excluded.price_basis,
+      nightly_price_usd=excluded.nightly_price_usd,
+      quote_total_usd=excluded.quote_total_usd,
+      quote_check_in=excluded.quote_check_in,
+      quote_check_out=excluded.quote_check_out,
+      quote_nights=excluded.quote_nights,
+      quote_adults=excluded.quote_adults,
+      quote_rooms=excluded.quote_rooms,
+      confidence=excluded.confidence,
+      method=excluded.method,
+      status='fresh',
+      fetched_at=excluded.fetched_at,
+      expires_at=excluded.expires_at,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=NULL,
+      last_http_status=NULL,
+      error=NULL,
+      updated_at=excluded.updated_at
+  `).bind(
+    hotelID,
+    sourceID,
+    candidate.provider,
+    candidate.sourceURL,
+    resolvedURL,
+    candidate.amount,
+    candidate.currency,
+    candidate.basis,
+    Math.round(candidate.nightlyUSD * 100) / 100,
+    Math.round(candidate.quoteTotalUSD * 100) / 100,
+    cleanText(candidate.price?.checkIn, 32),
+    cleanText(candidate.price?.checkOut, 32),
+    candidate.nights,
+    candidate.adults,
+    candidate.rooms,
+    candidate.confidence,
+    method,
+    now,
+    expiresAt,
+    now,
+    now
+  ).run();
+  return { ok: true, nightlyUSD: candidate.nightlyUSD, provider: candidate.provider };
+}
+
 async function runHotelPriceScheduler(env) {
   try {
     await runHotelCatalogMaintenance(env);
@@ -4232,25 +4405,14 @@ async function refreshHotelPrice(env, hotelID, options = {}) {
   let lastHTTPStatus = null;
 
   for (const probeURL of probes) {
-    let response;
-    try {
-      response = await fetch(probeURL, {
-        headers: HOTEL_PRICE_FETCH_HEADERS,
-        redirect: 'follow',
-        cf: { cacheTtl: 0 }
-      });
-    } catch (error) {
-      lastError = `PRICE_FETCH_FAILED: ${String(error?.message || error).slice(0, 320)}`;
+    const page = await loadRenderedHotelPricePage(env, probeURL);
+    lastHTTPStatus = page.httpStatus;
+    if (!page.ok) {
+      lastError = page.error || 'PRICE_PAGE_LOAD_FAILED';
       continue;
     }
 
-    lastHTTPStatus = response.status;
-    if (!response.ok) {
-      lastError = `PRICE_HTTP_${response.status}`;
-      continue;
-    }
-
-    const finalURL = response.url || probeURL;
+    const finalURL = page.resolvedURL || probeURL;
     let parsedFinal;
     try { parsedFinal = new URL(finalURL); }
     catch (_) {
@@ -4262,7 +4424,7 @@ async function refreshHotelPrice(env, hotelID, options = {}) {
       continue;
     }
 
-    const html = await response.text();
+    const html = page.html;
     if (!html || html.length < 500) {
       lastError = 'PRICE_EMPTY_PAGE';
       continue;
@@ -4335,7 +4497,7 @@ async function refreshHotelPrice(env, hotelID, options = {}) {
       context.adults,
       context.rooms,
       quote.confidence,
-      cleanText(quote.method, 160),
+      cleanText(`${page.transport || 'unknown'}:${quote.method}`, 160),
       fetchedAt,
       expiresAt,
       fetchedAt,
@@ -4433,7 +4595,8 @@ function hotelPriceRow(row) {
 }
 
 function publicHotelPrice(price) {
-  if (!price) return null;
+  if (!price || price.status !== 'fresh' || price.nightlyUSD == null) return null;
+  if (!price.expiresAt || Date.parse(price.expiresAt) <= Date.now()) return null;
   return {
     provider: price.provider || null,
     nightlyUSD: price.nightlyUSD == null ? null : Number(price.nightlyUSD),
@@ -5411,23 +5574,37 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
       });
     }
 
+    await step.do('ensure hotel price', { retries: { limit: 1, delay: '4 seconds' }, timeout: '55 seconds' }, async () => {
+      const cached = await this.env.HOTELS_DB.prepare(`
+        SELECT nightly_price_usd, status, expires_at
+        FROM hotel_price_cache WHERE hotel_id=? LIMIT 1
+      `).bind(hotelID).first();
+      const nowISO = new Date().toISOString();
+      const fresh = cached?.nightly_price_usd != null && cached.status === 'fresh' && cached.expires_at && cached.expires_at > nowISO;
+      if (fresh) return { ok: true, source: 'importer-cache' };
+      return refreshHotelPrice(this.env, hotelID, { reason: 'import-finalize' });
+    });
+
     const finalState = await step.do('finalize hotel import', async () => {
       const now = new Date().toISOString();
-      const [roomRow, coverRow] = await Promise.all([
+      const [roomRow, coverRow, priceRow] = await Promise.all([
         this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_rooms WHERE hotel_id=?').bind(hotelID).first(),
-        this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_images WHERE hotel_id=? AND is_cover=1').bind(hotelID).first()
+        this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_images WHERE hotel_id=? AND is_cover=1').bind(hotelID).first(),
+        this.env.HOTELS_DB.prepare('SELECT nightly_price_usd, status, expires_at FROM hotel_price_cache WHERE hotel_id=? LIMIT 1').bind(hotelID).first()
       ]);
       const roomCount = Number(roomRow?.count || 0);
       const coverCount = Number(coverRow?.count || 0);
       const requiredImages = Math.min(4, total);
       const mediaReady = total > 0 && stored >= requiredImages && coverCount > 0;
       const roomsReady = !publishWhenComplete || roomCount > 0;
-      const completed = mediaReady && roomsReady;
+      const priceReady = !publishWhenComplete || (priceRow?.nightly_price_usd != null && priceRow.status === 'fresh' && priceRow.expires_at && priceRow.expires_at > now);
+      const completed = mediaReady && roomsReady && priceReady;
       const withWarnings = completed && failed > 0;
       const warning = withWarnings ? `${failed} из ${total} фотографий недоступны у источника; сохранено ${stored}.` : null;
       let failureReason = null;
       if (!mediaReady) failureReason = `Сохранено только ${stored} из ${total} фотографий; для готовой карточки требуется минимум ${requiredImages} и обложка.`;
       else if (!roomsReady) failureReason = 'Не найдено ни одного подтверждённого типа номера; публикация остановлена.';
+      else if (!priceReady) failureReason = 'Не удалось подтвердить актуальную цену отеля; карточка недоступна генератору и не опубликована.';
 
       if (completed && publishWhenComplete) {
         await this.env.HOTELS_DB.prepare("UPDATE hotels SET status='published', lifecycle_state='published', updated_at=? WHERE id=?")
@@ -5457,19 +5634,8 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
         warning,
         jobID
       ).run();
-      return { completed, stored, failed, total, hotelID, roomCount, coverCount, warning };
+      return { completed, stored, failed, total, hotelID, roomCount, coverCount, priceReady, warning };
     });
-
-    if (finalState.completed) {
-      await step.do('refresh hotel price cache', { retries: { limit: 1, delay: '5 seconds' }, timeout: '45 seconds' }, async () => {
-        try {
-          return await refreshHotelPrice(this.env, hotelID, { reason: 'post-import' });
-        } catch (error) {
-          console.error('HOTEL_PRICE_POST_IMPORT_FAILED', { hotelID, error: String(error?.message || error) });
-          return { ok: false, error: String(error?.message || error).slice(0, 500) };
-        }
-      });
-    }
 
     if (finalState.completed && publishWhenComplete) {
       await step.do('prewarm hotel translations', { retries: { limit: 2, delay: '5 seconds', backoff: 'exponential' }, timeout: '2 minutes' }, async () => {

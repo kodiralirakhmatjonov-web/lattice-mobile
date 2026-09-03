@@ -50,7 +50,7 @@ test('Booking probe URL has deterministic benchmark context and USD currency', (
   const [url] = buildHotelPriceProbeURLs('https://www.booking.com/hotel/sa/example.html', 'Booking', now);
   const parsed = new URL(url);
   assert.equal(parsed.searchParams.get('checkin'), '2026-09-17');
-  assert.equal(parsed.searchParams.get('checkout'), '2026-09-19');
+  assert.equal(parsed.searchParams.get('checkout'), '2026-09-18');
   assert.equal(parsed.searchParams.get('group_adults'), '2');
   assert.equal(parsed.searchParams.get('no_rooms'), '1');
   assert.equal(parsed.searchParams.get('selected_currency'), 'USD');
@@ -68,7 +68,7 @@ test('Expedia probe keeps exact path and adds dates', () => {
     const url = new URL(value);
     assert.match(url.pathname, /\.h123456\.Hotel-Information$/i);
     assert.ok(['2026-09-17', '2026-10-18'].includes(url.searchParams.get('chkin')));
-    assert.ok(['2026-09-19', '2026-10-20'].includes(url.searchParams.get('chkout')));
+    assert.ok(['2026-09-18', '2026-10-19'].includes(url.searchParams.get('chkout')));
     assert.equal(url.searchParams.get('currency'), 'USD');
   }
 });
@@ -76,4 +76,22 @@ test('Expedia probe keeps exact path and adds dates', () => {
 test('Booking discounted-price token without stay/night basis is rejected', () => {
   const html = `<html><body>${padding}<span data-testid="price-and-discounted-price">US$ 240</span><div>Great location · 9.1 rating</div></body></html>`;
   assert.equal(extractHotelPriceFromHTML(html, 'Booking', 2), null);
+});
+
+
+test('Booking one-night first visible room price is accepted as nightly', () => {
+  const html = `<html><body>${padding}<div data-testid="property-card"><span data-testid="price-and-discounted-price">SAR 315</span><span>Double Room</span></div></body></html>`;
+  const price = extractHotelPriceFromHTML(html, 'Booking', 1);
+  assert.equal(price?.currency, 'SAR');
+  assert.equal(price?.priceBasis, 'nightly');
+  assert.equal(price?.nightlyUSD, 84);
+  assert.equal(price?.stayTotalUSD, 84);
+});
+
+test('Expedia one-night price lockup keeps first displayed price as nightly', () => {
+  const html = `<html><body>${padding}<div class="uitk-lockup-price">SAR 315 <span>SAR 380 total</span></div></body></html>`;
+  const price = extractHotelPriceFromHTML(html, 'Expedia', 1);
+  assert.equal(price?.currency, 'SAR');
+  assert.equal(price?.priceBasis, 'nightly');
+  assert.equal(price?.nightlyUSD, 84);
 });

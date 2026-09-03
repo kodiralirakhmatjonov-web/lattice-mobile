@@ -86,6 +86,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     private var completionReported = false
     private var isRoomProbeNavigation = false
     private var bookingResolutionInFlight = false
+    private var latestRecoveredPrice: ProviderPriceSnapshot?
 
     var onCompleted: ((HotelDraft) -> Void)?
     var onFailed: ((String) -> Void)?
@@ -125,6 +126,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         extractionStarted = false
         completionReported = false
         bookingResolutionInFlight = false
+        latestRecoveredPrice = nil
         webView.customUserAgent = Self.userAgent(for: provider)
         sourceURL = normalized
         currentProvider = provider
@@ -389,12 +391,16 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             // same property in the live browser with deterministic future dates (Expedia and
             // Booking often do not render sellable room cards until dates are present), then
             // use the independent Cloudflare recovery endpoint as a second opinion.
-            if candidate.rooms.count < 4 {
-                status = "Получаем типы номеров из карточки отеля…"
+            let initialPrice = candidate.importedPrice
+            if candidate.rooms.count < 4 || initialPrice == nil {
+                status = initialPrice == nil ? "Получаем номера и актуальную цену…" : "Получаем типы номеров из карточки отеля…"
                 progress = 0.86
                 let browserRooms = await recoverRoomsInBrowser(provider: provider, propertyURL: currentURL)
                 if !browserRooms.isEmpty {
                     candidate.rooms = Self.mergeRooms(candidate.rooms, browserRooms)
+                }
+                if let recoveredPrice = latestRecoveredPrice, !candidate.sources.isEmpty {
+                    candidate.sources[0].price = Self.preferredPrice(candidate.sources[0].price, recoveredPrice)
                 }
             }
 
@@ -413,6 +419,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             } else {
                 candidate.dataQuality["rooms"] = "confirmed:\(candidate.rooms.count)"
             }
+            candidate.dataQuality["price"] = candidate.importedPrice == nil ? "missing-unavailable" : "confirmed-live"
 
             status = "Проверяем отель по всей базе iumrah…"
             progress = 0.94
@@ -429,7 +436,11 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             draft = candidate
             progress = 1
             stage = .finished
-            status = candidate.rooms.isEmpty ? "Карточка получена. Номера требуют повторной проверки." : "Готово: \(name)"
+            if candidate.importedPrice == nil {
+                status = "Карточка получена, но цена не подтверждена — публикация будет недоступна."
+            } else {
+                status = candidate.rooms.isEmpty ? "Карточка получена. Номера требуют повторной проверки." : "Готово: \(name)"
+            }
             if !completionReported {
                 completionReported = true
                 onCompleted?(candidate)
@@ -486,7 +497,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         roomWebView.customUserAgent = Self.userAgent(for: provider)
 
         for (index, probeURL) in probeURLs.enumerated() {
-            if recovered.count >= 4 { break }
+            if recovered.count >= 4 && latestRecoveredPrice != nil { break }
             status = index == 0 ? "Получаем варианты номеров…" : "Проверяем дополнительные типы номеров…"
             progress = min(0.90, 0.86 + Double(index) * 0.02)
 
@@ -517,9 +528,25 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                snapshot.providerHotelID != expectedID { continue }
             let roomDraft = HotelNormalizer.makeDraft(snapshot: snapshot)
             recovered = Self.mergeRooms(recovered, roomDraft.rooms)
+            if let price = snapshot.price, price.isUsable {
+                latestRecoveredPrice = Self.preferredPrice(latestRecoveredPrice, price)
+            }
         }
         roomWebView.stopLoading()
         return recovered
+    }
+
+    private static func preferredPrice(_ current: ProviderPriceSnapshot?, _ candidate: ProviderPriceSnapshot?) -> ProviderPriceSnapshot? {
+        guard let candidate, candidate.isUsable else { return current }
+        guard let current, current.isUsable else { return candidate }
+        let currentRoom = (current.roomName ?? "").lowercased()
+        let candidateRoom = (candidate.roomName ?? "").lowercased()
+        let preferredTokens = ["double", "twin", "standard", "classic"]
+        let currentPreferred = preferredTokens.contains { currentRoom.contains($0) }
+        let candidatePreferred = preferredTokens.contains { candidateRoom.contains($0) }
+        if candidatePreferred != currentPreferred { return candidatePreferred ? candidate : current }
+        if abs(candidate.confidence - current.confidence) > 0.03 { return candidate.confidence > current.confidence ? candidate : current }
+        return candidate.amount < current.amount ? candidate : current
     }
 
     private func waitForRoomProbeLoad(_ targetWebView: WKWebView, provider: Provider, timeoutSeconds: Double) async -> Bool {
@@ -547,15 +574,15 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         return offsets.compactMap { offset in
             guard let checkIn = calendar.date(byAdding: .day, value: offset, to: now),
-                  let checkOut = calendar.date(byAdding: .day, value: offset + 2, to: now),
+                  let checkOut = calendar.date(byAdding: .day, value: offset + 1, to: now),
                   var components = URLComponents(url: propertyURL, resolvingAgainstBaseURL: false) else { return nil }
             var items = components.queryItems ?? []
             let transientKeys: Set<String>
             switch provider {
             case .expedia:
-                transientKeys = ["chkin", "chkout", "rm1", "useRewards"]
+                transientKeys = ["chkin", "chkout", "rm1", "useRewards", "currency"]
             case .booking:
-                transientKeys = ["checkin", "checkout", "group_adults", "group_children", "no_rooms"]
+                transientKeys = ["checkin", "checkout", "group_adults", "group_children", "no_rooms", "selected_currency"]
             }
             items.removeAll { transientKeys.contains($0.name) }
             switch provider {
@@ -564,12 +591,14 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 items.append(URLQueryItem(name: "chkout", value: formatter.string(from: checkOut)))
                 items.append(URLQueryItem(name: "rm1", value: "a2"))
                 items.append(URLQueryItem(name: "useRewards", value: "false"))
+                items.append(URLQueryItem(name: "currency", value: "SAR"))
             case .booking:
                 items.append(URLQueryItem(name: "checkin", value: formatter.string(from: checkIn)))
                 items.append(URLQueryItem(name: "checkout", value: formatter.string(from: checkOut)))
                 items.append(URLQueryItem(name: "group_adults", value: "2"))
                 items.append(URLQueryItem(name: "group_children", value: "0"))
                 items.append(URLQueryItem(name: "no_rooms", value: "1"))
+                items.append(URLQueryItem(name: "selected_currency", value: "SAR"))
             }
             components.queryItems = items
             return components.url
@@ -1849,6 +1878,184 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           offerWalk(hotel.containsPlace);
 
           const roomNames = roomCandidates.map(r => r.name);
+
+          // Price is extracted by the same verified browser session that produced the
+          // hotel identity, rooms and media. We intentionally prefer the first normal
+          // sellable room rate (Double/Twin/Standard when identifiable) and keep the
+          // provider's explicit total separately when it is present.
+          const priceQuery = new URL(location.href).searchParams;
+          const quoteCheckIn = provider === 'Booking' ? priceQuery.get('checkin') : priceQuery.get('chkin');
+          const quoteCheckOut = provider === 'Booking' ? priceQuery.get('checkout') : priceQuery.get('chkout');
+          const quoteNights = (() => {
+            if (!quoteCheckIn || !quoteCheckOut) return 1;
+            const a = Date.parse(`${quoteCheckIn}T00:00:00Z`);
+            const b = Date.parse(`${quoteCheckOut}T00:00:00Z`);
+            const value = Math.round((b - a) / 86400000);
+            return Number.isFinite(value) && value > 0 && value <= 30 ? value : 1;
+          })();
+          const normalizeMoneyCurrency = value => {
+            const token = clean(value).toUpperCase().replace(/\\s+/g, '');
+            if (token === 'SAR' || token === 'SR' || token.includes('ر.س')) return 'SAR';
+            if (token === 'AED' || token.includes('د.إ')) return 'AED';
+            if (token === 'USD' || token === 'US$' || token === '$') return 'USD';
+            return null;
+          };
+          const parseMoneyAmount = value => {
+            let text = clean(value).replace(/[\\u00a0\\u202f\\s]/g, '').replace(/[^0-9.,]/g, '');
+            if (!text) return null;
+            const comma = text.lastIndexOf(',');
+            const dot = text.lastIndexOf('.');
+            if (comma >= 0 && dot >= 0) {
+              if (dot > comma) text = text.replace(/,/g, '');
+              else text = text.replace(/\\./g, '').replace(',', '.');
+            } else if (comma >= 0) {
+              const after = text.length - comma - 1;
+              text = (after === 1 || after === 2) ? text.replace(',', '.') : text.replace(/,/g, '');
+            } else if (dot >= 0) {
+              const after = text.length - dot - 1;
+              if (after !== 1 && after !== 2) text = text.replace(/\\./g, '');
+            }
+            const amount = Number(text);
+            return Number.isFinite(amount) && amount > 0 ? amount : null;
+          };
+          const moneyValues = value => {
+            const text = clean(value);
+            const values = [];
+            const before = /(?:US\\$|USD|\\$|SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?)\\s*([0-9][0-9.,\\s]*)/gi;
+            const after = /([0-9][0-9.,\\s]*)\\s*(US\\$|USD|\\$|SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?)/gi;
+            let match;
+            while ((match = before.exec(text)) !== null && values.length < 12) {
+              const token = match[0].slice(0, match[0].indexOf(match[1]));
+              const amount = parseMoneyAmount(match[1]);
+              const currency = normalizeMoneyCurrency(token);
+              if (amount && currency) values.push({ amount, currency, index: match.index });
+            }
+            while ((match = after.exec(text)) !== null && values.length < 12) {
+              const amount = parseMoneyAmount(match[1]);
+              const currency = normalizeMoneyCurrency(match[2]);
+              if (amount && currency) values.push({ amount, currency, index: match.index });
+            }
+            values.sort((a, b) => a.index - b.index);
+            const uniqueMoney = [];
+            const seenMoney = new Set();
+            for (const item of values) {
+              const key = `${item.currency}:${item.amount}:${item.index}`;
+              if (!seenMoney.has(key)) { seenMoney.add(key); uniqueMoney.push(item); }
+            }
+            return uniqueMoney;
+          };
+          const priceCandidates = [];
+          const preferredRoomPattern = /(double|twin|standard|classic)/i;
+          const excludedPriceAncestor = el => {
+            for (let node = el; node && node !== document.body; node = node.parentElement) {
+              const marker = `${node.getAttribute?.('data-stid') || ''} ${node.getAttribute?.('data-testid') || ''} ${node.id || ''} ${node.className || ''}`;
+              const heading = clean(node.querySelector?.('h1,h2,h3,[role="heading"]')?.innerText || '');
+              if (/(recommend|similar|related|other-property|cross-sell|upsell|search-result)/i.test(marker)) return true;
+              if (/(similar properties|you may also like|other properties|recommended|more places to stay)/i.test(heading)) return true;
+            }
+            return false;
+          };
+          const roomNameForPrice = el => {
+            let node = el;
+            for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+              const marker = `${node.getAttribute?.('data-stid') || ''} ${node.getAttribute?.('data-testid') || ''} ${node.className || ''}`;
+              if (!/(room|rate|offer|unit|availability|hprt)/i.test(marker) && depth < 2) continue;
+              const heading = clean(node.querySelector?.('h2,h3,h4,[role="heading"],[data-testid*="room-name"]')?.innerText || '');
+              if (heading && roomKeyword.test(heading) && !blockedRoom.test(heading)) return heading.slice(0, 180);
+              const text = clean(node.innerText || node.textContent || '');
+              const known = roomNames.find(name => text.toLowerCase().includes(name.toLowerCase()));
+              if (known) return known;
+            }
+            return null;
+          };
+          const addPriceElement = (el, baseScore, method) => {
+            if (!el || excludedPriceAncestor(el)) return;
+            const rect = el.getBoundingClientRect?.();
+            const style = window.getComputedStyle?.(el);
+            if (style && (style.display === 'none' || style.visibility === 'hidden')) return;
+            if (rect && rect.width === 0 && rect.height === 0) return;
+            let node = el;
+            let context = clean(el.innerText || el.textContent || '');
+            for (let depth = 0; node && depth < 5 && context.length < 80; depth += 1, node = node.parentElement) {
+              const candidate = clean(node.innerText || node.textContent || '');
+              if (candidate.length > context.length && candidate.length <= 700) context = candidate;
+            }
+            if (!context || context.length > 900 || !/(SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?|USD|US\\$|\\$)/i.test(context)) return;
+            if (/(deposit|parking|breakfast fee|airport shuttle|taxi|damage deposit)/i.test(context) && !/(room|suite|night|total|reserve|select)/i.test(context)) return;
+            const money = moneyValues(context).filter(item => item.amount >= 15 && item.amount <= 100000);
+            if (!money.length) return;
+            const totalIndex = context.toLowerCase().indexOf('total');
+            let baseValues = money;
+            let total = null;
+            if (totalIndex >= 0) {
+              const afterTotal = money.filter(item => item.index >= totalIndex);
+              if (afterTotal.length) total = afterTotal[afterTotal.length - 1];
+              const beforeTotal = money.filter(item => item.index < totalIndex);
+              if (beforeTotal.length) baseValues = beforeTotal;
+            }
+            const sameCurrency = baseValues.filter(item => item.currency === baseValues[0].currency);
+            const base = (sameCurrency.length ? sameCurrency : baseValues).reduce((best, item) => item.amount < best.amount ? item : best);
+            const roomName = roomNameForPrice(el);
+            let score = baseScore;
+            if (roomName) score += 18;
+            if (roomName && preferredRoomPattern.test(roomName)) score += 35;
+            if (/per\\s+night|\\/\\s*night|nightly/i.test(context)) score += 20;
+            if (/taxes? and fees included|includes taxes? & fees/i.test(context)) score += 3;
+            if (/member price|sign in|reward/i.test(context)) score -= 4;
+            const basis = (/per\\s+night|\\/\\s*night|nightly/i.test(context) || quoteNights === 1) ? 'nightly' : (/total/i.test(context) ? 'stay_total' : 'nightly');
+            priceCandidates.push({
+              amount: base.amount,
+              currency: base.currency,
+              totalAmount: total?.amount || null,
+              totalCurrency: total?.currency || null,
+              priceBasis: basis,
+              checkIn: quoteCheckIn || null,
+              checkOut: quoteCheckOut || null,
+              nights: quoteNights,
+              adults: 2,
+              rooms: 1,
+              roomName,
+              method,
+              confidence: Math.max(0.5, Math.min(0.995, score / 100)),
+              score,
+              domIndex: [...document.querySelectorAll('*')].indexOf(el)
+            });
+          };
+          const priceSelectors = provider === 'Booking' ? [
+            '[data-testid="price-and-discounted-price"]','[data-testid="price-for-x-nights"]','[data-testid*="price"]',
+            '.prco-valign-middle-helper','.bui-price-display__value','#hprt-table .prco-valign-middle-helper'
+          ] : [
+            '[data-stid*="price-lockup"]','[data-stid*="price"]','[data-testid*="price"]',
+            '[class*="uitk-lockup-price"]','[class*="price-lockup"]'
+          ];
+          for (const selector of priceSelectors) {
+            for (const el of document.querySelectorAll(selector)) addPriceElement(el, 72, `${provider.toLowerCase()}-dom-price`);
+          }
+          if (!priceCandidates.length) {
+            for (const el of document.querySelectorAll('span,div,p,strong')) {
+              const text = clean(el.innerText || el.textContent || '');
+              if (text.length < 3 || text.length > 120) continue;
+              if (!/(SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?|USD|US\\$|\\$)/i.test(text)) continue;
+              addPriceElement(el, 52, `${provider.toLowerCase()}-visible-money`);
+              if (priceCandidates.length >= 80) break;
+            }
+          }
+          priceCandidates.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            if (a.domIndex !== b.domIndex) return a.domIndex - b.domIndex;
+            return a.amount - b.amount;
+          });
+          const price = priceCandidates.length ? (() => {
+            const bestScore = priceCandidates[0].score;
+            const best = priceCandidates.filter(item => item.score >= bestScore - 3);
+            const preferred = best.filter(item => preferredRoomPattern.test(item.roomName || ''));
+            const pool = preferred.length ? preferred : best;
+            pool.sort((a, b) => a.domIndex - b.domIndex || a.amount - b.amount);
+            const chosen = pool[0];
+            const { score, domIndex, ...publicPrice } = chosen;
+            return publicPrice;
+          })() : null;
+
           const policies = [];
           const addPolicy = value => {
             const t = safeText(value, 450);
@@ -2090,6 +2297,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             food,
             parkingTransport,
             accessibility,
+            price,
             rawIdentity: {
               provider,
               providerHotelID: providerHotelID || '',
