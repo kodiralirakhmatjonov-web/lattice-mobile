@@ -45,7 +45,7 @@ struct BookingSecurityAdminCard: View {
         .task(id: security?.passportMediaURL) {
             await loadPassportIfNeeded()
         }
-        .sheet(isPresented: $showPassport) {
+        .fullScreenCover(isPresented: $showPassport) {
             PassportSecurityPreview(image: passportImage)
         }
     }
@@ -58,7 +58,7 @@ struct BookingSecurityAdminCard: View {
                 .businessGlass(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("iumrah Security")
+                Text("iUmrah Security")
                     .font(.title3.bold())
                 Text("Security Confirmation · KYC")
                     .font(.caption.weight(.semibold))
@@ -102,7 +102,7 @@ struct BookingSecurityAdminCard: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.shield.fill")
                         .foregroundStyle(.orange)
-                    Text("Этот паспорт уже подтверждался в бронировании \(duplicate). KYC можно подтвердить повторно для новой поездки, но first-booking Gift Card для этой личности будет недоступна.")
+                    Text("Этот паспорт уже подтверждался в бронировании \(duplicate). Проверьте, что данные действительно принадлежат владельцу текущей поездки.")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -294,6 +294,10 @@ struct BookingSecurityAdminCard: View {
             let data = try await APIClient.shared.privateMedia(path: path)
             passportImage = UIImage(data: data)
             errorMessage = nil
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return
         } catch {
             errorMessage = "Не удалось безопасно загрузить фото паспорта."
         }
@@ -351,30 +355,108 @@ private struct PassportSecurityPreview: View {
     @Environment(\.dismiss) private var dismiss
     let image: UIImage?
 
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            if let image {
-                ScrollView([.horizontal, .vertical], showsIndicators: false) {
+
+            GeometryReader { proxy in
+                if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
-                        .padding(18)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            MagnificationGesture()
+                                .onChanged { value in
+                                    scale = min(5, max(1, lastScale * value))
+                                }
+                                .onEnded { _ in
+                                    lastScale = scale
+                                    if scale <= 1.01 {
+                                        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                                            scale = 1
+                                            lastScale = 1
+                                            offset = .zero
+                                            lastOffset = .zero
+                                        }
+                                    }
+                                }
+                        )
+                        .simultaneousGesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    guard scale > 1 else { return }
+                                    offset = CGSize(
+                                        width: lastOffset.width + value.translation.width,
+                                        height: lastOffset.height + value.translation.height
+                                    )
+                                }
+                                .onEnded { _ in
+                                    lastOffset = offset
+                                }
+                        )
+                        .onTapGesture(count: 2) {
+                            withAnimation(.spring(response: 0.30, dampingFraction: 0.86)) {
+                                if scale > 1 {
+                                    scale = 1
+                                    lastScale = 1
+                                    offset = .zero
+                                    lastOffset = .zero
+                                } else {
+                                    scale = 2
+                                    lastScale = 2
+                                }
+                            }
+                        }
+                } else {
+                    ContentUnavailableView("Фото недоступно", systemImage: "photo")
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
-        .overlay(alignment: .topTrailing) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .bold))
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 46, height: 46)
+                        .businessGlass(in: Circle(), interactive: true)
+                }
+                .buttonStyle(.plain)
+
+                Text("Фото паспорта")
+                    .font(.headline)
                     .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
-                    .businessGlass(in: Circle(), interactive: true)
+
+                Spacer()
+
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 46, height: 46)
+                        .businessGlass(in: Circle(), interactive: true)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-            .padding(18)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.96))
         }
+        .statusBarHidden(false)
     }
 }

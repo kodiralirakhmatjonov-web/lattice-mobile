@@ -72,8 +72,8 @@ struct BookingDetailView: View {
                 else { Button("Сохранить") { Task { await save() } }.fontWeight(.semibold).disabled(detail?.operation == nil) }
             }
         }
-        .task { await load() }
-        .refreshable { await load() }
+        .task { await load(showLoading: true) }
+        .refreshable { await load(showLoading: false) }
         .sheet(item: $editingFlight) { direction in
             if let detail {
                 FlightEditorSheet(
@@ -724,10 +724,13 @@ struct BookingDetailView: View {
         return date?.formatted(.dateTime.day().month(.abbreviated).hour().minute()) ?? value
     }
 
-    @MainActor private func load() async {
-        loading = true
+    @MainActor private func load(showLoading: Bool = false) async {
+        if showLoading && detail == nil { loading = true }
+        defer { loading = false }
+
         do {
             let value = try await APIClient.shared.bookingDetail(id: bookingID)
+            guard !Task.isCancelled else { return }
             detail = value
             if let operation = value.operation {
                 status = operation.tripStatus
@@ -736,8 +739,14 @@ struct BookingDetailView: View {
                 internalNotes = operation.internalNotes
             }
             errorMessage = nil
-        } catch { errorMessage = error.localizedDescription }
-        loading = false
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     @MainActor private func save() async {
