@@ -4,8 +4,8 @@ actor APIClient {
     static let shared = APIClient()
 
     private let session: URLSession
-    private let decoder: JSONDecoder
-    private let encoder: JSONEncoder
+    let decoder: JSONDecoder
+    let encoder: JSONEncoder
 
     init() {
         let configuration = URLSessionConfiguration.default
@@ -192,16 +192,6 @@ actor APIClient {
         let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return try decoder.decode(BookingDetailResponse.self, from: data)
-    }
-
-    func reviewBookingSecurity(bookingID: String, action: String, note: String) async throws -> BusinessSecuritySubmission {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/security/review"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(BusinessSecurityReviewPayload(action: action, note: note))
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(BusinessSecurityReviewResponse.self, from: data).security
     }
 
     func bookingItinerary(bookingID: String) async throws -> [BookingItineraryItem] {
@@ -454,6 +444,15 @@ actor APIClient {
         return try decoder.decode(HotelsResponse.self, from: data).hotels
     }
 
+    func refreshHotelPrice(id: String) async throws -> HotelPriceResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/refresh"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 90
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceResponse.self, from: data)
+    }
+
     func hotelCloudHealth() async throws -> HotelCloudHealthResponse {
         let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/health"))
         try validate(response, data: data)
@@ -652,7 +651,7 @@ actor APIClient {
         return try decoder.decode(BusinessClientNotificationSendResponse.self, from: data)
     }
 
-    private func perform(_ original: URLRequest) async throws -> (Data, URLResponse) {
+    func perform(_ original: URLRequest) async throws -> (Data, URLResponse) {
         var request = original
         if let url = request.url,
            url.host?.lowercased() == AppConfig.apiBaseURL.host?.lowercased(),
@@ -663,11 +662,11 @@ actor APIClient {
         return try await session.data(for: request)
     }
 
-    private func perform(from url: URL) async throws -> (Data, URLResponse) {
+    func perform(from url: URL) async throws -> (Data, URLResponse) {
         try await perform(URLRequest(url: url))
     }
 
-    private func validate(_ response: URLResponse, data: Data) throws {
+    func validate(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         if http.statusCode == 401 { throw APIError.unauthorized }
         guard (200..<300).contains(http.statusCode) else {
@@ -705,6 +704,16 @@ enum APIError: LocalizedError {
             case "DEVICE_BLOCKED": return "Это устройство было отключено с основного устройства."
             case "DEVICE_PROOF_INVALID": return "Не удалось подтвердить защищённую идентичность этого устройства."
             case "BUSINESS_SESSION_TOKEN_MISSING": return "Сервер не выдал защищённый ключ сеанса. Попробуйте войти снова."
+            case "ESIM_ACCESS_NOT_CONFIGURED": return "API eSIM Access ещё не подключён к Cloudflare Worker."
+            case "ESIM_ACCESS_AUTH_FAILED": return "eSIM Access отклонил API-аутентификацию. Проверьте ESIM_ACCESS_CODE и при необходимости ESIM_ACCESS_SECRET в Cloudflare."
+            case "ESIM_ACCESS_BALANCE_INSUFFICIENT": return "Недостаточно средств на балансе eSIM Access. Сначала пополните баланс."
+            case "ESIM_ACCESS_PACKAGE_NOT_FOUND": return "Этот тариф больше недоступен. Обновите список тарифов."
+            case "ESIM_ACCESS_PRICE_CHANGED": return "Цена тарифа изменилась в eSIM Access. Обновите тарифы и подтвердите покупку заново."
+            case "ESIM_ACCESS_PURCHASE_PRIMARY_ONLY": return "Покупать eSIM можно только с основного устройства iumrah Business."
+            case "ESIM_ACCESS_PURCHASE_SUPERADMIN_ONLY": return "Покупка eSIM доступна только владельцу / superadmin."
+            case "ESIM_ACCESS_PROFILE_NOT_READY": return "eSIM ещё выпускается. Подождите несколько секунд и обновите профиль."
+            case "ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED": return "Эта eSIM уже назначена другой поездке."
+            case "ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW": return "Предыдущая попытка покупки не получила подтверждение. Проверьте заказ в eSIM Access перед повторной покупкой, чтобы исключить двойное списание."
             default: return value
             }
         }

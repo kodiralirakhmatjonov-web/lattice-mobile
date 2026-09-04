@@ -1,0 +1,50 @@
+{
+  "update": "iumrah-business-update-006-esim-store-cumulative",
+  "files": [
+    {
+      "path": "BUSINESS_ESIM_STORE_006_CUMULATIVE_APPLIED.txt",
+      "sha256": "03192f6ab9a505a685828704a535f9d6ef5537bfb142864d3586d1d5c71affe3",
+      "bytes": 491
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0022_esim_access_inventory.sql",
+      "sha256": "6fcb18d82643e526ee6325fc525b2df8d415b0f31bbbcd5ae7368ed5f9b5f31f",
+      "bytes": 1494
+    },
+    {
+      "path": "Backend/HotelsWorker/src/index.js",
+      "sha256": "42230111fd5395552b22cf0e8a29711de19135e28719554644eecd73d8d20363",
+      "bytes": 345000
+    },
+    {
+      "path": "Sources/Models/ESIMAccessModels.swift",
+      "sha256": "f74c4127784acae2f25b55aba1ee8b36dbc2f18b02e78e8ac799106b63aa1448",
+      "bytes": 3819
+    },
+    {
+      "path": "Sources/Networking/APIClient+ESIMAccess.swift",
+      "sha256": "863598ecec4c062d7dc92e55fa57a2552b37e8537e0fa6043d24fc3d9ab7e9a1",
+      "bytes": 3591
+    },
+    {
+      "path": "Sources/Networking/APIClient.swift",
+      "sha256": "02881f67cd1c32141e3a1d57b49897fbdde26f155647bca968bb5eff9424b631",
+      "bytes": 43076
+    },
+    {
+      "path": "Sources/Views/BusinessSidebar.swift",
+      "sha256": "a818892052613f62fb8a157ef0a6320105a0d68f5d0effd8e2da6bd9a7bd52b0",
+      "bytes": 6494
+    },
+    {
+      "path": "Sources/Views/ESIMCenterView.swift",
+      "sha256": "eaff930f578cb827a343e2345117e88d0910c15ec420b12916c56083feb02efd",
+      "bytes": 35600
+    },
+    {
+      "path": "esim-store-patch-manifest.json",
+      "sha256": "70a0d6430df5150da34ed9d9802c361b0d809da3a2e200f2435ccf6e6b632d00",
+      "bytes": 2042
+    }
+  ]
+}
