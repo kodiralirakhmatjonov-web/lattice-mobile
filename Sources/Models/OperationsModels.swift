@@ -470,6 +470,37 @@ struct BusinessPaymentInstructionsPayload: Encodable {
     let instructions: String
 }
 
+struct BusinessSecuritySubmission: Codable, Hashable {
+    let bookingID: String
+    let pilgrimID: String?
+    let status: String
+    let firstName: String
+    let lastName: String
+    let passportNumber: String
+    let passportLast4: String
+    let hasPassportPhoto: Bool
+    let passportMediaURL: String?
+    let submittedAt: String?
+    let reviewedAt: String?
+    let reviewedBy: String?
+    let reviewNote: String
+    let duplicateBookingID: String?
+
+    var isPendingReview: Bool { ["submitted", "under_review"].contains(status) }
+    var isConfirmed: Bool { status == "confirmed" }
+    var needsCorrection: Bool { ["rejected", "needs_resubmission"].contains(status) }
+}
+
+struct BusinessSecurityReviewPayload: Encodable {
+    let action: String
+    let note: String
+}
+
+struct BusinessSecurityReviewResponse: Decodable {
+    let ok: Bool
+    let security: BusinessSecuritySubmission
+}
+
 struct BookingDetailResponse: Codable {
     let ok: Bool
     let booking: BookingSummary
@@ -484,6 +515,7 @@ struct BookingDetailResponse: Codable {
     let assignment: BookingAssignment?
     let esims: [BookingESIMProfile]?
     let checkout: BusinessCheckout?
+    let security: BusinessSecuritySubmission?
 }
 
 struct BookingItineraryItem: Codable, Identifiable, Hashable {

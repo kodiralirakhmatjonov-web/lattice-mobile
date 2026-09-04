@@ -194,6 +194,16 @@ actor APIClient {
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
 
+    func reviewBookingSecurity(bookingID: String, action: String, note: String) async throws -> BusinessSecuritySubmission {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/security/review"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BusinessSecurityReviewPayload(action: action, note: note))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessSecurityReviewResponse.self, from: data).security
+    }
+
     func bookingItinerary(bookingID: String) async throws -> [BookingItineraryItem] {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/itinerary")
         let (data, response) = try await perform(from: url)
@@ -219,57 +229,6 @@ actor APIClient {
         let (data, response) = try await perform(request)
         try validate(response, data: data)
         return try decoder.decode(BookingItineraryResponse.self, from: data).items
-    }
-
-    func esimAccessBalance() async throws -> ESIMAccessBalance {
-        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/esim-access/balance")
-        let (data, response) = try await perform(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(ESIMAccessBalanceResponse.self, from: data).balance
-    }
-
-    func esimAccessPackages(countryCode: String = "SA") async throws -> [ESIMAccessPackage] {
-        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/esim-access/packages"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "country", value: countryCode.uppercased())]
-        guard let url = components.url else { throw APIError.invalidURL }
-        let (data, response) = try await perform(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(ESIMAccessPackagesResponse.self, from: data).packages
-    }
-
-    func esimAccessInventory() async throws -> [ESIMAccessInventoryProfile] {
-        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/esim-access/inventory")
-        let (data, response) = try await perform(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(ESIMAccessInventoryResponse.self, from: data).profiles
-    }
-
-    func purchaseESIMAccess(packageCode: String, clientRequestID: String, expectedPriceRaw: Double) async throws -> ESIMAccessPurchaseResponse {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/esim-access/orders"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(ESIMAccessPurchasePayload(packageCode: packageCode, clientRequestID: clientRequestID, expectedPriceRaw: expectedPriceRaw))
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(ESIMAccessPurchaseResponse.self, from: data)
-    }
-
-    func refreshESIMAccessInventory(id: String) async throws -> ESIMAccessInventoryProfile {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/esim-access/inventory/\(id)/refresh"))
-        request.httpMethod = "POST"
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(ESIMAccessPurchaseResponse.self, from: data).profile
-    }
-
-    func assignESIMAccessInventory(id: String, bookingID: String, travelerPosition: Int?) async throws -> ESIMAccessAssignResponse {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/esim-access/inventory/\(id)/assign"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(ESIMAccessAssignPayload(bookingID: bookingID, travelerPosition: travelerPosition))
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(ESIMAccessAssignResponse.self, from: data)
     }
 
     func bookingESIMs(bookingID: String) async throws -> [BookingESIMProfile] {
@@ -746,16 +705,6 @@ enum APIError: LocalizedError {
             case "DEVICE_BLOCKED": return "Это устройство было отключено с основного устройства."
             case "DEVICE_PROOF_INVALID": return "Не удалось подтвердить защищённую идентичность этого устройства."
             case "BUSINESS_SESSION_TOKEN_MISSING": return "Сервер не выдал защищённый ключ сеанса. Попробуйте войти снова."
-            case "ESIM_ACCESS_NOT_CONFIGURED": return "API eSIM Access ещё не подключён к Cloudflare Worker."
-            case "ESIM_ACCESS_AUTH_FAILED": return "eSIM Access отклонил API-аутентификацию. Проверьте ESIM_ACCESS_CODE и при необходимости ESIM_ACCESS_SECRET в Cloudflare."
-            case "ESIM_ACCESS_BALANCE_INSUFFICIENT": return "Недостаточно средств на балансе eSIM Access. Сначала пополните баланс."
-            case "ESIM_ACCESS_PACKAGE_NOT_FOUND": return "Этот тариф больше недоступен. Обновите список тарифов."
-            case "ESIM_ACCESS_PRICE_CHANGED": return "Цена тарифа изменилась в eSIM Access. Обновите тарифы и подтвердите покупку заново."
-            case "ESIM_ACCESS_PURCHASE_PRIMARY_ONLY": return "Покупать eSIM можно только с основного устройства iumrah Business."
-            case "ESIM_ACCESS_PURCHASE_SUPERADMIN_ONLY": return "Покупка eSIM доступна только владельцу / superadmin."
-            case "ESIM_ACCESS_PROFILE_NOT_READY": return "eSIM ещё выпускается. Подождите несколько секунд и обновите профиль."
-            case "ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED": return "Эта eSIM уже назначена другой поездке."
-            case "ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW": return "Предыдущая попытка покупки не получила подтверждение. Проверьте заказ в eSIM Access перед повторной покупкой, чтобы исключить двойное списание."
             default: return value
             }
         }

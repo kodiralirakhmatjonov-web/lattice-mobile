@@ -53,20 +53,50 @@ extension View {
 
 private struct BusinessGlassModifier<S: Shape>: ViewModifier {
     let shape: S
+    let interactive: Bool
 
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: shape)
+            // iOS 26: native Liquid Glass only. Interactive controls use the
+            // system's interaction response instead of a custom pressed blur.
+            if interactive {
+                content.glassEffect(.regular.interactive(), in: shape)
+            } else {
+                content.glassEffect(.regular, in: shape)
+            }
         } else {
-            content.background(.ultraThinMaterial, in: shape)
-                .overlay(shape.stroke(Color.white.opacity(0.55), lineWidth: 0.7))
+            // Compatibility fallback for older iOS: ordinary opaque control surface.
+            content
+                .background(BusinessDesign.card, in: shape)
+                .overlay(shape.stroke(BusinessDesign.line, lineWidth: 0.8))
         }
     }
 }
 
 extension View {
-    func businessGlass<S: Shape>(in shape: S) -> some View {
-        modifier(BusinessGlassModifier(shape: shape))
+    func businessGlass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
+        modifier(BusinessGlassModifier(shape: shape, interactive: interactive))
+    }
+}
+
+struct BusinessGlassGroup<Content: View>: View {
+    let spacing: CGFloat?
+    private let content: Content
+
+    init(spacing: CGFloat? = nil, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                content
+            }
+        } else {
+            content
+        }
     }
 }

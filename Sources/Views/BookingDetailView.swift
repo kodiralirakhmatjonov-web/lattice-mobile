@@ -25,6 +25,9 @@ struct BookingDetailView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     hero(detail)
                     operationsCard(detail)
+                    BookingSecurityAdminCard(bookingID: bookingID, security: detail.security) {
+                        Task { await load() }
+                    }
                     BusinessBookingItineraryEditor(
                         bookingID: bookingID,
                         startDate: detail.booking.startDate,
