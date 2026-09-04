@@ -199,6 +199,8 @@ private struct NewChatBookingPicker: View {
 }
 
 struct ChatConversationView: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     let booking: BookingSummary
     @State private var messages: [BusinessChatMessage] = []
     @State private var draft = ""
@@ -206,113 +208,324 @@ struct ChatConversationView: View {
     @State private var sending = false
     @State private var errorMessage: String?
     @State private var selectedPhoto: PhotosPickerItem?
+    @FocusState private var composerFocused: Bool
+    @GestureState private var timestampReveal: CGFloat = 0
+
+    private let bottomAnchorID = "business-chat-bottom"
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 9) {
-                    bookingContext
-                    if loading && messages.isEmpty { ProgressView().padding(.top, 42) }
-                    else if messages.isEmpty {
-                        ContentUnavailableView("Начните диалог", systemImage: "bubble.left.and.bubble.right", description: Text("Сообщения и фотографии сохраняются в iumrah Cloud."))
-                            .padding(.top, 34)
+            ZStack(alignment: .bottom) {
+                Color(uiColor: .systemBackground)
+                    .ignoresSafeArea()
+
+                conversation(proxy: proxy)
+                    .ignoresSafeArea(.container, edges: .bottom)
+
+                VStack(spacing: 6) {
+                    if let errorMessage {
+                        errorBar(errorMessage)
                     }
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                        if shouldShowDate(at: index) { dateSeparator(message.createdAt) }
-                        messageBubble(message).id(message.id)
+                    composer(proxy: proxy)
+                }
+                .padding(.bottom, composerFocused ? 8 : 18)
+                .zIndex(10)
+            }
+            // Match the client Care chat: content runs through the physical
+            // bottom edge while the keyboard safe area remains active.
+            .ignoresSafeArea(.container, edges: .bottom)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    NavigationLink {
+                        BookingDetailView(bookingID: booking.id)
+                    } label: {
+                        HStack(spacing: 7) {
+                            pilgrimAvatar(size: 30)
+                            HStack(spacing: 3) {
+                                Text(businessPilgrimName(booking))
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 7.5, weight: .bold))
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.primary)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        BookingDetailView(bookingID: booking.id)
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 18, weight: .medium))
                     }
                 }
-                .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 18)
             }
-            .scrollDismissesKeyboard(.interactively)
-            .background(Color.white)
+            .task {
+                await reload()
+                await Task.yield()
+                scrollToLatest(proxy, animated: false)
+                await poll()
+            }
+            .onChange(of: selectedPhoto) { _, item in
+                if let item { Task { await sendPhoto(item) } }
+            }
             .onChange(of: messages.count) { _, _ in
-                guard let last = messages.last else { return }
-                withAnimation(.easeOut(duration: 0.22)) { proxy.scrollTo(last.id, anchor: .bottom) }
+                scrollToLatest(proxy)
+            }
+            .onChange(of: composerFocused) { _, focused in
+                guard focused else { return }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(120))
+                    scrollToLatest(proxy)
+                }
             }
         }
-        .safeAreaInset(edge: .bottom) { composer }
-        .navigationTitle(businessPilgrimName(booking))
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink { BookingDetailView(bookingID: booking.id) } label: { Image(systemName: "info.circle") }
+        .toolbar(.hidden, for: .tabBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
+    }
+
+    private func conversation(proxy: ScrollViewProxy) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                bookingContext
+                    .padding(.bottom, 10)
+
+                if loading && messages.isEmpty {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Загрузка чата…")
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 74)
+                } else if messages.isEmpty {
+                    VStack(spacing: 13) {
+                        pilgrimAvatar(size: 74)
+                        Text("Начните диалог")
+                            .font(.system(size: 25, weight: .bold, design: .rounded))
+                        Text("Сообщения и фотографии сохраняются в iumrah Cloud.")
+                            .font(.system(size: 15.5))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 34)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 58)
+                } else {
+                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                        if shouldShowDate(at: index) {
+                            dateSeparator(message.createdAt)
+                                .padding(.vertical, index == 0 ? 10 : 16)
+                        }
+
+                        BusinessChatMessageRow(
+                            message: message,
+                            pilgrimName: businessPilgrimName(booking),
+                            groupStart: isGroupStart(at: index),
+                            groupEnd: isGroupEnd(at: index),
+                            timestampText: timeLabel(message.createdAt),
+                            timestampReveal: timestampReveal
+                        )
+                        .id(message.id)
+                        .padding(.bottom, isGroupEnd(at: index) ? 8 : 2)
+                        .transition(
+                            .asymmetric(
+                                insertion: .move(edge: .bottom)
+                                    .combined(with: .scale(scale: 0.96, anchor: message.isStaff ? .bottomTrailing : .bottomLeading))
+                                    .combined(with: .opacity),
+                                removal: .opacity
+                            )
+                        )
+                    }
+                }
+
+                Color.clear
+                    .frame(height: 2)
+                    .id(bottomAnchorID)
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 16)
         }
-        .task { await reload(); await poll() }
-        .onChange(of: selectedPhoto) { _, item in if let item { Task { await sendPhoto(item) } } }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        .contentMargins(.bottom, errorMessage == nil ? 82 : 122, for: .scrollContent)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 12, coordinateSpace: .local)
+                .updating($timestampReveal) { value, state, _ in
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    guard dx < 0, abs(dx) > abs(dy) * 1.2 else { return }
+                    state = min(1, max(0, -dx / 78))
+                }
+        )
     }
 
     private var bookingContext: some View {
-        NavigationLink { BookingDetailView(bookingID: booking.id) } label: {
-            HStack(spacing: 11) {
-                ZStack { Circle().fill(.black); Image(systemName: "suitcase.rolling.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white) }.frame(width: 36, height: 36)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(booking.bookingDisplayNumber.map { "Бронь \($0)" } ?? "Бронь #----") · \(booking.pilgrimID.map { "Iumrah ID \($0)" } ?? "Iumrah ID —") · \(booking.travelerCount) чел.").font(.caption.bold())
-                    Text("\(booking.startDate) – \(booking.endDate)").font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer(); Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+        NavigationLink {
+            BookingDetailView(bookingID: booking.id)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "suitcase.rolling.fill")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text(booking.bookingDisplayNumber.map { "Бронь \($0)" } ?? "Бронь #----")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                Text("·")
+                    .foregroundStyle(.secondary)
+                Text("\(booking.originCode) → \(booking.outboundDestination)")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
             }
-            .padding(12).background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 19, style: .continuous))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .businessChatGlassSurface(in: Capsule(), interactive: true, tint: contextGlassTint)
         }
-        .buttonStyle(.plain).foregroundStyle(.primary)
-    }
-
-    @ViewBuilder private func messageBubble(_ message: BusinessChatMessage) -> some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            if message.isStaff { Spacer(minLength: 64) }
-            VStack(alignment: message.isStaff ? .trailing : .leading, spacing: 4) {
-                if !message.isStaff {
-                    Text(businessPilgrimName(booking))
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                }
-                if message.isImage, let url = AppConfig.absoluteURL(message.attachmentURL) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image { image.resizable().scaledToFill() }
-                        else if phase.error != nil { Color.black.opacity(0.05).overlay(Image(systemName: "photo.badge.exclamationmark")) }
-                        else { ProgressView() }
-                    }
-                    .frame(width: 220, height: 190)
-                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 22, bottomLeadingRadius: message.isStaff ? 22 : 7, bottomTrailingRadius: message.isStaff ? 7 : 22, topTrailingRadius: 22, style: .continuous))
-                } else {
-                    Text(message.body)
-                        .font(.body).foregroundStyle(message.isStaff ? .white : .primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                        .background(message.isStaff ? Color.black : BusinessDesign.secondarySurface,
-                                    in: UnevenRoundedRectangle(topLeadingRadius: 21, bottomLeadingRadius: message.isStaff ? 21 : 6, bottomTrailingRadius: message.isStaff ? 6 : 21, topTrailingRadius: 21, style: .continuous))
-                }
-                Text(timeLabel(message.createdAt)).font(.system(size: 10, weight: .medium)).foregroundStyle(.tertiary).padding(.horizontal, 4)
-            }
-            if !message.isStaff { Spacer(minLength: 64) }
-        }
+        .buttonStyle(.plain)
         .frame(maxWidth: .infinity)
     }
 
-    private var composer: some View {
-        VStack(spacing: 6) {
-            if let errorMessage { Text(errorMessage).font(.caption2).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10) }
+    private func pilgrimAvatar(size: CGFloat) -> some View {
+        ZStack {
+            Circle().fill(Color(uiColor: .systemGray5))
+            Text(pilgrimInitials)
+                .font(.system(size: max(10, size * 0.34), weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+        }
+        .frame(width: size, height: size)
+        .overlay { Circle().stroke(Color.primary.opacity(0.08), lineWidth: 0.65) }
+    }
+
+    private var pilgrimInitials: String {
+        let name = businessPilgrimName(booking)
+        let result = name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        return result.isEmpty ? "I" : result
+    }
+
+    private func composer(proxy: ScrollViewProxy) -> some View {
+        BusinessChatGlassContainer(spacing: 8) {
             HStack(alignment: .bottom, spacing: 8) {
                 PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                    Image(systemName: "plus").font(.system(size: 18, weight: .semibold)).frame(width: 42, height: 42).background(Color.white.opacity(0.72), in: Circle())
+                    Group {
+                        if sending && selectedPhoto != nil {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "plus")
+                                .font(.system(size: 18, weight: .regular))
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Circle())
                 }
+                .controlSize(.small)
+                .businessChatGlassButton()
                 .disabled(sending)
-                TextField("Сообщение", text: $draft, axis: .vertical)
-                    .lineLimit(1...5).textFieldStyle(.plain)
-                    .padding(.horizontal, 15).padding(.vertical, 11)
-                    .background(Color.white.opacity(0.74), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                Button { send() } label: {
-                    Group { if sending { ProgressView().tint(.white) } else { Image(systemName: "arrow.up").font(.system(size: 17, weight: .bold)) } }
-                        .frame(width: 43, height: 43).foregroundStyle(.white).background(.black, in: Circle())
+
+                HStack(alignment: .bottom, spacing: 5) {
+                    TextField("Сообщение…", text: $draft, axis: .vertical)
+                        .focused($composerFocused)
+                        .font(.system(size: 16.5))
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...5)
+                        .submitLabel(.send)
+                        .tint(outgoingAccent)
+                        .onSubmit {
+                            guard canSend else { return }
+                            send()
+                        }
+                        .padding(.leading, 14)
+                        .padding(.vertical, 9)
+
+                    if canSend || sending {
+                        Button {
+                            send()
+                        } label: {
+                            Group {
+                                if sending {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "arrow.up")
+                                        .font(.system(size: 14.5, weight: .bold))
+                                }
+                            }
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(outgoingAccent, in: Circle())
+                            .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canSend)
+                        .padding(.trailing, 5)
+                        .padding(.bottom, 5)
+                        .transition(.scale(scale: 0.76).combined(with: .opacity))
+                    }
                 }
-                .buttonStyle(.plain).disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+                .frame(minHeight: 42)
+                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .onTapGesture { composerFocused = true }
+                .businessChatGlassSurface(
+                    in: RoundedRectangle(cornerRadius: 22, style: .continuous),
+                    interactive: true,
+                    tint: composerGlassTint
+                )
+                .scaleEffect(composerFocused ? 1.006 : 1)
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? (composerFocused ? 0.20 : 0.10) : (composerFocused ? 0.07 : 0.025)),
+                    radius: composerFocused ? 10 : 5,
+                    y: composerFocused ? 4 : 2
+                )
+                .animation(.spring(response: 0.28, dampingFraction: 0.86), value: composerFocused)
+                .animation(.spring(response: 0.28, dampingFraction: 0.84), value: canSend)
             }
-            .padding(8).businessGlass(in: RoundedRectangle(cornerRadius: 29, style: .continuous))
         }
-        .padding(.horizontal, 10).padding(.top, 5).padding(.bottom, 6)
+        .padding(.horizontal, 12)
+    }
+
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !sending
+    }
+
+    private var outgoingAccent: Color {
+        colorScheme == .dark
+            ? Color(red: 0.10, green: 0.62, blue: 0.47)
+            : Color(red: 0.055, green: 0.29, blue: 0.24)
+    }
+
+    private var composerGlassTint: Color? {
+        if colorScheme == .dark {
+            return composerFocused ? outgoingAccent.opacity(0.16) : Color.white.opacity(0.045)
+        }
+        return composerFocused ? outgoingAccent.opacity(0.065) : Color.primary.opacity(0.018)
+    }
+
+    private var contextGlassTint: Color? {
+        colorScheme == .dark ? Color.white.opacity(0.035) : Color.primary.opacity(0.012)
+    }
+
+    private func errorBar(_ message: String) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.system(size: 12.5))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .padding(.horizontal, 12)
     }
 
     @MainActor private func reload() async {
@@ -372,11 +585,50 @@ struct ChatConversationView: View {
         return !Calendar.current.isDate(current, inSameDayAs: previous)
     }
 
+    private func isGroupStart(at index: Int) -> Bool {
+        guard index > 0 else { return true }
+        return !sameMessageGroup(messages[index - 1], messages[index])
+    }
+
+    private func isGroupEnd(at index: Int) -> Bool {
+        guard index < messages.count - 1 else { return true }
+        return !sameMessageGroup(messages[index], messages[index + 1])
+    }
+
+    private func sameMessageGroup(_ lhs: BusinessChatMessage, _ rhs: BusinessChatMessage) -> Bool {
+        guard lhs.isStaff == rhs.isStaff,
+              let first = parseISO(lhs.createdAt),
+              let second = parseISO(rhs.createdAt) else { return false }
+        return abs(second.timeIntervalSince(first)) < 120
+    }
+
     private func dateSeparator(_ value: String) -> some View {
-        Text(parseISO(value)?.formatted(.dateTime.day().month(.wide).year()) ?? value)
-            .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(BusinessDesign.secondarySurface, in: Capsule()).padding(.vertical, 6)
+        Text(dateSeparatorLabel(value))
+            .font(.system(size: 12.5, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+    }
+
+    private func dateSeparatorLabel(_ value: String) -> String {
+        guard let date = parseISO(value) else { return value }
+        if Calendar.current.isDateInToday(date) {
+            return "Сегодня, \(date.formatted(date: .omitted, time: .shortened))"
+        }
+        if Calendar.current.isDateInYesterday(date) {
+            return "Вчера, \(date.formatted(date: .omitted, time: .shortened))"
+        }
+        return date.formatted(.dateTime.day().month(.wide).hour().minute())
+    }
+
+    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        guard !messages.isEmpty else { return }
+        if animated {
+            withAnimation(.easeOut(duration: 0.22)) {
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+        }
     }
 }
 
