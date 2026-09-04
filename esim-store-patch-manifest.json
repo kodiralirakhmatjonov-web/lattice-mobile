@@ -1,0 +1,49 @@
+{
+  "patch": "iumrah-business-update-003-esim-access-store",
+  "source": "lattice-mobile-main 2(5).zip",
+  "purpose": "Owner-controlled eSIM Access catalog, balance, API purchase, inventory, and explicit booking assignment inside iumrah Business.",
+  "notes": [
+    "eSIM purchases spend the eSIM Access merchant balance; card data is not stored in iumrah Business.",
+    "Client app changes are intentionally out of scope for this update.",
+    "Fixed-data plans only in this first purchasing UI; Day Pass plans require periodNum and are excluded to prevent incorrect billing.",
+    "Purchase confirmation is price-locked against the latest provider tariff to prevent unexpected charges.",
+    "Provider auth supports RT-AccessCode-only mode and HMAC signing when ESIM_ACCESS_SECRET is configured."
+  ],
+  "files": [
+    {
+      "path": "BUSINESS_ESIM_STORE_003_APPLIED.txt",
+      "sha256": "279183d604085e7d8b1d579e53dc5261bfd9d958aa45df48535a540d2d03089d",
+      "bytes": 1280
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0022_esim_access_inventory.sql",
+      "sha256": "6fcb18d82643e526ee6325fc525b2df8d415b0f31bbbcd5ae7368ed5f9b5f31f",
+      "bytes": 1494
+    },
+    {
+      "path": "Backend/HotelsWorker/src/index.js",
+      "sha256": "42230111fd5395552b22cf0e8a29711de19135e28719554644eecd73d8d20363",
+      "bytes": 345000
+    },
+    {
+      "path": "Sources/Models/ESIMAccessModels.swift",
+      "sha256": "f74c4127784acae2f25b55aba1ee8b36dbc2f18b02e78e8ac799106b63aa1448",
+      "bytes": 3819
+    },
+    {
+      "path": "Sources/Networking/APIClient.swift",
+      "sha256": "d21ade82ed335de24e0b2dd195ee4e776abfc70671cfbbe77db2333e5b578887",
+      "bytes": 45976
+    },
+    {
+      "path": "Sources/Views/BusinessSidebar.swift",
+      "sha256": "a818892052613f62fb8a157ef0a6320105a0d68f5d0effd8e2da6bd9a7bd52b0",
+      "bytes": 6494
+    },
+    {
+      "path": "Sources/Views/ESIMCenterView.swift",
+      "sha256": "eaff930f578cb827a343e2345117e88d0910c15ec420b12916c56083feb02efd",
+      "bytes": 35600
+    }
+  ]
+}

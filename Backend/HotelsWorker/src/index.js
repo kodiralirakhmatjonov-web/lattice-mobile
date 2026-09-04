@@ -94,7 +94,7 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
   }
 
   if (parts[0] === 'operations') {
-    return handleBusinessOperations(request, env, url, parts.slice(1), user);
+    return handleBusinessOperations(request, env, url, parts.slice(1), user, businessSession);
   }
 
   const hotelID = safeID(parts[0]);
@@ -867,7 +867,7 @@ const TRIP_TRANSITIONS = {
   cancelled: new Set(['cancelled'])
 };
 
-async function handleBusinessOperations(request, env, url, parts, user) {
+async function handleBusinessOperations(request, env, url, parts, user, businessSession = null) {
   if (parts.length === 1 && parts[0] === 'me') {
     if (request.method === 'GET') return businessProfileMe(env, user);
     if (request.method === 'PUT') return saveBusinessProfileMe(request, env, user);
@@ -894,6 +894,25 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     if (parts.length === 1 && request.method === 'GET') return listClientSystemNotifications(env);
     if (parts.length === 1 && request.method === 'POST') return createClientSystemNotification(request, env, user);
     if (parts.length === 2 && parts[1] === 'audience' && request.method === 'GET') return clientNotificationAudience(env);
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'esim-access') {
+    const role = String(user?.role || '').toLowerCase();
+    if (role !== 'superadmin') return json({ ok: false, error: 'ESIM_ACCESS_PURCHASE_SUPERADMIN_ONLY' }, 403);
+    if (parts.length === 2 && parts[1] === 'balance' && request.method === 'GET') return adminEsimAccessBalance(env);
+    if (parts.length === 2 && parts[1] === 'packages' && request.method === 'GET') return adminEsimAccessPackages(env, url);
+    if (parts.length === 2 && parts[1] === 'inventory' && request.method === 'GET') return adminEsimAccessInventory(env);
+    if (parts.length === 2 && parts[1] === 'orders' && request.method === 'POST') {
+      if (businessSession && Number(businessSession.is_primary || 0) !== 1) return json({ ok: false, error: 'ESIM_ACCESS_PURCHASE_PRIMARY_ONLY' }, 403);
+      return purchaseEsimAccessProfile(request, env, user);
+    }
+    if (parts.length === 4 && parts[1] === 'inventory' && parts[3] === 'refresh' && request.method === 'POST') {
+      return refreshEsimAccessInventory(env, parts[2]);
+    }
+    if (parts.length === 4 && parts[1] === 'inventory' && parts[3] === 'assign' && request.method === 'POST') {
+      return assignEsimAccessInventory(request, env, parts[2], user);
+    }
     return methodNotAllowed();
   }
 
@@ -2388,6 +2407,395 @@ async function clientBookingEsimRows(env, bookingID, options = {}) {
 
 async function clientBookingEsims(env, bookingID) {
   return json({ ok: true, bookingID, esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true }) });
+}
+
+async function esimAccessPost(env, endpoint, body = {}) {
+  const accessCode = String(env.ESIM_ACCESS_CODE || '').trim();
+  if (!accessCode) throw new Error('ESIM_ACCESS_NOT_CONFIGURED');
+
+  const secretKey = String(env.ESIM_ACCESS_SECRET || '').trim();
+  const requestBody = JSON.stringify(body || {});
+  const headers = {
+    'content-type': 'application/json',
+    'RT-AccessCode': accessCode
+  };
+
+  // eSIM Access supports the simplified RT-AccessCode-only mode. When the
+  // account's SecretKey is configured as a Cloudflare secret, use the stronger
+  // signed form recommended for write operations without ever exposing either
+  // credential to the iOS application.
+  if (secretKey) {
+    const timestamp = Date.now().toString();
+    const requestID = crypto.randomUUID();
+    const signData = timestamp + requestID + accessCode + requestBody;
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secretKey),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const signatureBuffer = await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(signData));
+    const signature = [...new Uint8Array(signatureBuffer)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    headers['RT-Timestamp'] = timestamp;
+    headers['RT-RequestID'] = requestID;
+    headers['RT-Signature'] = signature;
+  }
+
+  const response = await fetch(`https://api.esimaccess.com/api/v1/open${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: requestBody
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload) {
+    const error = new Error(`ESIM_ACCESS_HTTP_${response.status}`);
+    error.httpStatus = response.status;
+    throw error;
+  }
+  if (payload.success === false) {
+    const code = String(payload.errorCode || '').trim();
+    if (code === '200007') throw new Error('ESIM_ACCESS_BALANCE_INSUFFICIENT');
+    if (code === '401001') throw new Error('ESIM_ACCESS_AUTH_FAILED');
+    const error = new Error(code ? `ESIM_ACCESS_PROVIDER_${code}` : 'ESIM_ACCESS_PROVIDER_ERROR');
+    error.providerMessage = cleanText(payload.errorMsg, 360) || '';
+    throw error;
+  }
+  return payload;
+}
+
+function esimAccessBalanceValue(payload) {
+  const raw = Number(payload?.obj?.balance ?? payload?.balance ?? 0);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+}
+
+function esimAccessNetworkNames(raw) {
+  const roots = Array.isArray(raw?.locationNetworkList) ? raw.locationNetworkList : [];
+  const values = [];
+  for (const item of roots) {
+    const direct = [item?.networkName, item?.operatorName, item?.name].filter(Boolean);
+    values.push(...direct);
+    const nested = Array.isArray(item?.networkList) ? item.networkList : [];
+    for (const network of nested) values.push(network?.networkName || network?.operatorName || network?.name || '');
+  }
+  return [...new Set(values.map(value => safeHumanText(value, 100)).filter(Boolean))].slice(0, 8);
+}
+
+function mapEsimAccessPackage(raw) {
+  if (!raw) return null;
+  const packageCode = cleanText(raw.packageCode, 160);
+  if (!packageCode) return null;
+  const priceRaw = esimNumber(raw.price);
+  const retailPriceRaw = raw.retailPrice == null ? null : esimNumber(raw.retailPrice);
+  const locationRaw = raw.locationCode || raw.location || '';
+  const locationCode = Array.isArray(locationRaw) ? cleanText(locationRaw[0], 12) || '' : cleanText(locationRaw, 12) || '';
+  return {
+    packageCode,
+    slug: cleanText(raw.slug, 180) || '',
+    name: safeHumanText(raw.name || raw.packageName || packageCode, 240) || packageCode,
+    priceRaw,
+    priceUSD: priceRaw / 10000,
+    retailPriceRaw,
+    retailPriceUSD: retailPriceRaw == null ? null : retailPriceRaw / 10000,
+    currencyCode: cleanText(raw.currencyCode, 12) || 'USD',
+    volumeBytes: esimNumber(raw.volume),
+    duration: Math.max(0, Math.trunc(esimNumber(raw.duration))),
+    durationUnit: cleanText(raw.durationUnit, 30) || 'DAY',
+    locationCode: locationCode.toUpperCase(),
+    speed: safeHumanText(raw.speed || '', 80) || '',
+    supportsTopUp: Number(raw.supportTopUpType || 0) >= 2,
+    activeType: raw.activeType == null ? null : Number(raw.activeType),
+    networkNames: esimAccessNetworkNames(raw)
+  };
+}
+
+async function esimAccessPackages(env, countryCode = '', packageCode = '') {
+  const payload = await esimAccessPost(env, '/package/list', {
+    locationCode: String(countryCode || '').toUpperCase(),
+    type: '',
+    slug: '',
+    packageCode: packageCode || '',
+    iccid: ''
+  });
+  const rows = Array.isArray(payload?.obj?.packageList) ? payload.obj.packageList : [];
+  return rows
+    .filter(raw => Number(raw?.dataType || 0) !== 2)
+    .map(mapEsimAccessPackage)
+    .filter(Boolean);
+}
+
+async function esimAccessBalance(env) {
+  const payload = await esimAccessPost(env, '/balance/query', {});
+  const rawAmount = esimAccessBalanceValue(payload);
+  return { rawAmount, amountUSD: rawAmount / 10000, currencyCode: 'USD' };
+}
+
+async function adminEsimAccessBalance(env) {
+  try { return json({ ok: true, balance: await esimAccessBalance(env) }); }
+  catch (error) { return esimAccessErrorResponse(error); }
+}
+
+async function adminEsimAccessPackages(env, url) {
+  const countryCode = (cleanText(url.searchParams.get('country'), 8) || 'SA').toUpperCase();
+  try {
+    const packages = await esimAccessPackages(env, countryCode, '');
+    return json({ ok: true, countryCode, packages });
+  } catch (error) { return esimAccessErrorResponse(error); }
+}
+
+function esimAccessErrorResponse(error) {
+  const code = String(error?.message || 'ESIM_ACCESS_FAILED');
+  let status = 502;
+  if (code === 'ESIM_ACCESS_NOT_CONFIGURED') status = 503;
+  else if (code === 'ESIM_ACCESS_BALANCE_INSUFFICIENT') status = 409;
+  else if (code === 'ESIM_ACCESS_PACKAGE_NOT_FOUND') status = 404;
+  else if (code === 'ESIM_ACCESS_PRICE_CHANGED') status = 409;
+  else if (code === 'ESIM_ACCESS_PROFILE_NOT_READY') status = 409;
+  else if (code === 'ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED') status = 409;
+  else if (code === 'ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW') status = 409;
+  return json({ ok: false, error: code }, status);
+}
+
+function mapEsimAccessInventory(row) {
+  if (!row) return null;
+  const total = esimNumber(row.total_volume_bytes || row.volume_bytes);
+  const used = esimNumber(row.used_volume_bytes);
+  return {
+    id: row.id,
+    clientRequestID: row.client_request_id || '',
+    transactionID: row.transaction_id || '',
+    orderNo: row.order_no || null,
+    esimTranNo: row.esim_tran_no || null,
+    packageCode: row.package_code || '',
+    packageName: row.package_name || row.package_code || '',
+    countryCode: row.country_code || '',
+    priceUSD: esimNumber(row.price_raw) / 10000,
+    currencyCode: row.currency_code || 'USD',
+    volumeBytes: esimNumber(row.volume_bytes),
+    duration: row.duration == null ? null : Number(row.duration),
+    durationUnit: row.duration_unit || null,
+    iccid: row.iccid || null,
+    lpaString: row.lpa_string || null,
+    smdpAddress: row.smdp_address || null,
+    activationCode: row.activation_code || null,
+    qrCodeURL: row.qr_code_url || null,
+    shortURL: row.short_url || null,
+    smdpStatus: row.smdp_status || null,
+    esimStatus: row.esim_status || null,
+    totalVolumeBytes: total,
+    usedVolumeBytes: used,
+    remainingVolumeBytes: Math.max(0, total - used),
+    expiresAt: row.expires_at || null,
+    purchaseStatus: row.purchase_status || 'pending',
+    assignedBookingID: row.assigned_booking_id || null,
+    assignedBookingEsimID: row.assigned_booking_esim_id || null,
+    assignedTravelerPosition: row.assigned_traveler_position == null ? null : Number(row.assigned_traveler_position),
+    createdBy: row.created_by || null,
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || ''
+  };
+}
+
+async function adminEsimAccessInventory(env) {
+  const rows = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory ORDER BY created_at DESC LIMIT 500').all();
+  return json({ ok: true, profiles: (rows.results || []).map(mapEsimAccessInventory).filter(Boolean) });
+}
+
+function esimAccessListFromPayload(payload) {
+  const candidates = [payload?.obj?.esimList, payload?.esimList, payload?.data?.esimList, payload?.obj?.list, payload?.data?.list];
+  return candidates.find(Array.isArray) || [];
+}
+
+async function esimAccessQueryProfile(env, { orderNo = '', iccid = '' } = {}) {
+  const body = { orderNo: orderNo || '', iccid: iccid || '', pager: { pageNum: 1, pageSize: 20 } };
+  let payload;
+  try {
+    payload = await esimAccessPost(env, '/esim/query', body);
+  } catch (error) {
+    if (!String(error?.message || '').startsWith('ESIM_ACCESS_HTTP_')) throw error;
+    payload = await esimAccessPost(env, '/esim/list', body);
+  }
+  const list = esimAccessListFromPayload(payload);
+  if (iccid) return list.find(item => String(item?.iccid || '') === String(iccid)) || list[0] || null;
+  if (orderNo) return list.find(item => String(item?.orderNo || '') === String(orderNo)) || list[0] || null;
+  return list[0] || null;
+}
+
+async function updateEsimAccessInventoryFromProfile(env, inventoryID, profile) {
+  if (!profile) return env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(inventoryID).first();
+  const packageInfo = Array.isArray(profile.packageList) ? profile.packageList[0] || {} : {};
+  const lpaString = cleanText(profile.ac, 1000) || '';
+  const parsed = lpaParts(lpaString);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`UPDATE esim_access_inventory SET
+      esim_tran_no=COALESCE(?,esim_tran_no), package_name=CASE WHEN ?<>'' THEN ? ELSE package_name END,
+      country_code=CASE WHEN ?<>'' THEN ? ELSE country_code END, volume_bytes=CASE WHEN ?>0 THEN ? ELSE volume_bytes END,
+      duration=COALESCE(?,duration), duration_unit=COALESCE(?,duration_unit), iccid=COALESCE(?,iccid),
+      lpa_string=CASE WHEN ?<>'' THEN ? ELSE lpa_string END, smdp_address=CASE WHEN ?<>'' THEN ? ELSE smdp_address END,
+      activation_code=CASE WHEN ?<>'' THEN ? ELSE activation_code END, qr_code_url=COALESCE(?,qr_code_url), short_url=COALESCE(?,short_url),
+      smdp_status=COALESCE(?,smdp_status), esim_status=COALESCE(?,esim_status), total_volume_bytes=?, used_volume_bytes=?,
+      expires_at=COALESCE(?,expires_at), purchase_status='ready', provider_payload_json=?, updated_at=? WHERE id=?`)
+    .bind(
+      cleanText(profile.esimTranNo, 120) || null,
+      safeHumanText(packageInfo.packageName || '', 240) || '', safeHumanText(packageInfo.packageName || '', 240) || '',
+      cleanText(packageInfo.locationCode, 12) || '', (cleanText(packageInfo.locationCode, 12) || '').toUpperCase(),
+      esimNumber(packageInfo.volume || profile.totalVolume), esimNumber(packageInfo.volume || profile.totalVolume),
+      profile.totalDuration == null ? null : Math.max(0, Math.trunc(Number(profile.totalDuration))),
+      cleanText(profile.durationUnit || packageInfo.durationUnit, 30) || null,
+      cleanText(profile.iccid, 80) || null,
+      lpaString, lpaString,
+      parsed.smdpAddress, parsed.smdpAddress,
+      parsed.activationCode, parsed.activationCode,
+      cleanText(profile.qrCodeUrl, 1500) || null,
+      cleanText(profile.shortUrl, 1500) || null,
+      cleanText(profile.smdpStatus, 80) || null,
+      cleanText(profile.esimStatus, 80) || null,
+      esimNumber(profile.totalVolume || packageInfo.volume),
+      esimNumber(profile.orderUsage),
+      cleanText(profile.expiredTime, 100) || null,
+      JSON.stringify(profile).slice(0, 50000), now, inventoryID
+    ).run();
+  return env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(inventoryID).first();
+}
+
+async function purchaseEsimAccessProfile(request, env, user) {
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const packageCode = cleanText(payload.packageCode, 160);
+  const clientRequestID = safeID(payload.clientRequestID);
+  const expectedPriceRaw = Number(payload.expectedPriceRaw);
+  if (!packageCode || !clientRequestID || !Number.isFinite(expectedPriceRaw) || expectedPriceRaw < 0) {
+    return json({ ok: false, error: 'INVALID_ESIM_PURCHASE_REQUEST' }, 400);
+  }
+
+  const duplicate = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE client_request_id=? LIMIT 1').bind(clientRequestID).first();
+  if (duplicate) {
+    let row = duplicate;
+    if (!row.iccid && row.order_no) {
+      try {
+        const profile = await esimAccessQueryProfile(env, { orderNo: row.order_no });
+        if (profile) row = await updateEsimAccessInventoryFromProfile(env, row.id, profile);
+      } catch (_) {}
+    }
+    if (!row.order_no && ['failed', 'pending'].includes(String(row.purchase_status || '').toLowerCase())) {
+      return json({ ok: false, error: 'ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW', transactionID: row.transaction_id }, 409);
+    }
+    const balance = await esimAccessBalance(env).catch(() => null);
+    return json({ ok: true, profile: mapEsimAccessInventory(row), balance });
+  }
+
+  try {
+    const plans = await esimAccessPackages(env, '', packageCode);
+    const plan = plans.find(item => item.packageCode === packageCode) || plans[0];
+    if (!plan) throw new Error('ESIM_ACCESS_PACKAGE_NOT_FOUND');
+    if (Math.abs(plan.priceRaw - expectedPriceRaw) > 0.01) throw new Error('ESIM_ACCESS_PRICE_CHANGED');
+    const balance = await esimAccessBalance(env);
+    if (balance.rawAmount + 0.0001 < plan.priceRaw) throw new Error('ESIM_ACCESS_BALANCE_INSUFFICIENT');
+
+    const inventoryID = `esimp-${crypto.randomUUID()}`;
+    const transactionID = `iumrah_${Date.now()}_${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    await env.HOTELS_DB.prepare(`INSERT INTO esim_access_inventory
+      (id,client_request_id,transaction_id,package_code,package_name,country_code,price_raw,currency_code,volume_bytes,duration,duration_unit,purchase_status,created_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(inventoryID, clientRequestID, transactionID, plan.packageCode, plan.name, plan.locationCode, plan.priceRaw, plan.currencyCode, plan.volumeBytes, plan.duration, plan.durationUnit, 'pending', cleanText(user?.login, 180) || null, now, now).run();
+
+    let orderPayload;
+    try {
+      orderPayload = await esimAccessPost(env, '/esim/order', {
+        transactionId: transactionID,
+        amount: plan.priceRaw,
+        packageInfoList: [{ packageCode: plan.packageCode, count: 1, price: plan.priceRaw }]
+      });
+    } catch (error) {
+      await env.HOTELS_DB.prepare("UPDATE esim_access_inventory SET purchase_status='failed', updated_at=? WHERE id=?").bind(new Date().toISOString(), inventoryID).run().catch(() => {});
+      throw error;
+    }
+
+    const orderNo = cleanText(orderPayload?.obj?.orderNo || orderPayload?.orderNo, 160);
+    if (!orderNo) {
+      await env.HOTELS_DB.prepare("UPDATE esim_access_inventory SET purchase_status='failed', provider_payload_json=?, updated_at=? WHERE id=?")
+        .bind(JSON.stringify(orderPayload).slice(0, 50000), new Date().toISOString(), inventoryID).run();
+      throw new Error('ESIM_ACCESS_ORDER_NUMBER_MISSING');
+    }
+    await env.HOTELS_DB.prepare("UPDATE esim_access_inventory SET order_no=?, purchase_status='provisioning', provider_payload_json=?, updated_at=? WHERE id=?")
+      .bind(orderNo, JSON.stringify(orderPayload).slice(0, 50000), new Date().toISOString(), inventoryID).run();
+
+    let row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(inventoryID).first();
+    for (let attempt = 0; attempt < 5 && !row.iccid; attempt += 1) {
+      if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 1100));
+      const profile = await esimAccessQueryProfile(env, { orderNo }).catch(() => null);
+      if (profile) row = await updateEsimAccessInventoryFromProfile(env, inventoryID, profile);
+    }
+    const afterBalance = await esimAccessBalance(env).catch(() => null);
+    return json({ ok: true, profile: mapEsimAccessInventory(row), balance: afterBalance }, 201);
+  } catch (error) {
+    console.error('ESIM_ACCESS_PURCHASE_FAILED', error);
+    return esimAccessErrorResponse(error);
+  }
+}
+
+async function refreshEsimAccessInventory(env, rawID) {
+  const id = safeID(rawID);
+  if (!id) return json({ ok: false, error: 'INVALID_ESIM_INVENTORY_ID' }, 400);
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=? LIMIT 1').bind(id).first();
+  if (!row) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_NOT_FOUND' }, 404);
+  try {
+    const profile = await esimAccessQueryProfile(env, { orderNo: row.order_no || '', iccid: row.iccid || '' });
+    if (!profile) return json({ ok: true, profile: mapEsimAccessInventory(row), balance: null });
+    row = await updateEsimAccessInventoryFromProfile(env, id, profile);
+    return json({ ok: true, profile: mapEsimAccessInventory(row), balance: null });
+  } catch (error) { return esimAccessErrorResponse(error); }
+}
+
+async function assignEsimAccessInventory(request, env, rawID, user) {
+  const id = safeID(rawID);
+  if (!id) return json({ ok: false, error: 'INVALID_ESIM_INVENTORY_ID' }, 400);
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=? LIMIT 1').bind(id).first();
+  if (!row) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_NOT_FOUND' }, 404);
+  if (!row.iccid) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_NOT_READY' }, 409);
+
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const bookingID = cleanText(payload.bookingID, 180);
+  if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
+  let travelerPosition = payload.travelerPosition == null ? 1 : Math.trunc(Number(payload.travelerPosition));
+  if (!Number.isFinite(travelerPosition) || travelerPosition < 1) travelerPosition = 1;
+
+  if (row.assigned_booking_id) {
+    if (String(row.assigned_booking_id) !== bookingID) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED' }, 409);
+    const existing = row.assigned_booking_esim_id ? await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=? AND booking_id=? LIMIT 1').bind(row.assigned_booking_esim_id, bookingID).first() : null;
+    if (existing) return json({ ok: true, profile: mapEsimAccessInventory(row), esim: mapBookingEsim(existing) });
+  }
+
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
+  await ensureTravelerRows(env, bookingID, trip);
+  const travelerCountRow = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();
+  const travelerCount = Math.max(1, Number(travelerCountRow?.count || 1));
+  if (travelerPosition > travelerCount) return json({ ok: false, error: 'INVALID_TRAVELER_POSITION' }, 400);
+
+  const bookingEsimID = `esim-${crypto.randomUUID()}`;
+  const totalMB = bytesToMB(row.total_volume_bytes || row.volume_bytes);
+  const usedMB = bytesToMB(row.used_volume_bytes);
+  const remainingMB = Math.max(0, totalMB - usedMB);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`INSERT INTO booking_esims
+      (id,booking_id,traveler_position,label,provider,provider_esim_id,iccid,plan_name,country_code,total_mb,used_mb,remaining_mb,validity_days,status,provider_status,provider_smdp_status,smdp_address,activation_code,lpa_string,qr_code_url,expires_at,last_usage_sync_at,usage_source,updated_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(
+        bookingEsimID, bookingID, travelerPosition, row.package_name || 'eSIM', ESIM_PROVIDER_ESIM_ACCESS, row.esim_tran_no || null,
+        row.iccid, row.package_name || '', row.country_code || 'SA', totalMB, usedMB, remainingMB, row.duration == null ? null : Number(row.duration),
+        row.esim_status || 'ready', row.esim_status || null, row.smdp_status || null, row.smdp_address || '', row.activation_code || '', row.lpa_string || '',
+        row.qr_code_url || null, row.expires_at || null, now, 'provider', cleanText(user?.login, 180) || null, now, now
+      ),
+    env.HOTELS_DB.prepare(`UPDATE esim_access_inventory SET assigned_booking_id=?, assigned_booking_esim_id=?, assigned_traveler_position=?, updated_at=? WHERE id=?`)
+      .bind(bookingID, bookingEsimID, travelerPosition, now, id)
+  ]);
+  row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(id).first();
+  const bookingEsim = await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=?').bind(bookingEsimID).first();
+  return json({ ok: true, profile: mapEsimAccessInventory(row), esim: mapBookingEsim(bookingEsim) });
 }
 
 
