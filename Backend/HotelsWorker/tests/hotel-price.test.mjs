@@ -4,7 +4,8 @@ import {
   HOTEL_PRICE_QUOTE_NIGHTS,
   buildHotelPriceProbeURLs,
   extractHotelPriceFromHTML,
-  quoteContextFromProbeURL
+  quoteContextFromProbeURL,
+  normalizeImportedHotelPriceSnapshot
 } from '../src/hotel-price.js';
 
 const padding = '<div>' + 'hotel property content '.repeat(30) + '</div>';
@@ -94,4 +95,43 @@ test('Expedia one-night price lockup keeps first displayed price as nightly', ()
   assert.equal(price?.currency, 'SAR');
   assert.equal(price?.priceBasis, 'nightly');
   assert.equal(price?.nightlyUSD, 84);
+});
+
+
+test('live iOS importer price is normalized for D1 cache without another provider request', () => {
+  const price = normalizeImportedHotelPriceSnapshot({
+    amount: 315,
+    currency: 'SAR',
+    totalAmount: 380,
+    totalCurrency: 'SAR',
+    priceBasis: 'nightly',
+    checkIn: '2026-09-17',
+    checkOut: '2026-09-18',
+    nights: 1,
+    adults: 2,
+    rooms: 1,
+    roomName: 'Double Room',
+    method: 'expedia-dom-price',
+    confidence: 0.98
+  });
+  assert.equal(price?.currencyOriginal, 'SAR');
+  assert.equal(price?.nightlyUSD, 84);
+  assert.equal(price?.stayTotalUSD, 101.33);
+  assert.equal(price?.nights, 1);
+  assert.equal(price?.method, 'expedia-dom-price');
+});
+
+test('imported stay total is divided by exact nights once', () => {
+  const price = normalizeImportedHotelPriceSnapshot({
+    amount: 750,
+    currency: 'SAR',
+    priceBasis: 'stay_total',
+    nights: 2,
+    adults: 2,
+    rooms: 1,
+    method: 'booking-price-for-x-nights',
+    confidence: 0.99
+  });
+  assert.equal(price?.nightlyUSD, 100);
+  assert.equal(price?.stayTotalUSD, 200);
 });

@@ -65,6 +65,50 @@ export function quoteContextFromProbeURL(value, provider) {
   }
 }
 
+
+export function normalizeImportedHotelPriceSnapshot(snapshot) {
+  const amount = Number(snapshot?.amount);
+  const currency = normalizeCurrency(snapshot?.currency);
+  const nights = Math.max(1, Number(snapshot?.nights) || HOTEL_PRICE_QUOTE_NIGHTS);
+  const adults = Math.max(1, Number(snapshot?.adults) || HOTEL_PRICE_QUOTE_ADULTS);
+  const rooms = Math.max(1, Number(snapshot?.rooms) || HOTEL_PRICE_QUOTE_ROOMS);
+  if (!Number.isFinite(amount) || amount <= 0 || !currency) return null;
+
+  const rawBasis = String(snapshot?.priceBasis || '').trim().toLowerCase();
+  const basis = rawBasis === 'stay_total' || rawBasis === 'totalstay' || rawBasis === 'total_stay'
+    ? 'stay_total'
+    : 'nightly';
+
+  const amountUSD = toUSD(amount, currency);
+  if (!Number.isFinite(amountUSD) || amountUSD <= 0) return null;
+
+  const nightlyUSD = basis === 'stay_total' ? amountUSD / nights : amountUSD;
+  if (!Number.isFinite(nightlyUSD) || nightlyUSD < 15 || nightlyUSD > 5000) return null;
+
+  let quoteTotalUSD = basis === 'stay_total' ? amountUSD : nightlyUSD * nights;
+  const totalAmount = Number(snapshot?.totalAmount);
+  const totalCurrency = normalizeCurrency(snapshot?.totalCurrency);
+  if (Number.isFinite(totalAmount) && totalAmount > 0 && totalCurrency) {
+    const convertedTotal = toUSD(totalAmount, totalCurrency);
+    if (Number.isFinite(convertedTotal) && convertedTotal > 0) quoteTotalUSD = convertedTotal;
+  }
+
+  return {
+    amountOriginal: roundMoney(amount),
+    currencyOriginal: currency,
+    priceBasis: basis,
+    nightlyUSD: roundMoney(nightlyUSD),
+    stayTotalUSD: roundMoney(quoteTotalUSD),
+    checkIn: cleanISODate(snapshot?.checkIn),
+    checkOut: cleanISODate(snapshot?.checkOut),
+    nights,
+    adults,
+    rooms,
+    confidence: Math.max(0.5, Math.min(1, Number(snapshot?.confidence) || 0.9)),
+    method: String(snapshot?.method || 'ios-importer').slice(0, 160)
+  };
+}
+
 export function extractHotelPriceFromHTML(html, provider, nights = HOTEL_PRICE_QUOTE_NIGHTS) {
   const raw = String(html || '');
   if (!raw || raw.length < 200) return null;
@@ -269,6 +313,14 @@ function extractClassSegments(html, classNames) {
     while ((match = pattern.exec(html)) !== null && out.length < 100) out.push(match[0]);
   }
   return out;
+}
+
+
+function cleanISODate(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const ms = Date.parse(`${text}T00:00:00Z`);
+  return Number.isFinite(ms) ? text : null;
 }
 
 function normalizeCurrency(value) {
