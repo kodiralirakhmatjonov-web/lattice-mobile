@@ -20,7 +20,7 @@ struct PrimaryHotelsView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Primary Hotels").font(.largeTitle.bold())
-                    Text("До 3 рекомендуемых iumrah отелей на каждую звёздную категорию. Клиент увидит их как «Рекомендует iumrah».")
+                    Text("До 3 рекомендуемых iumrah отелей на каждую категорию генератора. Фактическая звёздность отеля может отличаться от категории — например, 1★ отель можно назначить в 3★.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
 
@@ -56,7 +56,10 @@ struct PrimaryHotelsView: View {
     }
 
     private func availableHotels(for stars: Int) -> [HotelListItem] {
-        hotels.filter { $0.city.caseInsensitiveCompare(city) == .orderedSame && ($0.stars == stars || $0.stars == nil) && $0.status == "published" }
+        _ = stars
+        return hotels.filter {
+            $0.city.caseInsensitiveCompare(city) == .orderedSame && $0.status == "published"
+        }
     }
 
     private func categoryCard(_ stars: Int) -> some View {
@@ -125,7 +128,19 @@ private struct PrimaryHotelCategoryPicker: View {
                             }
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(hotel.name).font(.headline).foregroundStyle(.primary)
-                                Text("\(hotel.roomCount) номеров · \(hotel.imageCount) фото").font(.caption).foregroundStyle(.secondary)
+                                HStack(spacing: 6) {
+                                    if let actualStars = hotel.stars {
+                                        Text("\(actualStars)★")
+                                    } else {
+                                        Text("Без звёзд")
+                                    }
+                                    Text("·")
+                                    Text("\(hotel.roomCount) номеров")
+                                    Text("·")
+                                    Text("\(hotel.imageCount) фото")
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             }
                             Spacer()
                             Image(systemName: selectedIDs.contains(hotel.id) ? "checkmark.circle.fill" : "circle").foregroundStyle(selectedIDs.contains(hotel.id) ? .black : .secondary)
