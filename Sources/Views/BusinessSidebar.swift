@@ -15,7 +15,7 @@ final class BusinessSidebarStore: ObservableObject {
 }
 
 enum BusinessSidebarRoute: String, Identifiable {
-    case profile, sessions, employees, archive, primaryHotels, notifications, esimCenter
+    case profile, sessions, employees, archive, primaryHotels, flights, notifications, esimCenter
     var id: String { rawValue }
 }
 
@@ -89,6 +89,7 @@ struct BusinessSidebarHost<Content: View>: View {
                 case .employees: EmployeesView()
                 case .archive: ClientArchiveView()
                 case .primaryHotels: PrimaryHotelsView()
+                case .flights: FlightCurationView()
                 case .notifications: NotificationsComposerView()
                 case .esimCenter: ESIMCenterView()
                 }
@@ -115,6 +116,7 @@ struct BusinessSidebarHost<Content: View>: View {
             sidebarButton("Сотрудники", icon: "person.2", route: .employees)
             sidebarButton("Архив клиентов", icon: "archivebox", route: .archive)
             sidebarButton("Primary Hotels", icon: "building.2.crop.circle", route: .primaryHotels)
+            sidebarButton("Авиабилеты", icon: "airplane", route: .flights)
             if auth.user?.role.lowercased() == "superadmin" {
                 sidebarButton("eSIM Center", icon: "simcard.2.fill", route: .esimCenter)
             }

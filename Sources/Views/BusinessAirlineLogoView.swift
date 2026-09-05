@@ -3,7 +3,7 @@ import SwiftUI
 
 enum BusinessFlightReference {
     private static let airlines: [String: String] = [
-        "HY": "Uzbekistan Airways", "HH": "Qanot Sharq", "C6": "Centrum Air", "US": "Silk Avia",
+        "HY": "Uzbekistan Airways", "HH": "Qanot Sharq", "C6": "Centrum Air", "US": "Silk Avia", "U7": "Tashkent Air",
         "9S": "Air Samarkand", "2U": "Fly Khiva", "TK": "Turkish Airlines", "VF": "AJet",
         "PC": "Pegasus Airlines", "SV": "Saudia", "XY": "flynas", "FZ": "flydubai",
         "G9": "Air Arabia", "J9": "Jazeera Airways", "QR": "Qatar Airways", "J2": "Azerbaijan Airlines",

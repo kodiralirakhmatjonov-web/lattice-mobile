@@ -2142,9 +2142,39 @@ async function generatorPricingReport(env, raw) {
 
 
 async function generatorPricingReportForBooking(env, bookingID, raw) {
-  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(() => null);
+  const trip = await env.HOTELS_DB.prepare('SELECT booking_snapshot_json, pricing_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1')
+    .bind(bookingID).first().catch(() => null);
   const snapshot = parseJSONObject(trip?.booking_snapshot_json);
-  return generatorPricingReport(env, { ...snapshot, ...(raw && typeof raw === 'object' ? raw : {}) });
+  const persistedPricing = parseJSONObject(trip?.pricing_snapshot_json);
+  const rawObject = raw && typeof raw === 'object' ? raw : {};
+  const embeddedPricing = rawObject?.pricingSnapshot && typeof rawObject.pricingSnapshot === 'object'
+    ? rawObject.pricingSnapshot
+    : snapshot?.pricingSnapshot && typeof snapshot.pricingSnapshot === 'object'
+      ? snapshot.pricingSnapshot
+      : null;
+  const pricingCandidates = [persistedPricing, embeddedPricing].filter(item => item && typeof item === 'object');
+  const directPricing = pricingCandidates.find(item =>
+    cleanText(item?.quoteId, 180) && Array.isArray(item?.components) && item.components.length > 0 && item?.totals && typeof item.totals === 'object'
+  ) || null;
+  const trace = rawObject?.generatorTrace && typeof rawObject.generatorTrace === 'object'
+    ? rawObject.generatorTrace
+    : snapshot?.generatorTrace && typeof snapshot.generatorTrace === 'object'
+      ? snapshot.generatorTrace
+      : {};
+
+  // New bookings explicitly sync their complete pricingSnapshot after the booking
+  // is created. Prefer that immutable generator report so Business can always show
+  // and edit every cost component even if the package_quote_audits lookup is late,
+  // unavailable, or has already been cleaned up. Keep the quote-audit fallback for
+  // older bookings that only contain generatorTrace.quoteId.
+  if (directPricing && typeof directPricing === 'object' &&
+      cleanText(directPricing.quoteId, 180) &&
+      Array.isArray(directPricing.components) && directPricing.components.length > 0 &&
+      directPricing.totals && typeof directPricing.totals === 'object') {
+    return { ...directPricing, selection: trace };
+  }
+
+  return generatorPricingReport(env, { ...snapshot, ...rawObject });
 }
 
 
@@ -3463,7 +3493,51 @@ async function handleClientAccount(request,env,parts){
 async function recalcPilgrimStats(env,id){if(!id)return;const r=await env.HOTELS_DB.prepare('SELECT COUNT(*) count,MAX(COALESCE(end_date,created_at)) last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(id).first();await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(r?.count||0),r?.last_trip||null,new Date().toISOString(),id).run();}
 async function listAccountTrips(env,pilgrimID){const rows=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE pilgrim_id=? ORDER BY created_at DESC').bind(pilgrimID).all();return json({ok:true,trips:(rows.results||[]).map(tripMap)});}
 async function clientTripDetail(env,bookingID,trip){const raw=parseJSONObject(trip?.booking_snapshot_json);return json({ok:true,trip:tripMap(trip),booking:raw,assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
-async function syncBookingProfileByToken(request,env,bookingID,auth){const payload=await request.json().catch(()=>({}));let trip=auth.trip;let pilgrim=trip?await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first():null;const identity={firstName:safeHumanText(payload?.firstName||'',120)||'',lastName:safeHumanText(payload?.lastName||'',120)||'',displayName:[payload?.firstName,payload?.lastName].filter(Boolean).join(' ').trim(),phone:cleanText(payload?.whatsapp||payload?.phone,100)||'',email:cleanText(payload?.email,220)||''};pilgrim=await updatePilgrimIdentityFields(env,pilgrim,identity);if(trip&&payload?.generatorTrace&&typeof payload.generatorTrace==='object'){const snapshot=parseJSONObject(trip.booking_snapshot_json);snapshot.generatorTrace=payload.generatorTrace;await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET booking_snapshot_json=?,updated_at=? WHERE id=?').bind(JSON.stringify(snapshot),new Date().toISOString(),trip.id).run();trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();}return json({ok:true,pilgrimID:pilgrimPublicID(pilgrim.id),trip:tripMap(trip),assignment:await clientBookingAssignmentDetail(env,bookingID),esims:await clientBookingEsimRows(env,bookingID,{syncIfStale:true})});}
+async function syncBookingProfileByToken(request, env, bookingID, auth) {
+  const payload = await request.json().catch(() => ({}));
+  let trip = auth.trip;
+  let pilgrim = trip
+    ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first()
+    : null;
+  const identity = {
+    firstName: safeHumanText(payload?.firstName || '', 120) || '',
+    lastName: safeHumanText(payload?.lastName || '', 120) || '',
+    displayName: [payload?.firstName, payload?.lastName].filter(Boolean).join(' ').trim(),
+    phone: cleanText(payload?.whatsapp || payload?.phone, 100) || '',
+    email: cleanText(payload?.email, 220) || ''
+  };
+  pilgrim = await updatePilgrimIdentityFields(env, pilgrim, identity);
+
+  if (trip) {
+    const hasGeneratorTrace = payload?.generatorTrace && typeof payload.generatorTrace === 'object';
+    const hasPricingSnapshot = payload?.pricingSnapshot && typeof payload.pricingSnapshot === 'object';
+    if (hasGeneratorTrace || hasPricingSnapshot) {
+      const snapshot = parseJSONObject(trip.booking_snapshot_json);
+      let pricing = parseJSONObject(trip.pricing_snapshot_json);
+      if (hasGeneratorTrace) snapshot.generatorTrace = payload.generatorTrace;
+      if (hasPricingSnapshot) {
+        // Keep the exact generator cost report in the dedicated operational column.
+        // Do not copy it into booking_snapshot_json because that snapshot is also
+        // consumed by the pilgrim trip-detail API.
+        pricing = payload.pricingSnapshot;
+      }
+      await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips
+        SET booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=?
+        WHERE id=?`)
+        .bind(JSON.stringify(snapshot), JSON.stringify(pricing), new Date().toISOString(), trip.id)
+        .run();
+      trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();
+    }
+  }
+
+  return json({
+    ok: true,
+    pilgrimID: pilgrimPublicID(pilgrim.id),
+    trip: tripMap(trip),
+    assignment: await clientBookingAssignmentDetail(env, bookingID),
+    esims: await clientBookingEsimRows(env, bookingID, { syncIfStale: true })
+  });
+}
 
 function travelerCountsFromSnapshot(raw){const t=raw?.input?.travelers||raw?.travelers||{};return {adults:Math.max(1,Number(t.adults||1)),children:Math.max(0,Number(t.children||0)),infants:Math.max(0,Number(t.infants||0))};}
 async function ensureTravelerRows(env,bookingID,trip){const existing=await env.HOTELS_DB.prepare('SELECT COUNT(*) count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();if(Number(existing?.count||0)>0)return;const c=travelerCountsFromSnapshot(parseJSONObject(trip.booking_snapshot_json));let pos=0;const stm=[];for(const [type,count] of [['adult',c.adults],['child',c.children],['infant',c.infants]])for(let i=0;i<count;i++){pos++;stm.push(env.HOTELS_DB.prepare('INSERT OR IGNORE INTO booking_travelers(id,booking_id,position,traveler_type) VALUES(?,?,?,?)').bind(`traveler-${crypto.randomUUID()}`,bookingID,pos,type));}if(stm.length)await env.HOTELS_DB.batch(stm);}
