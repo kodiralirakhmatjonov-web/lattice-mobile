@@ -1,4 +1,13 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
+import {
+  HOTEL_PRICE_TTL_MS,
+  HOTEL_PRICE_RETRY_MS,
+  quoteContextFromProbeURL,
+  extractHotelPriceFromHTML,
+  normalizeImportedHotelPriceSnapshot,
+  hotelPriceMoveNeedsConfirmation,
+  hotelPriceCandidatesMatch
+} from './hotel-price.js';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -38,6 +47,13 @@ export default {
       console.error('HOTELS_API_UNHANDLED', error);
       return json({ ok: false, error: 'INTERNAL_ERROR' }, 500);
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runHotelPriceMaintenance(env, {
+      reason: `cron:${controller?.cron || 'scheduled'}`,
+      limit: 6
+    }));
   }
 };
 
@@ -62,11 +78,6 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
   if (parts[0] === 'dedupe') {
     if (request.method !== 'POST' || parts.length !== 1) return methodNotAllowed();
     return checkDuplicateRequest(request, env);
-  }
-
-  if (parts[0] === 'source-rooms') {
-    if (parts.length !== 1 || request.method !== 'POST') return methodNotAllowed();
-    return recoverSourceRooms(request, env);
   }
 
   if (parts[0] === 'import-jobs') {
@@ -104,6 +115,11 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
     if (request.method === 'GET') return hotelDetail(env, hotelID, true, url);
     if (request.method === 'DELETE') return deleteHotel(env, hotelID);
     return methodNotAllowed();
+  }
+
+  if (parts.length === 3 && parts[1] === 'price' && parts[2] === 'refresh') {
+    if (request.method !== 'POST') return methodNotAllowed();
+    return refreshHotelPriceResponse(env, hotelID, { force: true, reason: 'manual' });
   }
 
   if (parts.length === 2 && parts[1] === 'images') {
@@ -3641,6 +3657,469 @@ async function health(env, admin) {
   }, bookingsDbReady ? 200 : 503, PUBLIC_CACHE_HEADERS);
 }
 
+
+function hotelPriceFromRow(row, prefix = 'price_') {
+  if (!row) return null;
+  const status = row[`${prefix}status`];
+  const hasAny = status
+    || row[`${prefix}nightly_price_usd`] != null
+    || row[`${prefix}source_url`]
+    || row[`${prefix}last_attempt_at`];
+  if (!hasAny) return null;
+  return {
+    provider: row[`${prefix}provider`] || null,
+    sourceURL: row[`${prefix}source_url`] || null,
+    resolvedURL: row[`${prefix}resolved_url`] || null,
+    amountOriginal: row[`${prefix}amount_original`] == null ? null : Number(row[`${prefix}amount_original`]),
+    currencyOriginal: row[`${prefix}currency_original`] || null,
+    priceBasis: row[`${prefix}price_basis`] || null,
+    nightlyUSD: row[`${prefix}nightly_price_usd`] == null ? null : Number(row[`${prefix}nightly_price_usd`]),
+    quoteTotalUSD: row[`${prefix}quote_total_usd`] == null ? null : Number(row[`${prefix}quote_total_usd`]),
+    checkIn: row[`${prefix}quote_check_in`] || null,
+    checkOut: row[`${prefix}quote_check_out`] || null,
+    nights: row[`${prefix}quote_nights`] == null ? null : Number(row[`${prefix}quote_nights`]),
+    adults: row[`${prefix}quote_adults`] == null ? null : Number(row[`${prefix}quote_adults`]),
+    rooms: row[`${prefix}quote_rooms`] == null ? null : Number(row[`${prefix}quote_rooms`]),
+    confidence: row[`${prefix}confidence`] == null ? null : Number(row[`${prefix}confidence`]),
+    method: row[`${prefix}method`] || null,
+    status: status || 'pending',
+    fetchedAt: row[`${prefix}fetched_at`] || null,
+    expiresAt: row[`${prefix}expires_at`] || null,
+    lastAttemptAt: row[`${prefix}last_attempt_at`] || null,
+    nextRetryAt: row[`${prefix}next_retry_at`] || null,
+    error: row[`${prefix}error`] || null
+  };
+}
+
+async function hotelPriceCacheRow(env, hotelID) {
+  return env.HOTELS_DB.prepare('SELECT * FROM hotel_price_cache WHERE hotel_id=? LIMIT 1')
+    .bind(hotelID).first();
+}
+
+function hotelPriceResponseObject(row) {
+  if (!row) return null;
+  return {
+    provider: row.provider || null,
+    sourceURL: row.source_url || null,
+    resolvedURL: row.resolved_url || null,
+    amountOriginal: row.amount_original == null ? null : Number(row.amount_original),
+    currencyOriginal: row.currency_original || null,
+    priceBasis: row.price_basis || null,
+    nightlyUSD: row.nightly_price_usd == null ? null : Number(row.nightly_price_usd),
+    quoteTotalUSD: row.quote_total_usd == null ? null : Number(row.quote_total_usd),
+    checkIn: row.quote_check_in || null,
+    checkOut: row.quote_check_out || null,
+    nights: row.quote_nights == null ? null : Number(row.quote_nights),
+    adults: row.quote_adults == null ? null : Number(row.quote_adults),
+    rooms: row.quote_rooms == null ? null : Number(row.quote_rooms),
+    confidence: row.confidence == null ? null : Number(row.confidence),
+    method: row.method || null,
+    status: row.status || 'pending',
+    fetchedAt: row.fetched_at || null,
+    expiresAt: row.expires_at || null,
+    lastAttemptAt: row.last_attempt_at || null,
+    nextRetryAt: row.next_retry_at || null,
+    error: row.error || null
+  };
+}
+
+async function saveNormalizedHotelPrice(env, hotelID, source, normalized, options = {}) {
+  if (!normalized || !Number.isFinite(Number(normalized.nightlyUSD)) || Number(normalized.nightlyUSD) <= 0) {
+    throw new Error('INVALID_NORMALIZED_HOTEL_PRICE');
+  }
+  const nowMs = Number(options.nowMs) || Date.now();
+  const fetchedAt = new Date(nowMs).toISOString();
+  const expiresAt = new Date(nowMs + HOTEL_PRICE_TTL_MS).toISOString();
+  const sourceID = cleanText(source?.id, 180);
+  const provider = cleanText(source?.provider, 80);
+  const sourceURL = cleanURL(source?.source_url || source?.sourceURL);
+  const resolvedURL = cleanURL(options.resolvedURL || sourceURL);
+  const method = cleanText(options.method || normalized.method, 180) || 'hotel-price';
+  const confidence = Math.max(0, Math.min(1, Number(normalized.confidence) || 0.9));
+
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, resolved_url,
+      amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+      quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+      confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
+      last_http_status, error, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fresh', ?, ?, ?, NULL, ?, NULL, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=excluded.source_id,
+      provider=excluded.provider,
+      source_url=excluded.source_url,
+      resolved_url=excluded.resolved_url,
+      amount_original=excluded.amount_original,
+      currency_original=excluded.currency_original,
+      price_basis=excluded.price_basis,
+      nightly_price_usd=excluded.nightly_price_usd,
+      quote_total_usd=excluded.quote_total_usd,
+      quote_check_in=excluded.quote_check_in,
+      quote_check_out=excluded.quote_check_out,
+      quote_nights=excluded.quote_nights,
+      quote_adults=excluded.quote_adults,
+      quote_rooms=excluded.quote_rooms,
+      confidence=excluded.confidence,
+      method=excluded.method,
+      status='fresh',
+      fetched_at=excluded.fetched_at,
+      expires_at=excluded.expires_at,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=NULL,
+      last_http_status=excluded.last_http_status,
+      error=NULL,
+      pending_nightly_price_usd=NULL,
+      pending_seen_count=0,
+      pending_first_seen_at=NULL,
+      pending_last_seen_at=NULL,
+      updated_at=excluded.updated_at
+  `).bind(
+    hotelID,
+    sourceID,
+    provider,
+    sourceURL,
+    resolvedURL,
+    Number(normalized.amountOriginal),
+    cleanText(normalized.currencyOriginal, 16),
+    normalized.priceBasis === 'stay_total' ? 'stay_total' : 'nightly',
+    Number(normalized.nightlyUSD),
+    Number(normalized.stayTotalUSD),
+    cleanText(normalized.checkIn, 16),
+    cleanText(normalized.checkOut, 16),
+    Math.max(1, Number(normalized.nights) || 1),
+    Math.max(1, Number(normalized.adults) || 2),
+    Math.max(1, Number(normalized.rooms) || 1),
+    confidence,
+    method,
+    fetchedAt,
+    expiresAt,
+    fetchedAt,
+    Number(options.httpStatus) || null,
+    fetchedAt
+  ).run();
+
+  return hotelPriceCacheRow(env, hotelID);
+}
+
+async function hotelPriceSourceLockRow(env, hotelID) {
+  return env.HOTELS_DB.prepare(`
+    SELECT hps.hotel_id, hps.source_id AS id, hps.provider, hps.source_url
+    FROM hotel_price_sources hps
+    WHERE hps.hotel_id=?
+    LIMIT 1
+  `).bind(hotelID).first();
+}
+
+async function lockHotelPriceSource(env, hotelID, source) {
+  const sourceID = cleanText(source?.id, 180);
+  const provider = cleanText(source?.provider, 80);
+  const sourceURL = cleanURL(source?.source_url || source?.sourceURL);
+  if (!sourceID || !provider || !sourceURL) throw new Error('INVALID_HOTEL_PRICE_SOURCE_LOCK');
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_sources (hotel_id, source_id, provider, source_url, locked_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(hotel_id) DO NOTHING
+  `).bind(hotelID, sourceID, provider, sourceURL, now, now).run();
+  return hotelPriceSourceLockRow(env, hotelID);
+}
+
+async function ensureHotelPriceSourceLock(env, hotelID) {
+  const locked = await hotelPriceSourceLockRow(env, hotelID);
+  if (locked?.source_url) return locked;
+
+  // Existing catalog backfill/failsafe only. Never search by hotel name and never
+  // choose another provider after a source is locked. Prefer the source already
+  // recorded in hotel_price_cache; otherwise use the oldest originally imported
+  // Booking/Expedia source for this hotel.
+  const cache = await hotelPriceCacheRow(env, hotelID);
+  let source = null;
+  if (cache?.source_id) {
+    source = await env.HOTELS_DB.prepare(`
+      SELECT id, provider, source_url
+      FROM hotel_sources
+      WHERE hotel_id=? AND id=?
+      LIMIT 1
+    `).bind(hotelID, cache.source_id).first();
+  }
+  if (!source && cache?.source_url) {
+    source = await env.HOTELS_DB.prepare(`
+      SELECT id, provider, source_url
+      FROM hotel_sources
+      WHERE hotel_id=? AND source_url=?
+      ORDER BY checked_at ASC
+      LIMIT 1
+    `).bind(hotelID, cache.source_url).first();
+  }
+  if (!source) {
+    source = await env.HOTELS_DB.prepare(`
+      SELECT id, provider, source_url
+      FROM hotel_sources
+      WHERE hotel_id=? AND LOWER(provider) IN ('booking','expedia')
+      ORDER BY checked_at ASC
+      LIMIT 1
+    `).bind(hotelID).first();
+  }
+  if (!source) return null;
+  return lockHotelPriceSource(env, hotelID, source);
+}
+
+async function persistImportedHotelPriceSnapshots(env, hotelID, sources) {
+  const entries = Array.isArray(sources) ? sources : [];
+
+  // The first exact imported source page that carries a usable price becomes the
+  // immutable price source for this hotel. No alternative source, date probe or
+  // "cheapest" comparison is allowed.
+  for (const source of entries) {
+    const sourceURL = cleanURL(source?.sourceURL);
+    const provider = cleanText(source?.provider, 80);
+    if (!sourceURL || !provider || !source?.price) continue;
+    const normalized = normalizeImportedHotelPriceSnapshot(source.price);
+    if (!normalized) continue;
+
+    const storedSource = await env.HOTELS_DB.prepare(`
+      SELECT id, provider, source_url
+      FROM hotel_sources
+      WHERE hotel_id=? AND LOWER(provider)=LOWER(?) AND source_url=?
+      ORDER BY checked_at ASC
+      LIMIT 1
+    `).bind(hotelID, provider, sourceURL).first();
+    if (!storedSource) continue;
+
+    const locked = await lockHotelPriceSource(env, hotelID, storedSource);
+    if (!locked || locked.source_url !== storedSource.source_url) continue;
+    return saveNormalizedHotelPrice(env, hotelID, locked, normalized, {
+      resolvedURL: locked.source_url,
+      method: `exact-source-import:${normalized.method || 'live-dom'}`
+    });
+  }
+  return null;
+}
+
+async function readExactHotelSourcePage(env, url) {
+  if (!env.BROWSER || typeof env.BROWSER.quickAction !== 'function') {
+    throw new Error('BROWSER_BINDING_UNAVAILABLE');
+  }
+  const response = await env.BROWSER.quickAction('content', {
+    url,
+    gotoOptions: { waitUntil: 'networkidle2', timeout: 30000 },
+    rejectResourceTypes: ['image', 'media', 'font']
+  });
+  if (!response || typeof response.text !== 'function') throw new Error('BROWSER_INVALID_RESPONSE');
+  const html = await response.text();
+  if (!response.ok) throw new Error(`BROWSER_HTTP_${response.status || 0}`);
+  if (!html || html.length < 200) throw new Error('BROWSER_EMPTY_HTML');
+  return {
+    html,
+    status: Number(response.status || 200),
+    resolvedURL: url,
+    browserMs: Number(response.headers?.get?.('x-browser-ms-used') || 0) || null
+  };
+}
+
+async function stageHotelPriceCandidate(env, hotelID, existing, nextUSD) {
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const retryAt = new Date(nowMs + 60 * 60 * 1000).toISOString();
+  const priorPending = Number(existing?.pending_nightly_price_usd);
+  const matches = hotelPriceCandidatesMatch(priorPending, nextUSD);
+  const seen = matches ? Math.max(1, Number(existing?.pending_seen_count) || 0) + 1 : 1;
+  const firstSeen = matches && existing?.pending_first_seen_at ? existing.pending_first_seen_at : now;
+
+  await env.HOTELS_DB.prepare(`
+    UPDATE hotel_price_cache
+    SET pending_nightly_price_usd=?,
+        pending_seen_count=?,
+        pending_first_seen_at=?,
+        pending_last_seen_at=?,
+        status='stale',
+        last_attempt_at=?,
+        next_retry_at=?,
+        error=?,
+        updated_at=?
+    WHERE hotel_id=?
+  `).bind(
+    Number(nextUSD), seen, firstSeen, now, now, retryAt,
+    `PRICE_CHANGE_AWAITING_CONFIRMATION:${Number(existing?.nightly_price_usd) || 0}->${Number(nextUSD)}`,
+    now, hotelID
+  ).run();
+
+  return { seen, row: await hotelPriceCacheRow(env, hotelID) };
+}
+
+async function commitRefreshedHotelPrice(env, hotelID, source, parsed, context, metadata = {}) {
+  const existing = await hotelPriceCacheRow(env, hotelID);
+  const nextUSD = Number(parsed?.nightlyUSD);
+  if (Number(existing?.nightly_price_usd) > 0 && hotelPriceMoveNeedsConfirmation(existing.nightly_price_usd, nextUSD)) {
+    const staged = await stageHotelPriceCandidate(env, hotelID, existing, nextUSD);
+    if (staged.seen < 2) {
+      return { accepted: false, row: staged.row, error: 'PRICE_CHANGE_AWAITING_CONFIRMATION' };
+    }
+  }
+
+  const row = await saveNormalizedHotelPrice(env, hotelID, source, {
+    amountOriginal: parsed.amount,
+    currencyOriginal: parsed.currency,
+    priceBasis: parsed.priceBasis,
+    nightlyUSD: parsed.nightlyUSD,
+    stayTotalUSD: parsed.stayTotalUSD,
+    checkIn: context.checkIn,
+    checkOut: context.checkOut,
+    nights: context.nights,
+    adults: context.adults,
+    rooms: context.rooms,
+    confidence: parsed.confidence,
+    method: parsed.method
+  }, metadata);
+  return { accepted: true, row, error: null };
+}
+
+async function markHotelPriceRefreshFailed(env, hotelID, source, errorText, options = {}) {
+  const nowMs = Number(options.nowMs) || Date.now();
+  const now = new Date(nowMs).toISOString();
+  const nextRetry = new Date(nowMs + HOTEL_PRICE_RETRY_MS).toISOString();
+  const existing = await hotelPriceCacheRow(env, hotelID);
+  const usableExisting = Number(existing?.nightly_price_usd) > 0;
+  const status = usableExisting ? 'stale' : 'failed';
+
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, status, last_attempt_at, next_retry_at,
+      last_http_status, error, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=COALESCE(excluded.source_id, hotel_price_cache.source_id),
+      provider=COALESCE(excluded.provider, hotel_price_cache.provider),
+      source_url=COALESCE(excluded.source_url, hotel_price_cache.source_url),
+      status=CASE WHEN hotel_price_cache.nightly_price_usd IS NOT NULL THEN 'stale' ELSE 'failed' END,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=excluded.next_retry_at,
+      last_http_status=excluded.last_http_status,
+      error=excluded.error,
+      updated_at=excluded.updated_at
+  `).bind(
+    hotelID,
+    cleanText(source?.id, 180),
+    cleanText(source?.provider, 80),
+    cleanURL(source?.source_url),
+    status,
+    now,
+    nextRetry,
+    Number(options.httpStatus) || null,
+    String(errorText || 'HOTEL_PRICE_REFRESH_FAILED').slice(0, 900),
+    now
+  ).run();
+
+  return hotelPriceCacheRow(env, hotelID);
+}
+
+async function refreshHotelPrice(env, hotelID, options = {}) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id, name, status FROM hotels WHERE id=? LIMIT 1')
+    .bind(hotelID).first();
+  if (!hotel) return { ok: false, error: 'HOTEL_NOT_FOUND', price: null };
+
+  const existing = await hotelPriceCacheRow(env, hotelID);
+  const nowMs = Date.now();
+  if (!options.force && existing?.status === 'fresh') {
+    const expiresMs = Date.parse(existing.expires_at || '');
+    if (Number.isFinite(expiresMs) && expiresMs > nowMs) {
+      return { ok: true, cached: true, price: existing };
+    }
+  }
+
+  const source = await ensureHotelPriceSourceLock(env, hotelID);
+  if (!source?.source_url || !source?.provider) {
+    const failed = await markHotelPriceRefreshFailed(env, hotelID, source, 'HOTEL_PRICE_SOURCE_MISSING');
+    return { ok: false, error: 'HOTEL_PRICE_SOURCE_MISSING', price: failed };
+  }
+
+  const provider = /^booking$/i.test(source.provider)
+    ? 'Booking'
+    : /^expedia$/i.test(source.provider) ? 'Expedia' : null;
+  if (!provider) {
+    const failed = await markHotelPriceRefreshFailed(env, hotelID, source, 'HOTEL_PRICE_PROVIDER_UNSUPPORTED');
+    return { ok: false, error: 'HOTEL_PRICE_PROVIDER_UNSUPPORTED', price: failed };
+  }
+
+  // Exact-source only. This URL is never rewritten, dated, canonicalized to a
+  // different host, or replaced with another provider page.
+  const sourceURL = cleanURL(source.source_url);
+  const context = quoteContextFromProbeURL(sourceURL, provider);
+  let lastHTTPStatus = null;
+  try {
+    const rendered = await readExactHotelSourcePage(env, sourceURL);
+    lastHTTPStatus = rendered.status;
+    const parsed = extractHotelPriceFromHTML(rendered.html, provider, context.nights);
+    if (!parsed) {
+      const failed = await markHotelPriceRefreshFailed(env, hotelID, source, 'NO_PRICE_IN_EXACT_SOURCE_PAGE', { httpStatus: lastHTTPStatus });
+      return { ok: false, error: 'NO_PRICE_IN_EXACT_SOURCE_PAGE', price: failed };
+    }
+
+    const committed = await commitRefreshedHotelPrice(env, hotelID, source, parsed, context, {
+      resolvedURL: sourceURL,
+      method: `exact-source-browser:${parsed.method}`,
+      httpStatus: rendered.status
+    });
+    if (committed.accepted) return { ok: true, cached: false, price: committed.row };
+    return { ok: false, error: committed.error, price: committed.row };
+  } catch (error) {
+    const lastError = String(error?.message || error).slice(0, 700);
+    const failed = await markHotelPriceRefreshFailed(env, hotelID, source, lastError, { httpStatus: lastHTTPStatus });
+    return { ok: false, error: lastError, price: failed };
+  }
+}
+
+async function refreshHotelPriceResponse(env, hotelID, options = {}) {
+  const result = await refreshHotelPrice(env, hotelID, options);
+  return json({
+    ok: result.ok === true,
+    cached: result.cached === true,
+    price: hotelPriceResponseObject(result.price),
+    error: result.ok ? null : result.error || 'HOTEL_PRICE_REFRESH_FAILED'
+  }, result.error === 'HOTEL_NOT_FOUND' ? 404 : 200);
+}
+
+async function runHotelPriceMaintenance(env, options = {}) {
+  const now = new Date().toISOString();
+  const limit = Math.max(1, Math.min(20, Number(options.limit) || 6));
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT DISTINCT h.id
+    FROM hotels h
+    JOIN hotel_price_sources hps ON hps.hotel_id=h.id
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+    WHERE h.status='published'
+      AND LOWER(hps.provider) IN ('booking','expedia')
+      AND (
+        hp.hotel_id IS NULL
+        OR hp.status='pending'
+        OR hp.expires_at IS NULL
+        OR hp.expires_at <= ?
+        OR (hp.next_retry_at IS NOT NULL AND hp.next_retry_at <= ?)
+      )
+    ORDER BY
+      CASE WHEN hp.hotel_id IS NULL THEN 0 ELSE 1 END,
+      COALESCE(hp.next_retry_at, hp.expires_at, h.updated_at) ASC
+    LIMIT ?
+  `).bind(now, now, limit).all();
+
+  const hotels = result.results || [];
+  const summary = { reason: options.reason || 'maintenance', checked: hotels.length, refreshed: 0, failed: 0 };
+  for (const row of hotels) {
+    try {
+      const refreshed = await refreshHotelPrice(env, row.id, { force: true, reason: summary.reason });
+      if (refreshed.ok) summary.refreshed += 1;
+      else summary.failed += 1;
+    } catch (error) {
+      summary.failed += 1;
+      console.error('HOTEL_PRICE_MAINTENANCE_ITEM_FAILED', { hotelID: row.id, error: String(error?.message || error) });
+    }
+  }
+  console.log('HOTEL_PRICE_MAINTENANCE', summary);
+  return summary;
+}
+
+
 async function listHotels(env, url, publishedOnly) {
   const city = cleanText(url.searchParams.get('city'), 80);
   const values = [];
@@ -3663,6 +4142,29 @@ async function listHotels(env, url, publishedOnly) {
       h.status,
       h.lifecycle_state,
       h.updated_at,
+      hps.provider AS source_provider,
+      hps.source_url AS source_url,
+      hp.provider AS price_provider,
+      hp.source_url AS price_source_url,
+      hp.resolved_url AS price_resolved_url,
+      hp.amount_original AS price_amount_original,
+      hp.currency_original AS price_currency_original,
+      hp.price_basis AS price_price_basis,
+      hp.nightly_price_usd AS price_nightly_price_usd,
+      hp.quote_total_usd AS price_quote_total_usd,
+      hp.quote_check_in AS price_quote_check_in,
+      hp.quote_check_out AS price_quote_check_out,
+      hp.quote_nights AS price_quote_nights,
+      hp.quote_adults AS price_quote_adults,
+      hp.quote_rooms AS price_quote_rooms,
+      hp.confidence AS price_confidence,
+      hp.method AS price_method,
+      hp.status AS price_status,
+      hp.fetched_at AS price_fetched_at,
+      hp.expires_at AS price_expires_at,
+      hp.last_attempt_at AS price_last_attempt_at,
+      hp.next_retry_at AS price_next_retry_at,
+      hp.error AS price_error,
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id = h.id) AS room_count,
       (
@@ -3673,6 +4175,8 @@ async function listHotels(env, url, publishedOnly) {
         LIMIT 1
       ) AS cover_image_id
     FROM hotels h
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id = h.id
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id = h.id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY
       CASE LOWER(h.city) WHEN 'makkah' THEN 0 WHEN 'madinah' THEN 1 ELSE 2 END,
@@ -3681,7 +4185,7 @@ async function listHotels(env, url, publishedOnly) {
   `;
 
   const result = await env.HOTELS_DB.prepare(sql).bind(...values).all();
-  const hotels = (result.results || []).map(row => hotelSummary(row));
+  const hotels = (result.results || []).map(row => hotelSummary(row, !publishedOnly));
   return json({ hotels }, 200, publishedOnly ? PUBLIC_CACHE_HEADERS : undefined);
 }
 
@@ -4069,6 +4573,8 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     ).run();
   }
 
+  const importedPrice = await persistImportedHotelPriceSnapshots(env, id, sources);
+
   console.log('HOTEL_SAVED', {
     hotelID: id,
     status,
@@ -4077,7 +4583,12 @@ async function persistHotelDraft(draft, env, user, options = {}) {
     rooms: rooms.length,
     sources: sources.length,
     nearby: nearby.length,
-    facts: facts.length
+    facts: facts.length,
+    price: importedPrice ? {
+      status: importedPrice.status,
+      nightlyUSD: importedPrice.nightly_price_usd,
+      provider: importedPrice.provider
+    } : null
   });
 
   const row = await summaryRow(env, id);
@@ -4224,379 +4735,6 @@ function isRepairableDuplicate(duplicate) {
 }
 
 
-async function recoverSourceRooms(request, env) {
-  const payload = await readJSON(request, 100_000);
-  if (!payload.ok) return payload.response;
-  const sourceURL = cleanURL(payload.value?.sourceURL);
-  if (!sourceURL) return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400);
-
-  let input;
-  try { input = new URL(sourceURL); } catch (_) { return json({ ok: false, error: 'INVALID_SOURCE_URL' }, 400); }
-  const inputHost = input.hostname.toLowerCase();
-  const hintedProvider = inputHost === 'expe.onelink.me' || inputHost.endsWith('.expe.onelink.me')
-    ? 'Expedia'
-    : detectRoomProvider(input);
-  if (!hintedProvider) return json({ ok: false, error: 'UNSUPPORTED_SOURCE_PROVIDER' }, 400);
-
-  const headers = new Headers({
-    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
-    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'accept-language': 'en-US,en;q=0.9',
-    'cache-control': 'no-cache'
-  });
-
-  let response;
-  try {
-    response = await fetch(sourceURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
-  } catch (error) {
-    return json({ ok: false, error: 'SOURCE_ROOM_FETCH_FAILED', detail: String(error?.message || error).slice(0, 500) }, 502);
-  }
-  if (!response.ok) return json({ ok: false, error: `SOURCE_ROOM_HTTP_${response.status}` }, 502);
-
-  const finalURL = response.url || sourceURL;
-  let finalParsed;
-  try { finalParsed = new URL(finalURL); } catch (_) { return json({ ok: false, error: 'SOURCE_ROOM_BAD_REDIRECT' }, 502); }
-  const provider = detectRoomProvider(finalParsed) || hintedProvider;
-  if (!provider || !providerRoomHostAllowed(finalParsed, provider)) {
-    return json({ ok: false, error: 'SOURCE_REDIRECT_OUTSIDE_PROVIDER' }, 400);
-  }
-  const expectedPropertyID = providerPropertyIDFromURL(finalParsed, provider)
-    || providerPropertyIDFromURL(input, provider);
-  if (provider === 'Expedia' && !expectedPropertyID) {
-    return json({ ok: false, error: 'SOURCE_PROPERTY_ID_MISSING', detail: 'Resolved Expedia URL has no stable .h<propertyID> identity.' }, 422);
-  }
-
-  const html = await response.text();
-  if (!html || html.length < 500) return json({ ok: false, error: 'SOURCE_ROOM_EMPTY_PAGE' }, 502);
-  if (html.length > 8_000_000) return json({ ok: false, error: 'SOURCE_ROOM_PAGE_TOO_LARGE' }, 502);
-  if (isProviderChallengeHTML(html)) {
-    return json({ ok: false, error: 'SOURCE_PROVIDER_CHALLENGE', detail: 'Provider returned an anti-bot verification page instead of the hotel property.' }, 409);
-  }
-
-  let rooms = extractProviderRoomsFromHTML(html, provider, expectedPropertyID);
-  let recoveryURL = finalURL;
-  let method = rooms.length ? 'server-property-page-v3' : 'server-property-page-no-room-match';
-
-  // Room cards are availability-driven on both Expedia and Booking. Probe only the
-  // exact resolved property URL with deterministic future dates; this never searches
-  // by hotel name and therefore cannot drift to a different physical hotel.
-  if (rooms.length < 4) {
-    const candidates = roomRecoveryProbeURLs(finalParsed, provider);
-    for (const fallbackURL of candidates) {
-      try {
-        const fallbackResponse = await fetch(fallbackURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
-        if (!fallbackResponse.ok) continue;
-        const fallbackFinal = new URL(fallbackResponse.url || fallbackURL);
-        if (!providerRoomHostAllowed(fallbackFinal, provider)) continue;
-        if (!sameProviderPropertyIdentity(fallbackFinal, finalParsed, provider)) continue;
-        const fallbackHTML = await fallbackResponse.text();
-        if (!fallbackHTML || fallbackHTML.length > 8_000_000) continue;
-        const recovered = extractProviderRoomsFromHTML(fallbackHTML, provider, expectedPropertyID);
-        if (!recovered.length) continue;
-        rooms = mergeRecoveredRooms(rooms, recovered);
-        recoveryURL = fallbackResponse.url || fallbackURL;
-        method = 'server-property-page-dated-probe-v3';
-        if (rooms.length >= 4) break;
-      } catch (_) {}
-    }
-  }
-
-  return json({
-    ok: true,
-    provider,
-    sourceURL: recoveryURL,
-    roomCount: rooms.length,
-    rooms,
-    method,
-    propertyID: expectedPropertyID || null
-  });
-}
-
-function isProviderChallengeHTML(html) {
-  const text = String(html || '').toLowerCase();
-  return [
-    'bot or not', 'verify you are human', 'are you a robot', 'security check',
-    'robot check', 'unusual traffic', 'captcha', 'access denied'
-  ].some(marker => text.includes(marker));
-}
-
-function detectRoomProvider(url) {
-  const host = String(url?.hostname || '').toLowerCase();
-  if (host === 'booking.com' || host.endsWith('.booking.com')) return 'Booking';
-  if (host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.')) return 'Expedia';
-  return null;
-}
-
-function providerPropertyIDFromURL(url, provider) {
-  if (provider !== 'Expedia') return null;
-  try {
-    const explicit = url.searchParams.get('expediaPropertyId') || url.searchParams.get('propertyId');
-    if (explicit && /^[0-9]{4,}$/.test(explicit)) return explicit;
-    const match = String(url.pathname || '').match(/\.h([0-9]{4,})\.Hotel-Information/i);
-    return match ? match[1] : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function sameProviderPropertyIdentity(candidateURL, expectedURL, provider) {
-  if (!providerRoomHostAllowed(candidateURL, provider)) return false;
-  if (provider !== 'Expedia') return true;
-  const expected = providerPropertyIDFromURL(expectedURL, provider);
-  const actual = providerPropertyIDFromURL(candidateURL, provider);
-  return !!expected && actual === expected;
-}
-
-function providerRoomHostAllowed(url, provider) {
-  const host = String(url?.hostname || '').toLowerCase();
-  return provider === 'Booking'
-    ? host === 'booking.com' || host.endsWith('.booking.com')
-    : host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.');
-}
-
-function roomRecoveryProbeURLs(propertyURL, provider) {
-  const offsets = [14, 45];
-  const output = [];
-  const seen = new Set();
-  const dateFor = offset => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
-  const push = url => {
-    const value = url.toString();
-    if (!seen.has(value)) { seen.add(value); output.push(value); }
-  };
-
-  for (const offset of offsets) {
-    const url = new URL(propertyURL.toString());
-    const checkIn = dateFor(offset);
-    const checkOut = dateFor(offset + 2);
-    if (provider === 'Expedia') {
-      url.searchParams.set('chkin', checkIn);
-      url.searchParams.set('chkout', checkOut);
-      url.searchParams.set('rm1', 'a2');
-      url.searchParams.set('useRewards', 'false');
-      push(url);
-
-      // Regional Expedia properties share the same .h<propertyID> identity/path.
-      // The .com render is often richer server-side, but the path is never changed.
-      const canonical = new URL(url.toString());
-      canonical.hostname = 'www.expedia.com';
-      push(canonical);
-    } else {
-      url.searchParams.set('checkin', checkIn);
-      url.searchParams.set('checkout', checkOut);
-      url.searchParams.set('group_adults', '2');
-      url.searchParams.set('group_children', '0');
-      url.searchParams.set('no_rooms', '1');
-      push(url);
-    }
-  }
-  return output.slice(0, 6);
-}
-
-function mergeRecoveredRooms(primary, recovered) {
-  const out = [];
-  const seen = new Set();
-  for (const room of [...(primary || []), ...(recovered || [])]) {
-    if (!room || !isPlausibleRoomName(room.name)) continue;
-    const key = normalizeRoomIdentity(room.name);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(room);
-    if (out.length >= 140) break;
-  }
-  return out;
-}
-
-function extractProviderRoomsFromHTML(html, provider, expectedPropertyID = null) {
-  const visible = htmlToReadableText(html);
-  const roomStart = visible.search(/\b(?:room options|rooms and rates|available rooms|choose your room|room types)\b/i);
-  let roomText = roomStart >= 0 ? visible.slice(roomStart, roomStart + 180_000) : visible;
-  const end = roomText.slice(800).search(/\b(?:about this property|property amenities|location|policies|reviews|getting around|you may also like|similar properties|recommended)\b/i);
-  if (end >= 0) roomText = roomText.slice(0, Math.max(2_500, end + 800));
-
-  const anchors = [];
-  const patterns = provider === 'Expedia' ? [
-    { source: 'photo', regex: /View all photos for\s+([^\n]{3,220})/gi },
-    { source: 'detail', regex: /More details(?:\s+More details)? for\s+([^\n]{3,220})/gi },
-    { source: 'price', regex: /View prices(?: for your dates)?(?: for)?\s+([^\n]{3,220})/gi }
-  ] : [
-    { source: 'room', regex: /(?:Room type|Room name)\s*[:\-]?\s*([^\n]{3,220})/gi }
-  ];
-  for (const entry of patterns) {
-    let match;
-    while ((match = entry.regex.exec(roomText)) !== null && anchors.length < 500) {
-      anchors.push({ name: cleanRoomAnchor(match[1]), index: match.index, source: entry.source });
-    }
-  }
-  anchors.sort((a, b) => a.index - b.index);
-
-  // Expedia repeats the room name in “More details …” / “View prices …”. When a
-  // photo anchor exists for that name, use the photo anchor because the sellable
-  // details live between it and the action footer. This prevents details from the
-  // next room card leaking into the previous room.
-  const photoNames = new Set(anchors.filter(a => a.source === 'photo').map(a => normalizeRoomIdentity(a.name)));
-  const visibleAnchors = anchors.filter(a => !['detail','price'].includes(a.source) || !photoNames.has(normalizeRoomIdentity(a.name)));
-
-  // Explicit room-name keys from application state are useful only as a fallback
-  // for names not already represented by visible room cards.
-  const rawJSONAnchors = [];
-  const rawJSONPatterns = [
-    /["']roomTypeName["']\s*:\s*["']([^"']{3,220})["']/gi,
-    /["']roomName["']\s*:\s*["']([^"']{3,220})["']/gi,
-    /["']unitName["']\s*:\s*["']([^"']{3,220})["']/gi
-  ];
-  // Expedia SSR/app-state contains other properties on the same HTML document. Do not
-  // accept unscoped room-name JSON; the visible Room options/action labels are the safe
-  // property-specific source. Booking keeps the legacy structured fallback.
-  if (provider !== 'Expedia') {
-    for (const pattern of rawJSONPatterns) {
-      let match;
-      while ((match = pattern.exec(html)) !== null && rawJSONAnchors.length < 300) {
-        rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'json' });
-      }
-    }
-  }
-
-  // SSR room cards frequently expose the room name only through aria-label/title
-  // attributes. htmlToReadableText intentionally removes tags, so capture those
-  // attributes directly before the markup is stripped. Expedia appends cross-sell
-  // properties after the current property's room section, so never scan those cards.
-  const recommendationBoundary = provider === 'Expedia'
-    ? String(html || '').search(/(?:You may also like|Similar properties|Recommended properties)/i)
-    : -1;
-  const propertyScopedHTML = recommendationBoundary >= 0 ? String(html || '').slice(0, recommendationBoundary) : String(html || '');
-  const rawAttributePatterns = provider === 'Expedia' ? [
-    /aria-label=["'][^"']*View all photos for\s+([^"']{3,220})["']/gi,
-    /aria-label=["'][^"']*More details(?:\s+More details)? for\s+([^"']{3,220})["']/gi,
-    /title=["'][^"']*View all photos for\s+([^"']{3,220})["']/gi
-  ] : [
-    /data-testid=["'][^"']*room[^"']*["'][^>]*>\s*([^<]{3,220})</gi,
-    /aria-label=["'][^"']*(?:room|suite)\s*[:\-]?\s*([^"']{3,220})["']/gi
-  ];
-  for (const pattern of rawAttributePatterns) {
-    let match;
-    while ((match = pattern.exec(propertyScopedHTML)) !== null && rawJSONAnchors.length < 420) {
-      rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'attribute' });
-    }
-  }
-
-  // Expedia application state is often JSON-escaped inside another script string.
-  // Normalize only quoting/unicode escapes and then reuse the strict room-name keys.
-  const normalizedStructuredHTML = String(html || '')
-    .replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\"/g, '"');
-  if (provider !== 'Expedia' && normalizedStructuredHTML !== html) {
-    for (const pattern of rawJSONPatterns) {
-      pattern.lastIndex = 0;
-      let match;
-      while ((match = pattern.exec(normalizedStructuredHTML)) !== null && rawJSONAnchors.length < 500) {
-        rawJSONAnchors.push({ name: cleanRoomAnchor(decodeHTMLEntities(match[1])), index: -1, source: 'escaped-json' });
-      }
-    }
-  }
-
-  const processAnchors = [...visibleAnchors];
-  const visibleNames = new Set(processAnchors.map(a => normalizeRoomIdentity(a.name)));
-  for (const anchor of rawJSONAnchors) {
-    if (!visibleNames.has(normalizeRoomIdentity(anchor.name))) processAnchors.push(anchor);
-  }
-
-  const result = [];
-  const seen = new Set();
-  for (let i = 0; i < processAnchors.length; i += 1) {
-    const anchor = processAnchors[i];
-    const name = safeHumanText(anchor.name, 240);
-    if (!name || !isPlausibleRoomName(name)) continue;
-
-    let context = name;
-    if (anchor.index >= 0) {
-      const nextVisible = anchors.find(other => other.index > anchor.index);
-      const endIndex = nextVisible ? Math.min(nextVisible.index, anchor.index + 2_200) : Math.min(roomText.length, anchor.index + 2_200);
-      context = roomText.slice(Math.max(0, anchor.index), endIndex);
-    }
-    const room = roomFromTextContext(name, context);
-    const key = [normalizeRoomIdentity(room.name), room.beds || '', room.maxGuests || '', room.sizeM2 || '', room.view || '']
-      .join('|').toLowerCase().replace(/\s+/g, ' ');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(room);
-    if (result.length >= 140) break;
-  }
-  return result;
-}
-
-function normalizeRoomIdentity(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\u0400-\u04ff\u0600-\u06ff]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function roomFromTextContext(name, context) {
-  const compact = String(context || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
-  const guest = compact.match(/\bSleeps?\s*(\d{1,2})\b/i) || compact.match(/\b(?:up to|max(?:imum)?)\s*(\d{1,2})\s*(?:guests?|people)\b/i);
-  const metricSize = compact.match(/\b(\d{1,4}(?:\.\d+)?)\s*(?:sq\s*m|m²|square meters?)\b/i);
-  const imperialSize = compact.match(/\b(\d{2,5}(?:\.\d+)?)\s*(?:sq\s*ft|ft²|square feet)\b/i);
-  const sizeM2 = metricSize ? Number(metricSize[1]) : imperialSize ? Math.round(Number(imperialSize[1]) * 0.092903 * 10) / 10 : null;
-  const bed = compact.match(/\b(?:\d+\s+)?(?:King|Queen|Twin|Double|Single|Large Twin|Sofa)\s+Beds?(?:\s+(?:and|or)\s+(?:\d+\s+)?(?:King|Queen|Twin|Double|Single|Large Twin|Sofa)\s+Beds?)*/i);
-  const view = compact.match(/\b(?:city|kaaba|kabba|haram|landmark|mountain|courtyard|garden|sea)\s+view\b/i);
-  const category = name.match(/\b(standard|superior|deluxe|executive|premier|classic|family|studio|junior suite|suite|presidential|royal)\b/i);
-  return {
-    id: crypto.randomUUID(),
-    name,
-    maxGuests: guest ? Number(guest[1]) : null,
-    sizeM2: Number.isFinite(sizeM2) ? sizeM2 : null,
-    beds: bed ? cleanText(bed[0], 260) : null,
-    view: view ? cleanText(view[0], 180) : null,
-    description: null,
-    amenities: /free wi[- ]?fi/i.test(compact) ? ['Free WiFi'] : [],
-    smoking: /non[- ]smoking|smoke[- ]free/i.test(compact) ? 'Non-smoking' : null,
-    accessibility: [],
-    category: category ? category[1] : null,
-    bathroom: []
-  };
-}
-
-function cleanRoomAnchor(value) {
-  return String(value || '')
-    .replace(/\\u002F/gi, '/')
-    .replace(/\\u0026/gi, '&')
-    .replace(/\\"/g, '"')
-    .replace(/\s+(?:image|photo)\s*:\s*.*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 240);
-}
-
-function htmlToReadableText(html) {
-  return decodeHTMLEntities(String(html || '')
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '\n')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '\n')
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '\n')
-    .replace(/<br\s*\/?\s*>/gi, '\n')
-    .replace(/<\/(?:p|div|section|article|li|h1|h2|h3|h4|button|a)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' '))
-    .replace(/\r/g, '')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n[ \t]+/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function decodeHTMLEntities(value) {
-  return String(value || '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, num) => String.fromCodePoint(parseInt(num, 10)));
-}
-
-
-
 function prioritizeImportImages(images, limit = 48) {
   const input = Array.isArray(images) ? images : [];
   const output = [];
@@ -4736,8 +4874,16 @@ async function createImportJob(request, env, user) {
   if (payload.value?.publishWhenComplete === true && plausibleRooms.length === 0) {
     return json({ ok: false, error: 'ROOM_TYPES_REQUIRED', detail: 'Published hotel requires at least one confirmed room type.' }, 422);
   }
+  const importedPriceAvailable = Array.isArray(draft?.sources)
+    && draft.sources.some(source => normalizeImportedHotelPriceSnapshot(source?.price));
+  if (payload.value?.publishWhenComplete === true && !importedPriceAvailable) {
+    return json({ ok: false, error: 'HOTEL_PRICE_REQUIRED', detail: 'Published hotel requires a confirmed live price from the imported property page.' }, 422);
+  }
   const trustedImageCount = images.filter(image => image.category !== 'other').length;
-  const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= 4 && plausibleRooms.length > 0;
+  const canPublish = Boolean(payload.value?.publishWhenComplete)
+    && trustedImageCount >= 4
+    && plausibleRooms.length > 0
+    && importedPriceAvailable;
   const safeDraft = { ...draft, id: repairDuplicate?.id || draft?.id, status: 'draft', lifecycleState: 'importing' };
   const persisted = await persistHotelDraft(safeDraft, env, user, { checkDuplicate: false });
   if (!persisted.ok) return persisted.response;
@@ -4965,8 +5111,8 @@ function importJobRow(row) {
     id: row.id,
     hotelID: row.hotel_id,
     hotelName: row.hotel_name,
-    sourceProvider: row.source_provider || null,
-    sourceURL: row.source_url || null,
+    sourceProvider: includeSource ? (row.source_provider || null) : null,
+    sourceURL: includeSource ? (row.source_url || null) : null,
     status: row.status,
     stage: row.stage,
     progress: Number(row.progress || 0),
@@ -5762,6 +5908,29 @@ async function summaryRow(env, hotelID) {
       h.status,
       h.lifecycle_state,
       h.updated_at,
+      hps.provider AS source_provider,
+      hps.source_url AS source_url,
+      hp.provider AS price_provider,
+      hp.source_url AS price_source_url,
+      hp.resolved_url AS price_resolved_url,
+      hp.amount_original AS price_amount_original,
+      hp.currency_original AS price_currency_original,
+      hp.price_basis AS price_price_basis,
+      hp.nightly_price_usd AS price_nightly_price_usd,
+      hp.quote_total_usd AS price_quote_total_usd,
+      hp.quote_check_in AS price_quote_check_in,
+      hp.quote_check_out AS price_quote_check_out,
+      hp.quote_nights AS price_quote_nights,
+      hp.quote_adults AS price_quote_adults,
+      hp.quote_rooms AS price_quote_rooms,
+      hp.confidence AS price_confidence,
+      hp.method AS price_method,
+      hp.status AS price_status,
+      hp.fetched_at AS price_fetched_at,
+      hp.expires_at AS price_expires_at,
+      hp.last_attempt_at AS price_last_attempt_at,
+      hp.next_retry_at AS price_next_retry_at,
+      hp.error AS price_error,
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id = h.id) AS room_count,
       (
@@ -5771,11 +5940,13 @@ async function summaryRow(env, hotelID) {
         LIMIT 1
       ) AS cover_image_id
     FROM hotels h
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id = h.id
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id = h.id
     WHERE h.id = ?
   `).bind(hotelID).first();
 }
 
-function hotelSummary(row) {
+function hotelSummary(row, includeSource = true) {
   if (!row) return null;
   return {
     id: row.id,
@@ -5789,7 +5960,10 @@ function hotelSummary(row) {
     coverImageURL: row.cover_image_id ? publicImagePath(row.id, row.cover_image_id) : null,
     imageCount: Number(row.image_count || 0),
     roomCount: Number(row.room_count || 0),
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    sourceProvider: row.source_provider || null,
+    sourceURL: row.source_url || null,
+    price: hotelPriceFromRow(row)
   };
 }
 

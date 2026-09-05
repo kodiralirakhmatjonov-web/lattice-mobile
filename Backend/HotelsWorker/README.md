@@ -39,15 +39,18 @@ The deploy workflow creates D1/R2 if needed, applies migrations, deploys the Wor
 
 The active mobile identity model is documented in `CLIENT_INTEGRATION.md`. Legacy device `clientUserID` identity is not part of the active architecture. D1 migration `0012_iumrah_accounts_checkout.sql` collapses legacy trip statuses, removes identity-keyed legacy tables/columns, and creates the iumrah account, traveler, payment, receipt and travel-document model.
 
-## Cached hotel prices
+## Exact-source hotel prices
 
-Hotel catalog prices are refreshed independently from package generation. The original Booking/Expedia property URL remains in `hotel_sources`; `hotel_price_cache` stores one normalized benchmark quote per hotel.
+Hotel pricing has one source of truth: the exact Booking/Expedia URL that was imported for that hotel. Migration `0024_exact_hotel_price_source.sql` locks one immutable source URL per hotel in `hotel_price_sources`.
 
-- Price probe: 2 adults, 1 room, 1 night, first probe 14 days ahead (45-day fallback). The importer prefers the first normal Double/Twin/Standard/Classic room rate when it can identify the room.
+- Import price: captured only from the exact source page already open in the verified iOS WKWebView. Room recovery never contributes a price.
+- Refresh: the Worker re-opens that same locked URL exactly as stored. It does not search by hotel name, add/replace dates, switch provider, canonicalize to another host, or probe alternate pages.
+- Rendering: refresh uses Cloudflare Browser Run only for that exact URL so JavaScript-rendered provider prices can be read. There is no static-HTML price fallback.
 - Successful price: cached for 48 hours.
-- Failed refresh: last known price is preserved as `stale` and retried after 6 hours.
-- Cron: hourly at minute 17; only due hotels are fetched, up to 12 per run with concurrency 3.
-- The iOS Hotel Importer captures the first usable live room rate in the same verified WKWebView session that reads hotel data and rooms. The server seeds the 48-hour cache from that rate. A hotel requested for publication is not published unless a fresh price exists.
-- The admin API exposes `POST /api/admin/hotels/:id/price/refresh` for an explicit retry. Manual/scheduled refresh uses the Cloudflare Browser binding first so JavaScript-rendered Booking/Expedia prices are available; static HTML is only a fallback.
+- Failed refresh: the last accepted price is preserved as `stale` and retried after 6 hours.
+- Large price moves are staged and require a second matching read from the same exact source URL before replacement.
+- Cron: hourly at minute 17; only due hotels with a locked exact source URL are refreshed.
+- `POST /api/admin/hotels/:id/price/refresh` performs the same exact-source refresh on demand.
+- Business hotel cards receive the locked source URL and expose an `Open Expedia/Booking` action so staff can verify the exact page used by refresh.
 
 Migration `0021_reset_hotel_catalog_clean_start.sql` is an intentional one-time destructive clean start: it deletes canonical hotel rows and cascaded catalog data. Old `hotels/` R2 media is queued for cleanup with a cutoff timestamp so media uploaded after the reset is protected.

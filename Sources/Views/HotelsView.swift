@@ -237,6 +237,24 @@ struct HotelsView: View {
 
                 hotelPriceLine(hotel)
 
+                if let rawSource = hotel.sourceURL, let sourceURL = URL(string: rawSource) {
+                    Link(destination: sourceURL) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.caption2.weight(.bold))
+                            Text(sourceOpenLabel(hotel))
+                                .font(.caption2.weight(.semibold))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .contentShape(Capsule())
+                        .businessGlass(in: Capsule(), interactive: true)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Открыть исходную страницу отеля")
+                }
+
                 HStack(spacing: 7) {
                     if let rating = hotel.rating {
                         Label(rating.formatted(.number.precision(.fractionLength(1))), systemImage: "star.fill")
@@ -254,6 +272,12 @@ struct HotelsView: View {
                     Label("Обновить цену", systemImage: "arrow.clockwise")
                 }
                 .disabled(refreshingPriceHotelID == hotel.id)
+
+                if let rawSource = hotel.sourceURL, let sourceURL = URL(string: rawSource) {
+                    Link(destination: sourceURL) {
+                        Label(sourceOpenLabel(hotel), systemImage: "arrow.up.right.square")
+                    }
+                }
 
                 Divider()
 
@@ -277,31 +301,33 @@ struct HotelsView: View {
         .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
+    private func sourceOpenLabel(_ hotel: HotelListItem) -> String {
+        switch hotel.sourceProvider?.lowercased() {
+        case "expedia": return "Открыть Expedia"
+        case "booking": return "Открыть Booking"
+        default: return "Открыть источник"
+        }
+    }
+
     @ViewBuilder
     private func hotelPriceLine(_ hotel: HotelListItem) -> some View {
         if let price = hotel.price, let nightly = price.nightlyUSD, price.hasUsablePrice {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
-                    Text("US$\(Int(nightly.rounded()))")
+                    Text(nightly.formatted(.currency(code: "USD").precision(.fractionLength(0))))
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.primary)
                         .monospacedDigit()
                         .fixedSize(horizontal: true, vertical: false)
-                        .layoutPriority(3)
-
                     Text("/ ночь")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: true, vertical: false)
-
                     if price.status == "stale" {
                         Image(systemName: "clock.arrow.circlepath")
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
                 }
-
-                if let provider = price.provider {
+                if let provider = hotel.sourceProvider ?? price.provider {
                     Text(provider)
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)

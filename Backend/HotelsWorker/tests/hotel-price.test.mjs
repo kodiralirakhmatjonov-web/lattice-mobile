@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   HOTEL_PRICE_QUOTE_NIGHTS,
-  buildHotelPriceProbeURLs,
   extractHotelPriceFromHTML,
   quoteContextFromProbeURL,
   normalizeImportedHotelPriceSnapshot,
@@ -48,34 +47,17 @@ test('recommendation prices after property boundary are ignored', () => {
   assert.equal(price?.stayTotalUSD, 600);
 });
 
-test('Booking refresh opens the exact stored source URL first and adds one rolling fallback only when needed', () => {
-  const now = Date.UTC(2026, 8, 3, 0, 0, 0);
-  const source = 'https://www.booking.com/hotel/sa/example.html?aid=123';
-  const urls = buildHotelPriceProbeURLs(source, 'Booking', now);
-  assert.equal(urls[0], source);
-  const rolling = new URL(urls[1]);
-  assert.equal(rolling.searchParams.get('checkin'), '2026-09-17');
-  assert.equal(rolling.searchParams.get('checkout'), '2026-09-18');
-  assert.equal(rolling.searchParams.get('group_adults'), '2');
-  assert.equal(rolling.searchParams.get('no_rooms'), '1');
-  const context = quoteContextFromProbeURL(urls[1], 'Booking');
-  assert.equal(context.nights, HOTEL_PRICE_QUOTE_NIGHTS);
-  assert.equal(context.adults, 2);
-  assert.equal(context.rooms, 1);
-});
 
-test('Expedia refresh preserves exact property link before a deterministic rolling fallback', () => {
-  const now = Date.UTC(2026, 8, 3, 0, 0, 0);
-  const source = 'https://www.expedia.com/Makkah-Hotels-Test.h123456.Hotel-Information?foo=bar';
-  const urls = buildHotelPriceProbeURLs(source, 'Expedia', now);
-  assert.equal(urls[0], source);
-  const rolling = urls.map(value => new URL(value)).find(url => url.searchParams.get('chkin') === '2026-09-17');
-  assert.ok(rolling);
-  assert.match(rolling.pathname, /\.h123456\.Hotel-Information$/i);
-  assert.equal(rolling.searchParams.get('chkout'), '2026-09-18');
-  assert.equal(rolling.searchParams.get('foo'), 'bar');
+test('exact source quote context is read without mutating the source URL', () => {
+  const source = 'https://www.expedia.sa/Madinah-Hotels-Test.h123456.Hotel-Information?chkin=2027-03-24&chkout=2027-03-25&rm1=a1&foo=keep-me';
+  const before = source;
+  const context = quoteContextFromProbeURL(source, 'Expedia');
+  assert.equal(source, before);
+  assert.equal(context.checkIn, '2027-03-24');
+  assert.equal(context.checkOut, '2027-03-25');
+  assert.equal(context.nights, 1);
+  assert.equal(context.adults, 1);
 });
-
 
 test('exact stored source URL preserves its real stay length', () => {
   const url = 'https://www.booking.com/hotel/sa/example.html?checkin=2026-09-17&checkout=2026-09-20&group_adults=2&no_rooms=1';

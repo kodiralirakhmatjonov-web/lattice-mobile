@@ -39,3 +39,19 @@ test('large hotel price jumps are staged instead of replacing the accepted price
   assert.match(worker, /pending_seen_count/);
   assert.match(worker, /hotelPriceMoveNeedsConfirmation/);
 });
+
+
+test('price refresh is exact-source only and has no alternate URL or static fallback', () => {
+  assert.match(worker, /ensureHotelPriceSourceLock\(env, hotelID\)/);
+  assert.match(worker, /readExactHotelSourcePage\(env, sourceURL\)/);
+  assert.doesNotMatch(worker, /buildHotelPriceProbeURLs/);
+  assert.doesNotMatch(worker, /staticHotelHTML\(/);
+  assert.doesNotMatch(worker, /roomRecoveryProbeURLs/);
+  assert.doesNotMatch(worker, /source-rooms/);
+});
+
+test('hotel list exposes locked source URL only to Business admin summaries', () => {
+  assert.match(worker, /LEFT JOIN hotel_price_sources hps ON hps\.hotel_id = h\.id/);
+  assert.match(worker, /sourceProvider:\s*includeSource/);
+  assert.match(worker, /sourceURL:\s*includeSource/);
+});

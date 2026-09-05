@@ -484,6 +484,8 @@ struct HotelListItem: Codable, Identifiable {
     let updatedAt: String
     let rating: Double?
     let reviewCount: Int?
+    let sourceProvider: String?
+    let sourceURL: String?
     let price: HotelCachedPrice?
 }
 
@@ -587,31 +589,6 @@ struct HotelImportJob: Codable, Identifiable {
 }
 
 
-
-struct SourceRoomRecoveryResponse: Codable {
-    let ok: Bool
-    let provider: String
-    let sourceURL: String
-    let roomCount: Int
-    let rooms: [HotelRoomDraft]
-    let method: String
-}
-
-struct SourceRoomRecoveryPayload: Encodable {
-    let sourceURL: String
-}
-
-struct HotelImportJobResponse: Codable { let ok: Bool; let job: HotelImportJob }
-struct HotelImportConflictResponse: Codable { let ok: Bool?; let error: String; let duplicate: HotelDuplicate? }
-struct HotelImportJobsResponse: Codable { let ok: Bool; let jobs: [HotelImportJob] }
-
-struct HotelImportStartPayload: Encodable {
-    let hotel: HotelDraft
-    let images: [HotelImageCandidate]
-    let publishWhenComplete: Bool
-    let idempotencyKey: String
-    let allowPossibleDuplicate: Bool
-}
 
 struct HotelSourceDuplicatePayload: Encodable {
     let sourceURL: String

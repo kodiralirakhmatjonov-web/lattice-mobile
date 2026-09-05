@@ -7,68 +7,6 @@ export const HOTEL_PRICE_QUOTE_ROOMS = 1;
 const MONEY_TOKEN = '(?:US\\$|USD|\\$|SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?)';
 const AMOUNT_TOKEN = '([0-9]{1,3}(?:[ ,.]?[0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]{1,6}(?:[.,][0-9]{1,2})?)';
 
-export function buildHotelPriceProbeURLs(propertyURL, provider, nowMs = Date.now()) {
-  const base = propertyURL instanceof URL ? new URL(propertyURL.toString()) : new URL(String(propertyURL));
-  const out = [];
-  const seen = new Set();
-  const push = url => {
-    const value = url.toString();
-    if (!seen.has(value)) {
-      seen.add(value);
-      out.push(value);
-    }
-  };
-
-  // First choice is always the exact source URL captured by the importer. This
-  // keeps refreshes tied to the same hotel page and the same search context the
-  // operator imported instead of silently switching the benchmark every cycle.
-  push(base);
-
-  const queryCheckIn = provider === 'Booking' ? base.searchParams.get('checkin') : base.searchParams.get('chkin');
-  const queryCheckOut = provider === 'Booking' ? base.searchParams.get('checkout') : base.searchParams.get('chkout');
-  const checkInMs = queryCheckIn ? Date.parse(`${queryCheckIn}T00:00:00Z`) : NaN;
-  const checkOutMs = queryCheckOut ? Date.parse(`${queryCheckOut}T00:00:00Z`) : NaN;
-  const exactContextUsable = Number.isFinite(checkInMs) && Number.isFinite(checkOutMs) && checkOutMs > Math.max(nowMs, checkInMs);
-
-  // Expedia regional links occasionally redirect differently on the browser
-  // service. Preserve every path/query parameter and only canonicalize the host.
-  if (provider === 'Expedia' && base.hostname !== 'www.expedia.com') {
-    const canonical = new URL(base.toString());
-    canonical.hostname = 'www.expedia.com';
-    push(canonical);
-  }
-
-  if (exactContextUsable) return out.slice(0, 2);
-
-  // A timeless or expired property URL needs one deterministic rolling quote so
-  // the catalog can continue to refresh. We use ONE benchmark (14 days ahead,
-  // one night, 2 adults, 1 room); unlike the old implementation we do not probe
-  // multiple future dates and then accidentally accept whichever one is cheaper.
-  const dateFor = offset => new Date(nowMs + offset * 86400000).toISOString().slice(0, 10);
-  const checkIn = dateFor(14);
-  const checkOut = dateFor(14 + HOTEL_PRICE_QUOTE_NIGHTS);
-  const rolling = new URL(base.toString());
-  if (provider === 'Booking') {
-    rolling.searchParams.set('checkin', checkIn);
-    rolling.searchParams.set('checkout', checkOut);
-    rolling.searchParams.set('group_adults', String(HOTEL_PRICE_QUOTE_ADULTS));
-    rolling.searchParams.set('group_children', '0');
-    rolling.searchParams.set('no_rooms', String(HOTEL_PRICE_QUOTE_ROOMS));
-  } else if (provider === 'Expedia') {
-    rolling.searchParams.set('chkin', checkIn);
-    rolling.searchParams.set('chkout', checkOut);
-    rolling.searchParams.set('rm1', 'a2');
-    rolling.searchParams.set('useRewards', 'false');
-  }
-  push(rolling);
-  if (provider === 'Expedia' && rolling.hostname !== 'www.expedia.com') {
-    const canonicalRolling = new URL(rolling.toString());
-    canonicalRolling.hostname = 'www.expedia.com';
-    push(canonicalRolling);
-  }
-  return out.slice(0, 4);
-}
-
 export function quoteContextFromProbeURL(value, provider) {
   try {
     const url = value instanceof URL ? value : new URL(String(value));
