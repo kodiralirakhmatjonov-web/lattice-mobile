@@ -454,9 +454,11 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
     private func recoverRoomsInBrowser(provider: Provider, propertyURL: URL) async -> [HotelRoomDraft] {
         var recovered: [HotelRoomDraft] = []
+        let probeURLs = Self.roomProbeURLs(provider: provider, propertyURL: propertyURL)
+        guard let exactPropertyURL = probeURLs.first else { return recovered }
 
-        // Exact-source only: this auxiliary WebView may re-open the same URL solely to
-        // expose room cards. It never mutates query parameters and never contributes price.
+        // Exact-source only: the compatibility probe list contains only the original
+        // property URL. No dates, currency, host, path, or query parameters are mutated.
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -473,7 +475,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         status = "Уточняем номера с исходной страницы…"
         progress = 0.88
-        var request = URLRequest(url: propertyURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        var request = URLRequest(url: exactPropertyURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
         roomWebView.load(request)
@@ -508,6 +510,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         roomWebView.stopLoading()
         return recovered
+    }
+
+    private static func roomProbeURLs(provider: Provider, propertyURL: URL) -> [URL] {
+        // Keep the TestFlight recovery invariant without reverting the exact-source model.
+        // The latest importer must probe only the exact URL that the user imported.
+        guard provider.isProviderContentURL(propertyURL) else { return [] }
+        return [propertyURL]
     }
 
     private func waitForRoomProbeLoad(_ targetWebView: WKWebView, provider: Provider, timeoutSeconds: Double) async -> Bool {
