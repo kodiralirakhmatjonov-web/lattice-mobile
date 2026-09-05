@@ -590,6 +590,20 @@ struct HotelImportJob: Codable, Identifiable {
 
 
 
+// API response/payload contracts used by APIClient hotel import endpoints.
+// Keep these independent from the exact-source price/recovery implementation.
+struct HotelImportJobResponse: Codable { let ok: Bool; let job: HotelImportJob }
+struct HotelImportConflictResponse: Codable { let ok: Bool?; let error: String; let duplicate: HotelDuplicate? }
+struct HotelImportJobsResponse: Codable { let ok: Bool; let jobs: [HotelImportJob] }
+
+struct HotelImportStartPayload: Encodable {
+    let hotel: HotelDraft
+    let images: [HotelImageCandidate]
+    let publishWhenComplete: Bool
+    let idempotencyKey: String
+    let allowPossibleDuplicate: Bool
+}
+
 struct HotelSourceDuplicatePayload: Encodable {
     let sourceURL: String
 }
