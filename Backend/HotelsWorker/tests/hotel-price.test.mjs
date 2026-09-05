@@ -5,7 +5,9 @@ import {
   buildHotelPriceProbeURLs,
   extractHotelPriceFromHTML,
   quoteContextFromProbeURL,
-  normalizeImportedHotelPriceSnapshot
+  normalizeImportedHotelPriceSnapshot,
+  hotelPriceMoveNeedsConfirmation,
+  hotelPriceCandidatesMatch
 } from '../src/hotel-price.js';
 
 const padding = '<div>' + 'hotel property content '.repeat(30) + '</div>';
@@ -46,32 +48,49 @@ test('recommendation prices after property boundary are ignored', () => {
   assert.equal(price?.stayTotalUSD, 600);
 });
 
-test('Booking probe URL has deterministic benchmark context and USD currency', () => {
+test('Booking refresh opens the exact stored source URL first and adds one rolling fallback only when needed', () => {
   const now = Date.UTC(2026, 8, 3, 0, 0, 0);
-  const [url] = buildHotelPriceProbeURLs('https://www.booking.com/hotel/sa/example.html', 'Booking', now);
-  const parsed = new URL(url);
-  assert.equal(parsed.searchParams.get('checkin'), '2026-09-17');
-  assert.equal(parsed.searchParams.get('checkout'), '2026-09-18');
-  assert.equal(parsed.searchParams.get('group_adults'), '2');
-  assert.equal(parsed.searchParams.get('no_rooms'), '1');
-  assert.equal(parsed.searchParams.get('selected_currency'), 'USD');
-  const context = quoteContextFromProbeURL(url, 'Booking');
+  const source = 'https://www.booking.com/hotel/sa/example.html?aid=123';
+  const urls = buildHotelPriceProbeURLs(source, 'Booking', now);
+  assert.equal(urls[0], source);
+  const rolling = new URL(urls[1]);
+  assert.equal(rolling.searchParams.get('checkin'), '2026-09-17');
+  assert.equal(rolling.searchParams.get('checkout'), '2026-09-18');
+  assert.equal(rolling.searchParams.get('group_adults'), '2');
+  assert.equal(rolling.searchParams.get('no_rooms'), '1');
+  const context = quoteContextFromProbeURL(urls[1], 'Booking');
   assert.equal(context.nights, HOTEL_PRICE_QUOTE_NIGHTS);
   assert.equal(context.adults, 2);
   assert.equal(context.rooms, 1);
 });
 
-test('Expedia probe keeps exact path and adds dates', () => {
+test('Expedia refresh preserves exact property link before a deterministic rolling fallback', () => {
   const now = Date.UTC(2026, 8, 3, 0, 0, 0);
-  const urls = buildHotelPriceProbeURLs('https://www.expedia.com/Makkah-Hotels-Test.h123456.Hotel-Information', 'Expedia', now);
-  assert.ok(urls.length >= 2);
-  for (const value of urls) {
-    const url = new URL(value);
-    assert.match(url.pathname, /\.h123456\.Hotel-Information$/i);
-    assert.ok(['2026-09-17', '2026-10-18'].includes(url.searchParams.get('chkin')));
-    assert.ok(['2026-09-18', '2026-10-19'].includes(url.searchParams.get('chkout')));
-    assert.equal(url.searchParams.get('currency'), 'USD');
-  }
+  const source = 'https://www.expedia.com/Makkah-Hotels-Test.h123456.Hotel-Information?foo=bar';
+  const urls = buildHotelPriceProbeURLs(source, 'Expedia', now);
+  assert.equal(urls[0], source);
+  const rolling = urls.map(value => new URL(value)).find(url => url.searchParams.get('chkin') === '2026-09-17');
+  assert.ok(rolling);
+  assert.match(rolling.pathname, /\.h123456\.Hotel-Information$/i);
+  assert.equal(rolling.searchParams.get('chkout'), '2026-09-18');
+  assert.equal(rolling.searchParams.get('foo'), 'bar');
+});
+
+
+test('exact stored source URL preserves its real stay length', () => {
+  const url = 'https://www.booking.com/hotel/sa/example.html?checkin=2026-09-17&checkout=2026-09-20&group_adults=2&no_rooms=1';
+  const context = quoteContextFromProbeURL(url, 'Booking');
+  assert.equal(context.nights, 3);
+  assert.equal(context.adults, 2);
+  assert.equal(context.rooms, 1);
+});
+
+test('large price jumps require a second confirmation while normal moves do not', () => {
+  assert.equal(hotelPriceMoveNeedsConfirmation(84, 40), true);
+  assert.equal(hotelPriceMoveNeedsConfirmation(84, 78), false);
+  assert.equal(hotelPriceMoveNeedsConfirmation(84, 160), true);
+  assert.equal(hotelPriceCandidatesMatch(40, 41.5), true);
+  assert.equal(hotelPriceCandidatesMatch(40, 55), false);
 });
 
 test('Booking discounted-price token without stay/night basis is rejected', () => {
@@ -97,6 +116,14 @@ test('Expedia one-night price lockup keeps first displayed price as nightly', ()
   assert.equal(price?.nightlyUSD, 84);
 });
 
+
+
+test('Expedia lockup ignores savings and total amounts and keeps the active sellable nightly rate', () => {
+  const html = `<html><body>${padding}<div class="uitk-lockup-price">Save US$40 · <s>US$132</s> · US$84 · US$101 total</div></body></html>`;
+  const price = extractHotelPriceFromHTML(html, 'Expedia', 1);
+  assert.equal(price?.currency, 'USD');
+  assert.equal(price?.nightlyUSD, 84);
+});
 
 test('live iOS importer price is normalized for D1 cache without another provider request', () => {
   const price = normalizeImportedHotelPriceSnapshot({

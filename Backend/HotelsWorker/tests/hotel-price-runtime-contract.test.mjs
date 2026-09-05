@@ -32,3 +32,10 @@ test('failed refresh preserves last known price and schedules retry', () => {
   assert.match(worker, /status=CASE WHEN hotel_price_cache\.nightly_price_usd IS NOT NULL THEN 'stale' ELSE 'failed' END/);
   assert.match(worker, /HOTEL_PRICE_RETRY_MS/);
 });
+
+test('large hotel price jumps are staged instead of replacing the accepted price immediately', () => {
+  assert.match(worker, /PRICE_CHANGE_AWAITING_CONFIRMATION/);
+  assert.match(worker, /pending_nightly_price_usd/);
+  assert.match(worker, /pending_seen_count/);
+  assert.match(worker, /hotelPriceMoveNeedsConfirmation/);
+});

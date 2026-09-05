@@ -280,26 +280,34 @@ struct HotelsView: View {
     @ViewBuilder
     private func hotelPriceLine(_ hotel: HotelListItem) -> some View {
         if let price = hotel.price, let nightly = price.nightlyUSD, price.hasUsablePrice {
-            HStack(spacing: 6) {
-                Text(nightly.formatted(.currency(code: "USD").precision(.fractionLength(0))))
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.primary)
-                Text("/ ночь")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text("US$\(Int(nightly.rounded()))")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(3)
+
+                    Text("/ ночь")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+
+                    if price.status == "stale" {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
                 if let provider = price.provider {
-                    Text("· \(provider)")
+                    Text(provider)
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
-                }
-                if price.status == "stale" {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
+                        .lineLimit(1)
                 }
             }
-            .lineLimit(1)
-            .minimumScaleFactor(0.82)
         } else if let price = hotel.price, price.status == "pending" {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)

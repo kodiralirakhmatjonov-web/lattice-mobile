@@ -5,7 +5,9 @@ import {
   buildHotelPriceProbeURLs,
   quoteContextFromProbeURL,
   extractHotelPriceFromHTML,
-  normalizeImportedHotelPriceSnapshot
+  normalizeImportedHotelPriceSnapshot,
+  hotelPriceMoveNeedsConfirmation,
+  hotelPriceCandidatesMatch
 } from './hotel-price.js';
 
 const JSON_HEADERS = {
@@ -3773,6 +3775,10 @@ async function saveNormalizedHotelPrice(env, hotelID, source, normalized, option
       next_retry_at=NULL,
       last_http_status=excluded.last_http_status,
       error=NULL,
+      pending_nightly_price_usd=NULL,
+      pending_seen_count=0,
+      pending_first_seen_at=NULL,
+      pending_last_seen_at=NULL,
       updated_at=excluded.updated_at
   `).bind(
     hotelID,
@@ -3910,6 +3916,63 @@ async function staticHotelHTML(url) {
   };
 }
 
+async function stageHotelPriceCandidate(env, hotelID, existing, nextUSD) {
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const retryAt = new Date(nowMs + 60 * 60 * 1000).toISOString();
+  const priorPending = Number(existing?.pending_nightly_price_usd);
+  const matches = hotelPriceCandidatesMatch(priorPending, nextUSD);
+  const seen = matches ? Math.max(1, Number(existing?.pending_seen_count) || 0) + 1 : 1;
+  const firstSeen = matches && existing?.pending_first_seen_at ? existing.pending_first_seen_at : now;
+
+  await env.HOTELS_DB.prepare(`
+    UPDATE hotel_price_cache
+    SET pending_nightly_price_usd=?,
+        pending_seen_count=?,
+        pending_first_seen_at=?,
+        pending_last_seen_at=?,
+        status='stale',
+        last_attempt_at=?,
+        next_retry_at=?,
+        error=?,
+        updated_at=?
+    WHERE hotel_id=?
+  `).bind(
+    Number(nextUSD), seen, firstSeen, now, now, retryAt,
+    `PRICE_CHANGE_AWAITING_CONFIRMATION:${Number(existing?.nightly_price_usd) || 0}->${Number(nextUSD)}`,
+    now, hotelID
+  ).run();
+
+  return { seen, row: await hotelPriceCacheRow(env, hotelID) };
+}
+
+async function commitRefreshedHotelPrice(env, hotelID, source, parsed, context, metadata = {}) {
+  const existing = await hotelPriceCacheRow(env, hotelID);
+  const nextUSD = Number(parsed?.nightlyUSD);
+  if (Number(existing?.nightly_price_usd) > 0 && hotelPriceMoveNeedsConfirmation(existing.nightly_price_usd, nextUSD)) {
+    const staged = await stageHotelPriceCandidate(env, hotelID, existing, nextUSD);
+    if (staged.seen < 2) {
+      return { accepted: false, row: staged.row, error: 'PRICE_CHANGE_AWAITING_CONFIRMATION' };
+    }
+  }
+
+  const row = await saveNormalizedHotelPrice(env, hotelID, source, {
+    amountOriginal: parsed.amount,
+    currencyOriginal: parsed.currency,
+    priceBasis: parsed.priceBasis,
+    nightlyUSD: parsed.nightlyUSD,
+    stayTotalUSD: parsed.stayTotalUSD,
+    checkIn: context.checkIn,
+    checkOut: context.checkOut,
+    nights: context.nights,
+    adults: context.adults,
+    rooms: context.rooms,
+    confidence: parsed.confidence,
+    method: parsed.method
+  }, metadata);
+  return { accepted: true, row, error: null };
+}
+
 async function markHotelPriceRefreshFailed(env, hotelID, source, errorText, options = {}) {
   const nowMs = Number(options.nowMs) || Date.now();
   const now = new Date(nowMs).toISOString();
@@ -3988,25 +4051,13 @@ async function refreshHotelPrice(env, hotelID, options = {}) {
       lastHTTPStatus = rendered.status;
       const parsed = extractHotelPriceFromHTML(rendered.html, provider, context.nights);
       if (parsed) {
-        const row = await saveNormalizedHotelPrice(env, hotelID, source, {
-          amountOriginal: parsed.amount,
-          currencyOriginal: parsed.currency,
-          priceBasis: parsed.priceBasis,
-          nightlyUSD: parsed.nightlyUSD,
-          stayTotalUSD: parsed.stayTotalUSD,
-          checkIn: context.checkIn,
-          checkOut: context.checkOut,
-          nights: context.nights,
-          adults: context.adults,
-          rooms: context.rooms,
-          confidence: parsed.confidence,
-          method: parsed.method
-        }, {
+        const committed = await commitRefreshedHotelPrice(env, hotelID, source, parsed, context, {
           resolvedURL: rendered.resolvedURL,
           method: `browser:${parsed.method}`,
           httpStatus: rendered.status
         });
-        return { ok: true, cached: false, price: row };
+        if (committed.accepted) return { ok: true, cached: false, price: committed.row };
+        return { ok: false, error: committed.error, price: committed.row };
       }
       lastError = 'NO_PRICE_IN_RENDERED_PAGE';
     } catch (error) {
@@ -4018,25 +4069,13 @@ async function refreshHotelPrice(env, hotelID, options = {}) {
       lastHTTPStatus = staticPage.status;
       const parsed = extractHotelPriceFromHTML(staticPage.html, provider, context.nights);
       if (parsed) {
-        const row = await saveNormalizedHotelPrice(env, hotelID, source, {
-          amountOriginal: parsed.amount,
-          currencyOriginal: parsed.currency,
-          priceBasis: parsed.priceBasis,
-          nightlyUSD: parsed.nightlyUSD,
-          stayTotalUSD: parsed.stayTotalUSD,
-          checkIn: context.checkIn,
-          checkOut: context.checkOut,
-          nights: context.nights,
-          adults: context.adults,
-          rooms: context.rooms,
-          confidence: parsed.confidence,
-          method: parsed.method
-        }, {
+        const committed = await commitRefreshedHotelPrice(env, hotelID, source, parsed, context, {
           resolvedURL: staticPage.resolvedURL,
           method: `static:${parsed.method}`,
           httpStatus: staticPage.status
         });
-        return { ok: true, cached: false, price: row };
+        if (committed.accepted) return { ok: true, cached: false, price: committed.row };
+        return { ok: false, error: committed.error, price: committed.row };
       }
       lastError = 'NO_PRICE_IN_STATIC_PAGE';
     } catch (error) {

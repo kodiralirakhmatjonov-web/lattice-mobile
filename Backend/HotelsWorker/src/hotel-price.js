@@ -8,11 +8,9 @@ const MONEY_TOKEN = '(?:US\\$|USD|\\$|SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?)';
 const AMOUNT_TOKEN = '([0-9]{1,3}(?:[ ,.]?[0-9]{3})*(?:[.,][0-9]{1,2})?|[0-9]{1,6}(?:[.,][0-9]{1,2})?)';
 
 export function buildHotelPriceProbeURLs(propertyURL, provider, nowMs = Date.now()) {
-  const base = propertyURL instanceof URL ? propertyURL : new URL(String(propertyURL));
-  const offsets = [14, 45];
+  const base = propertyURL instanceof URL ? new URL(propertyURL.toString()) : new URL(String(propertyURL));
   const out = [];
   const seen = new Set();
-  const dateFor = offset => new Date(nowMs + offset * 86400000).toISOString().slice(0, 10);
   const push = url => {
     const value = url.toString();
     if (!seen.has(value)) {
@@ -21,31 +19,54 @@ export function buildHotelPriceProbeURLs(propertyURL, provider, nowMs = Date.now
     }
   };
 
-  for (const offset of offsets) {
-    const checkIn = dateFor(offset);
-    const checkOut = dateFor(offset + HOTEL_PRICE_QUOTE_NIGHTS);
-    const url = new URL(base.toString());
-    if (provider === 'Booking') {
-      url.searchParams.set('checkin', checkIn);
-      url.searchParams.set('checkout', checkOut);
-      url.searchParams.set('group_adults', String(HOTEL_PRICE_QUOTE_ADULTS));
-      url.searchParams.set('group_children', '0');
-      url.searchParams.set('no_rooms', String(HOTEL_PRICE_QUOTE_ROOMS));
-      url.searchParams.set('selected_currency', 'USD');
-      push(url);
-    } else if (provider === 'Expedia') {
-      url.searchParams.set('chkin', checkIn);
-      url.searchParams.set('chkout', checkOut);
-      url.searchParams.set('rm1', 'a2');
-      url.searchParams.set('useRewards', 'false');
-      url.searchParams.set('currency', 'USD');
-      push(url);
-      const canonical = new URL(url.toString());
-      canonical.hostname = 'www.expedia.com';
-      push(canonical);
-    }
+  // First choice is always the exact source URL captured by the importer. This
+  // keeps refreshes tied to the same hotel page and the same search context the
+  // operator imported instead of silently switching the benchmark every cycle.
+  push(base);
+
+  const queryCheckIn = provider === 'Booking' ? base.searchParams.get('checkin') : base.searchParams.get('chkin');
+  const queryCheckOut = provider === 'Booking' ? base.searchParams.get('checkout') : base.searchParams.get('chkout');
+  const checkInMs = queryCheckIn ? Date.parse(`${queryCheckIn}T00:00:00Z`) : NaN;
+  const checkOutMs = queryCheckOut ? Date.parse(`${queryCheckOut}T00:00:00Z`) : NaN;
+  const exactContextUsable = Number.isFinite(checkInMs) && Number.isFinite(checkOutMs) && checkOutMs > Math.max(nowMs, checkInMs);
+
+  // Expedia regional links occasionally redirect differently on the browser
+  // service. Preserve every path/query parameter and only canonicalize the host.
+  if (provider === 'Expedia' && base.hostname !== 'www.expedia.com') {
+    const canonical = new URL(base.toString());
+    canonical.hostname = 'www.expedia.com';
+    push(canonical);
   }
-  return out.slice(0, 6);
+
+  if (exactContextUsable) return out.slice(0, 2);
+
+  // A timeless or expired property URL needs one deterministic rolling quote so
+  // the catalog can continue to refresh. We use ONE benchmark (14 days ahead,
+  // one night, 2 adults, 1 room); unlike the old implementation we do not probe
+  // multiple future dates and then accidentally accept whichever one is cheaper.
+  const dateFor = offset => new Date(nowMs + offset * 86400000).toISOString().slice(0, 10);
+  const checkIn = dateFor(14);
+  const checkOut = dateFor(14 + HOTEL_PRICE_QUOTE_NIGHTS);
+  const rolling = new URL(base.toString());
+  if (provider === 'Booking') {
+    rolling.searchParams.set('checkin', checkIn);
+    rolling.searchParams.set('checkout', checkOut);
+    rolling.searchParams.set('group_adults', String(HOTEL_PRICE_QUOTE_ADULTS));
+    rolling.searchParams.set('group_children', '0');
+    rolling.searchParams.set('no_rooms', String(HOTEL_PRICE_QUOTE_ROOMS));
+  } else if (provider === 'Expedia') {
+    rolling.searchParams.set('chkin', checkIn);
+    rolling.searchParams.set('chkout', checkOut);
+    rolling.searchParams.set('rm1', 'a2');
+    rolling.searchParams.set('useRewards', 'false');
+  }
+  push(rolling);
+  if (provider === 'Expedia' && rolling.hostname !== 'www.expedia.com') {
+    const canonicalRolling = new URL(rolling.toString());
+    canonicalRolling.hostname = 'www.expedia.com';
+    push(canonicalRolling);
+  }
+  return out.slice(0, 4);
 }
 
 export function quoteContextFromProbeURL(value, provider) {
@@ -53,18 +74,49 @@ export function quoteContextFromProbeURL(value, provider) {
     const url = value instanceof URL ? value : new URL(String(value));
     const checkIn = provider === 'Booking' ? url.searchParams.get('checkin') : url.searchParams.get('chkin');
     const checkOut = provider === 'Booking' ? url.searchParams.get('checkout') : url.searchParams.get('chkout');
+    const startMs = checkIn ? Date.parse(`${checkIn}T00:00:00Z`) : NaN;
+    const endMs = checkOut ? Date.parse(`${checkOut}T00:00:00Z`) : NaN;
+    const rawNights = Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.round((endMs - startMs) / 86400000) : HOTEL_PRICE_QUOTE_NIGHTS;
+    const nights = rawNights > 0 && rawNights <= 30 ? rawNights : HOTEL_PRICE_QUOTE_NIGHTS;
+
+    let adults = HOTEL_PRICE_QUOTE_ADULTS;
+    let rooms = HOTEL_PRICE_QUOTE_ROOMS;
+    if (provider === 'Booking') {
+      adults = Math.max(1, Number(url.searchParams.get('group_adults')) || HOTEL_PRICE_QUOTE_ADULTS);
+      rooms = Math.max(1, Number(url.searchParams.get('no_rooms')) || HOTEL_PRICE_QUOTE_ROOMS);
+    } else if (provider === 'Expedia') {
+      const rm1 = String(url.searchParams.get('rm1') || '');
+      const adultMatch = /a(\d+)/i.exec(rm1);
+      adults = Math.max(1, Number(adultMatch?.[1]) || Number(url.searchParams.get('adults')) || HOTEL_PRICE_QUOTE_ADULTS);
+      rooms = Math.max(1, Number(url.searchParams.get('rooms')) || HOTEL_PRICE_QUOTE_ROOMS);
+    }
+
     return {
       checkIn: checkIn || null,
       checkOut: checkOut || null,
-      nights: HOTEL_PRICE_QUOTE_NIGHTS,
-      adults: HOTEL_PRICE_QUOTE_ADULTS,
-      rooms: HOTEL_PRICE_QUOTE_ROOMS
+      nights,
+      adults,
+      rooms
     };
   } catch (_) {
     return { checkIn: null, checkOut: null, nights: HOTEL_PRICE_QUOTE_NIGHTS, adults: HOTEL_PRICE_QUOTE_ADULTS, rooms: HOTEL_PRICE_QUOTE_ROOMS };
   }
 }
 
+export function hotelPriceMoveNeedsConfirmation(previousUSD, nextUSD) {
+  const previous = Number(previousUSD);
+  const next = Number(nextUSD);
+  if (!Number.isFinite(previous) || previous <= 0 || !Number.isFinite(next) || next <= 0) return false;
+  const ratio = next / previous;
+  return ratio < 0.65 || ratio > 1.75;
+}
+
+export function hotelPriceCandidatesMatch(a, b) {
+  const first = Number(a);
+  const second = Number(b);
+  if (!Number.isFinite(first) || first <= 0 || !Number.isFinite(second) || second <= 0) return false;
+  return Math.abs(first - second) / Math.max(first, second) <= 0.08;
+}
 
 export function normalizeImportedHotelPriceSnapshot(snapshot) {
   const amount = Number(snapshot?.amount);
@@ -123,29 +175,33 @@ export function extractHotelPriceFromHTML(html, provider, nights = HOTEL_PRICE_Q
   collectGenericExplicitCandidates(readable, candidates, nights);
 
   const normalized = candidates
-    .map(candidate => normalizeCandidate(candidate, nights))
+    .map((candidate, sourceOrder) => {
+      const value = normalizeCandidate(candidate, nights);
+      return value ? { ...value, sourceOrder } : null;
+    })
     .filter(Boolean)
     .filter(candidate => candidate.nightlyUSD >= 15 && candidate.nightlyUSD <= 5000);
   if (!normalized.length) return null;
 
+  // Never use "lowest amount wins" here. Provider pages often contain savings,
+  // crossed-out prices and totals next to the real sellable nightly rate. Prefer
+  // the strongest extraction contract and then the first matching DOM occurrence.
   normalized.sort((a, b) => {
     if (Math.abs(b.confidence - a.confidence) > 0.001) return b.confidence - a.confidence;
-    if (a.nightlyUSD !== b.nightlyUSD) return a.nightlyUSD - b.nightlyUSD;
-    return String(a.method).localeCompare(String(b.method));
+    return a.sourceOrder - b.sourceOrder;
   });
 
-  const bestConfidence = normalized[0].confidence;
-  const trusted = normalized.filter(item => item.confidence >= bestConfidence - 0.025);
-  return trusted.sort((a, b) => a.nightlyUSD - b.nightlyUSD)[0] || normalized[0];
+  const { sourceOrder: _sourceOrder, ...best } = normalized[0];
+  return best;
 }
 
 function collectBookingCandidates(html, readable, out, nights) {
   for (const segment of extractTestIDSegments(html, ['price-for-x-nights'])) {
-    const money = firstMoney(segment);
+    const money = primaryDisplayMoney(segment);
     if (money) out.push({ ...money, basis: 'stay_total', confidence: 0.99, method: 'booking-price-for-x-nights' });
   }
   for (const segment of extractTestIDContexts(html, 'price-and-discounted-price')) {
-    const money = firstMoney(segment.element);
+    const money = primaryDisplayMoney(segment.element);
     if (!money) continue;
     const lower = htmlToReadableText(segment.context).toLowerCase();
     if (/per\s+night|nightly/.test(lower)) {
@@ -181,7 +237,7 @@ function collectExpediaCandidates(html, readable, out, nights) {
 
   const priceLockups = extractClassSegments(html, ['uitk-lockup-price', 'price-lockup-text', 'price-summary']);
   for (const segment of priceLockups) {
-    const money = firstMoney(segment);
+    const money = primaryDisplayMoney(segment);
     if (!money) continue;
     const lower = segment.toLowerCase();
     if (/per\s+night|nightly/.test(lower)) out.push({ ...money, basis: 'nightly', confidence: 0.96, method: 'expedia-price-lockup' });
@@ -265,6 +321,49 @@ function moneyFromRegexMatch(match) {
   return firstMoney(value);
 }
 
+function moneyTokens(value) {
+  const text = htmlToReadableText(String(value || '')).replace(/\u00a0/g, ' ');
+  const tokenPattern = new RegExp(`(${MONEY_TOKEN})\\s*${AMOUNT_TOKEN}|${AMOUNT_TOKEN}\\s*(${MONEY_TOKEN})`, 'gi');
+  const out = [];
+  let match;
+  while ((match = tokenPattern.exec(text)) !== null && out.length < 30) {
+    let amount = null;
+    let currency = null;
+    if (match[1]) {
+      currency = normalizeCurrency(match[1]);
+      amount = parseLocalizedAmount(match[2]);
+    } else {
+      amount = parseLocalizedAmount(match[3]);
+      currency = normalizeCurrency(match[4]);
+    }
+    if (!amount || !currency) continue;
+    out.push({ amount, currency, index: match.index, end: match.index + match[0].length, text });
+  }
+  return out;
+}
+
+function primaryDisplayMoney(value) {
+  const tokens = moneyTokens(value);
+  if (!tokens.length) return null;
+  const text = tokens[0].text;
+  const lower = text.toLowerCase();
+  const eligible = tokens.filter(item => {
+    const before = lower.slice(Math.max(0, item.index - 24), item.index);
+    const after = lower.slice(item.end, Math.min(lower.length, item.end + 28));
+    // Savings/credits are not room prices. Totals are kept separately from the
+    // nightly/base rate and therefore must not win the primary amount slot.
+    if (/(?:save|saving|discount|coupon|credit|reward)\s*$/.test(before)) return false;
+    if (/^\s*(?:total|tax(?:es)?|fees?|deposit|credit|saving)/.test(after)) return false;
+    return true;
+  });
+  const pool = eligible.length ? eligible : tokens;
+  // Provider lockups normally render old/struck price first and the active price
+  // immediately after it; taking the last non-total value reproduces the visible
+  // public sellable rate (e.g. 495 struck -> 421 -> 508 total => 421).
+  const chosen = pool[pool.length - 1];
+  return { amount: chosen.amount, currency: chosen.currency };
+}
+
 function firstMoney(value) {
   const text = htmlToReadableText(String(value || ''));
   const before = new RegExp(`(${MONEY_TOKEN})\\s*${AMOUNT_TOKEN}`, 'i').exec(text);
@@ -295,12 +394,36 @@ function extractTestIDContexts(html, testID) {
   return out;
 }
 
+function extractBalancedElement(html, openingIndex, tagName, maxLength = 2400) {
+  const source = String(html || '');
+  const tag = escapeRegExp(String(tagName || '').toLowerCase());
+  if (!tag) return '';
+  const limit = Math.min(source.length, openingIndex + maxLength);
+  const slice = source.slice(openingIndex, limit);
+  const pattern = new RegExp(`<\\/?${tag}\\b[^>]*>`, 'gi');
+  let depth = 0;
+  let match;
+  while ((match = pattern.exec(slice)) !== null) {
+    const closing = /^<\//.test(match[0]);
+    const selfClosing = /\/\s*>$/.test(match[0]);
+    if (!closing) {
+      if (!selfClosing) depth += 1;
+    } else {
+      depth -= 1;
+      if (depth === 0) return slice.slice(0, match.index + match[0].length);
+    }
+  }
+  return slice;
+}
+
 function extractTestIDSegments(html, testIDs) {
   const out = [];
   for (const id of testIDs) {
-    const pattern = new RegExp(`<[^>]+data-testid=["']${escapeRegExp(id)}["'][^>]*>[\\s\\S]{0,900}?</[^>]+>`, 'gi');
+    const pattern = new RegExp(`<([a-z0-9]+)[^>]+data-testid=["']${escapeRegExp(id)}["'][^>]*>`, 'gi');
     let match;
-    while ((match = pattern.exec(html)) !== null && out.length < 100) out.push(match[0]);
+    while ((match = pattern.exec(html)) !== null && out.length < 100) {
+      out.push(extractBalancedElement(html, match.index, match[1], 2400));
+    }
   }
   return out;
 }
@@ -308,9 +431,11 @@ function extractTestIDSegments(html, testIDs) {
 function extractClassSegments(html, classNames) {
   const out = [];
   for (const name of classNames) {
-    const pattern = new RegExp(`<[^>]+class=["'][^"']*${escapeRegExp(name)}[^"']*["'][^>]*>[\\s\\S]{0,1200}?</[^>]+>`, 'gi');
+    const pattern = new RegExp(`<([a-z0-9]+)[^>]+class=["'][^"']*${escapeRegExp(name)}[^"']*["'][^>]*>`, 'gi');
     let match;
-    while ((match = pattern.exec(html)) !== null && out.length < 100) out.push(match[0]);
+    while ((match = pattern.exec(html)) !== null && out.length < 100) {
+      out.push(extractBalancedElement(html, match.index, match[1], 2600));
+    }
   }
   return out;
 }
