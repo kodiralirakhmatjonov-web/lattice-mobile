@@ -22,6 +22,7 @@ struct BusinessFlightCurationSearchRequest: Encodable {
     let cabinClass: String
     let airlinesInclude: [String]
     let allowSelfTransfer: Bool
+    let curationMode: String
 
     enum CodingKeys: String, CodingKey {
         case legs, adults, children
@@ -30,6 +31,7 @@ struct BusinessFlightCurationSearchRequest: Encodable {
         case cabinClass = "cabin_class"
         case airlinesInclude = "airlines_include"
         case allowSelfTransfer = "allow_self_transfer"
+        case curationMode = "curation_mode"
     }
 }
 
@@ -40,6 +42,10 @@ struct BusinessFlightCurationSearchResponse: Decodable {
         let rawItinerariesByLeg: [Int]?
         let usableItinerariesByLeg: [Int]?
         let broadAirlineFallbackByLeg: [Bool]?
+        let roundTripAvailable: Bool?
+        let dedicatedRoundTripRaw: Int?
+        let dedicatedRoundTripCount: Int?
+        let pairedOneWayCount: Int?
 
         enum CodingKeys: String, CodingKey {
             case mode
@@ -47,6 +53,10 @@ struct BusinessFlightCurationSearchResponse: Decodable {
             case rawItinerariesByLeg = "raw_itineraries_by_leg"
             case usableItinerariesByLeg = "usable_itineraries_by_leg"
             case broadAirlineFallbackByLeg = "broad_airline_fallback_by_leg"
+            case roundTripAvailable = "round_trip_available"
+            case dedicatedRoundTripRaw = "dedicated_round_trip_raw"
+            case dedicatedRoundTripCount = "dedicated_round_trip_count"
+            case pairedOneWayCount = "paired_one_way_count"
         }
     }
 
@@ -100,6 +110,8 @@ struct BusinessFlightCurationItinerary: Codable, Identifiable, Hashable {
     let legs: [Leg]
     let cabinClass: String
     let ignavId: String?
+    let offerType: String?
+    let journeyRole: String?
 
     enum CodingKeys: String, CodingKey {
         case id, source, price, legs
@@ -108,6 +120,32 @@ struct BusinessFlightCurationItinerary: Codable, Identifiable, Hashable {
         case fareScope = "fare_scope"
         case cabinClass = "cabin_class"
         case ignavId = "ignav_id"
+        case offerType = "offer_type"
+        case journeyRole = "journey_role"
+    }
+
+    var effectiveOfferType: String {
+        if let offerType, !offerType.isEmpty { return offerType }
+        return legs.count == 1 ? "one_way" : "paired_one_way"
+    }
+
+    var effectiveJourneyRole: String {
+        if let journeyRole, !journeyRole.isEmpty { return journeyRole }
+        return effectiveOfferType == "one_way" ? "outbound" : "complete"
+    }
+
+    var publicationIdentity: String {
+        let legKeys = legs.map { leg in
+            [
+                leg.airlineCode.uppercased(),
+                leg.flightNumber.uppercased().replacingOccurrences(of: " ", with: ""),
+                leg.origin.uppercased(),
+                leg.destination.uppercased(),
+                leg.departureAt,
+                leg.arrivalAt
+            ].joined(separator: ":")
+        }
+        return ([effectiveOfferType, effectiveJourneyRole] + legKeys).joined(separator: "|")
     }
 
     var primaryAirlineCode: String? { legs.first?.airlineCode }
@@ -134,6 +172,26 @@ struct BusinessCuratedFlightOffer: Decodable, Identifiable, Hashable {
     let observedAt: String
     let published: Bool
     let priority: Int
+    let offerType: String?
+    let journeyRole: String?
+    let fingerprint: String?
+
+    var publicationIdentity: String {
+        guard let itinerary else { return sourceCandidateID }
+        let type = (offerType?.isEmpty == false ? offerType! : itinerary.effectiveOfferType)
+        let role = (journeyRole?.isEmpty == false ? journeyRole! : itinerary.effectiveJourneyRole)
+        let legKeys = itinerary.legs.map { leg in
+            [
+                leg.airlineCode.uppercased(),
+                leg.flightNumber.uppercased().replacingOccurrences(of: " ", with: ""),
+                leg.origin.uppercased(),
+                leg.destination.uppercased(),
+                leg.departureAt,
+                leg.arrivalAt
+            ].joined(separator: ":")
+        }
+        return ([type, role] + legKeys).joined(separator: "|")
+    }
 }
 
 struct BusinessCuratedFlightsResponse: Decodable {

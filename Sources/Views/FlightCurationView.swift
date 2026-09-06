@@ -3,6 +3,31 @@ import SwiftUI
 struct FlightCurationView: View {
     @Environment(\.dismiss) private var dismiss
 
+    private enum SearchMode: String, CaseIterable, Identifiable {
+        case outbound
+        case inbound
+        case roundTrip
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .outbound: return "Туда"
+            case .inbound: return "Обратно"
+            case .roundTrip: return "Туда-обратно"
+            }
+        }
+
+        var apiValue: String {
+            switch self {
+            case .outbound: return "outbound_one_way"
+            case .inbound: return "return_one_way"
+            case .roundTrip: return "round_trip"
+            }
+        }
+    }
+
+    @State private var searchMode: SearchMode = .roundTrip
     @State private var outboundOrigin = "TAS"
     @State private var outboundDestination = "JED"
     @State private var inboundOrigin = "MED"
@@ -20,6 +45,7 @@ struct FlightCurationView: View {
     @State private var searchDiagnostics: BusinessFlightCurationSearchResponse.Diagnostics?
 
     private let api = APIClient.shared
+
     private struct AirlineFilter: Identifiable {
         let code: String
         let name: String
@@ -45,7 +71,7 @@ struct FlightCurationView: View {
                 searchButton
 
                 if isSearching {
-                    ProgressView("Ищем прямые рейсы…")
+                    ProgressView(searchProgressText)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 28)
                 } else if !results.isEmpty {
@@ -68,6 +94,11 @@ struct FlightCurationView: View {
             }
         }
         .task { await loadPublished() }
+        .onChange(of: searchMode) { _, _ in
+            results = []
+            hasSearched = false
+            searchDiagnostics = nil
+        }
         .alert("Не удалось выполнить действие", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -80,10 +111,10 @@ struct FlightCurationView: View {
 
     private var intro: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Рекомендованные прямые рейсы")
+            Text("Поиск и публикация рейсов")
                 .font(.system(size: 26, weight: .bold))
                 .tracking(-0.6)
-            Text("Поиск идёт через Ignav. Цена и себестоимость остаются только в Business. Опубликованные рейсы появляются у паломника как актуальные прямые варианты без показа цены.")
+            Text("Три режима поиска: отдельный рейс туда, отдельный рейс обратно или полный маршрут. В режиме «Туда-обратно» Business отдельно помечает настоящий round-trip Ignav и комбинацию ONE WAY + RETURN, которую собрала система.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -93,25 +124,43 @@ struct FlightCurationView: View {
 
     private var routeCard: some View {
         VStack(spacing: 16) {
-            HStack(spacing: 12) {
-                airportField("Откуда", text: $outboundOrigin)
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.secondary)
-                airportField("Куда", text: $outboundDestination)
+            Picker("Тип поиска", selection: $searchMode) {
+                ForEach(SearchMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if searchMode == .outbound || searchMode == .roundTrip {
+                HStack(spacing: 12) {
+                    airportField("Откуда", text: $outboundOrigin)
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.secondary)
+                    airportField("Куда", text: $outboundDestination)
+                }
+
+                DatePicker("Вылет", selection: $departureDate, in: Date()..., displayedComponents: .date)
             }
 
-            DatePicker("Вылет", selection: $departureDate, in: Date()..., displayedComponents: .date)
-
-            Divider()
-
-            HStack(spacing: 12) {
-                airportField("Обратно из", text: $inboundOrigin)
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.secondary)
-                airportField("Возврат", text: $inboundDestination)
+            if searchMode == .roundTrip {
+                Divider()
             }
 
-            DatePicker("Возврат", selection: $returnDate, in: max(departureDate, Date())..., displayedComponents: .date)
+            if searchMode == .inbound || searchMode == .roundTrip {
+                HStack(spacing: 12) {
+                    airportField("Обратно из", text: $inboundOrigin)
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.secondary)
+                    airportField("Возврат", text: $inboundDestination)
+                }
+
+                DatePicker(
+                    searchMode == .inbound ? "Дата" : "Возврат",
+                    selection: $returnDate,
+                    in: searchMode == .roundTrip ? max(departureDate, Date())... : Date()...,
+                    displayedComponents: .date
+                )
+            }
 
             Stepper("Паломники: \(adults)", value: $adults, in: 1...9)
 
@@ -123,18 +172,36 @@ struct FlightCurationView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
             }
+
+            if searchMode == .roundTrip {
+                HStack(alignment: .top, spacing: 9) {
+                    Image(systemName: isExactReverseRoute ? "checkmark.seal.fill" : "info.circle.fill")
+                        .foregroundStyle(isExactReverseRoute ? Color.green : Color.orange)
+                    Text(roundTripRouteNote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            }
         }
         .padding(18)
         .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
         .onChange(of: departureDate) { _, newValue in
-            if returnDate < newValue { returnDate = Calendar.current.date(byAdding: .day, value: 7, to: newValue) ?? newValue }
+            if returnDate < newValue {
+                returnDate = Calendar.current.date(byAdding: .day, value: 7, to: newValue) ?? newValue
+            }
         }
     }
 
     private func airportField(_ title: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextField("TAS", text: text)
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
@@ -171,7 +238,11 @@ struct FlightCurationView: View {
                                     Text(airline.code).font(.caption.bold())
                                     Text(airline.name).font(.caption2).lineLimit(1)
                                 }
-                                if selected { Image(systemName: "checkmark.circle.fill").font(.caption).foregroundStyle(.green) }
+                                if selected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(.green)
+                                }
                             }
                             .foregroundStyle(.primary)
                             .padding(.horizontal, 10)
@@ -192,10 +263,15 @@ struct FlightCurationView: View {
         } label: {
             HStack {
                 Image(systemName: "magnifyingglass")
-                Text("Найти прямые рейсы")
+                Text(searchButtonTitle)
                     .fontWeight(.semibold)
                 Spacer()
-                if !selectedAirlines.isEmpty { Text("\(selectedAirlines.count)").font(.caption.bold()).padding(7).background(.white.opacity(0.18), in: Circle()) }
+                if !selectedAirlines.isEmpty {
+                    Text("\(selectedAirlines.count)")
+                        .font(.caption.bold())
+                        .padding(7)
+                        .background(.white.opacity(0.18), in: Circle())
+                }
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 18)
@@ -210,27 +286,31 @@ struct FlightCurationView: View {
     private var emptySearchState: some View {
         let usable = searchDiagnostics?.usableItinerariesByLeg ?? []
         let raw = searchDiagnostics?.rawItinerariesByLeg ?? []
-        let outboundUsable = usable.indices.contains(0) ? usable[0] : 0
-        let inboundUsable = usable.indices.contains(1) ? usable[1] : 0
-        let outboundRaw = raw.indices.contains(0) ? raw[0] : 0
-        let inboundRaw = raw.indices.contains(1) ? raw[1] : 0
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "airplane.circle")
                     .font(.title3)
-                Text("Подходящей пары пока нет")
+                Text("Подходящих рейсов пока нет")
                     .font(.headline)
             }
 
-            Text("Ignav проверил оба участка отдельно: \(outboundOrigin) → \(outboundDestination) и \(inboundOrigin) → \(inboundDestination).")
+            Text(emptySearchDescription)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             if searchDiagnostics != nil {
-                Text("Получено от провайдера: \(outboundRaw) / \(inboundRaw). Подошло после проверки прямого рейса и авиакомпании: \(outboundUsable) / \(inboundUsable).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if searchMode == .roundTrip {
+                    let roundTrips = searchDiagnostics?.dedicatedRoundTripCount ?? 0
+                    let pairs = searchDiagnostics?.pairedOneWayCount ?? 0
+                    Text("Готовых round-trip Ignav: \(roundTrips). Комбинаций ONE WAY + RETURN: \(pairs). Отдельные участки от провайдера: \(raw.map(String.init).joined(separator: " / ")).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Получено от провайдера: \(raw.first ?? 0). Подошло после проверки прямого рейса и авиакомпании: \(usable.first ?? 0).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(17)
@@ -249,16 +329,29 @@ struct FlightCurationView: View {
                     .font(.caption.bold())
                     .foregroundStyle(.secondary)
             }
-            ForEach(results.prefix(20)) { itinerary in
+
+            if searchMode == .roundTrip, isExactReverseRoute {
+                Text("Список отсортирован по полной цене. Смотрите метку на карточке: настоящий тариф туда-обратно Ignav и сумма двух отдельных one-way — разные продукты.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ForEach(results.prefix(30)) { itinerary in
                 resultCard(itinerary)
             }
         }
     }
 
     private func resultCard(_ itinerary: BusinessFlightCurationItinerary) -> some View {
-        let alreadyPublished = published.contains { $0.sourceCandidateID == itinerary.id }
+        let alreadyPublished = published.contains { offer in
+            offer.publicationIdentity == itinerary.publicationIdentity || offer.sourceCandidateID == itinerary.id
+        }
         let total = itinerary.price.amount
         let perTraveler = total / Double(max(adults, 1))
+        let badge = fareKindLabel(itinerary)
+        let badgeColor = fareKindColor(itinerary)
+
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 BusinessAirlineLogoView(airlineIATA: itinerary.primaryAirlineCode, size: 44)
@@ -278,6 +371,13 @@ struct FlightCurationView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Label(badge, systemImage: fareKindIcon(itinerary))
+                .font(.caption.weight(.bold))
+                .foregroundStyle(badgeColor)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 29)
+                .background(badgeColor.opacity(0.10), in: Capsule())
 
             if itinerary.price.status?.lowercased() == "unverified" {
                 Label("Ориентировочная цена Ignav — рейс найден, но тариф ещё не подтверждён при booking lookup.", systemImage: "info.circle")
@@ -305,7 +405,7 @@ struct FlightCurationView: View {
             } label: {
                 HStack {
                     Image(systemName: alreadyPublished ? "checkmark.circle.fill" : "plus.circle.fill")
-                    Text(alreadyPublished ? "Опубликован" : "Опубликовать в iumrah")
+                    Text(alreadyPublished ? "Уже опубликовано" : "Опубликовать в iumrah")
                     Spacer()
                 }
                 .font(.subheadline.weight(.semibold))
@@ -328,11 +428,15 @@ struct FlightCurationView: View {
                 Text("Опубликованные рейсы")
                     .font(.title3.bold())
                 Spacer()
-                if !published.isEmpty { Text("\(published.count)").font(.caption.bold()).foregroundStyle(.secondary) }
+                if !published.isEmpty {
+                    Text("\(published.count)")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if published.isEmpty {
-                Text("Пока ничего не опубликовано. Выберите подходящий результат поиска — он появится в клиентском календаре и блоке актуальных прямых рейсов.")
+                Text("Пока ничего не опубликовано. Выберите подходящий результат — он появится в клиентском блоке актуальных рейсов.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(17)
@@ -342,13 +446,18 @@ struct FlightCurationView: View {
                 ForEach(published) { offer in
                     HStack(spacing: 12) {
                         BusinessAirlineLogoView(airlineIATA: offer.airlineCodes.first, size: 42)
-                        VStack(alignment: .leading, spacing: 3) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(offer.airlineNames.first ?? offer.airlineCodes.first ?? "Рейс")
                                 .font(.subheadline.weight(.semibold))
+                            Text(publishedKindLabel(offer))
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(publishedKindColor(offer))
                             Text("\(offer.outboundOrigin) → \(offer.outboundDestination) · \(displayDate(offer.outboundDate))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            if let inboundDate = offer.inboundDate, let inboundOrigin = offer.inboundOrigin, let inboundDestination = offer.inboundDestination {
+                            if let inboundDate = offer.inboundDate,
+                               let inboundOrigin = offer.inboundOrigin,
+                               let inboundDestination = offer.inboundDestination {
                                 Text("\(inboundOrigin) → \(inboundDestination) · \(displayDate(inboundDate))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -380,9 +489,54 @@ struct FlightCurationView: View {
     }
 
     private var canSearch: Bool {
-        [outboundOrigin, outboundDestination, inboundOrigin, inboundDestination].allSatisfy { $0.count == 3 }
-        && departureDate <= returnDate
-        && !selectedAirlines.isEmpty
+        guard !selectedAirlines.isEmpty else { return false }
+        switch searchMode {
+        case .outbound:
+            return outboundOrigin.count == 3 && outboundDestination.count == 3
+        case .inbound:
+            return inboundOrigin.count == 3 && inboundDestination.count == 3
+        case .roundTrip:
+            return [outboundOrigin, outboundDestination, inboundOrigin, inboundDestination].allSatisfy { $0.count == 3 }
+                && departureDate <= returnDate
+        }
+    }
+
+    private var isExactReverseRoute: Bool {
+        outboundOrigin == inboundDestination && outboundDestination == inboundOrigin
+    }
+
+    private var roundTripRouteNote: String {
+        if isExactReverseRoute {
+            return "Маршрут зеркальный. Business сравнит настоящий round-trip тариф Ignav с нашей суммой ONE WAY + RETURN."
+        }
+        return "Это open-jaw маршрут. У Ignav нет единого round-trip тарифа для разных аэропортов возврата, поэтому здесь будет только чётко помеченная комбинация ONE WAY + RETURN."
+    }
+
+    private var searchButtonTitle: String {
+        switch searchMode {
+        case .outbound: return "Найти рейсы туда"
+        case .inbound: return "Найти рейсы обратно"
+        case .roundTrip: return "Сравнить туда-обратно"
+        }
+    }
+
+    private var searchProgressText: String {
+        switch searchMode {
+        case .outbound: return "Ищем прямые рейсы туда…"
+        case .inbound: return "Ищем прямые рейсы обратно…"
+        case .roundTrip: return "Сравниваем варианты туда-обратно…"
+        }
+    }
+
+    private var emptySearchDescription: String {
+        switch searchMode {
+        case .outbound:
+            return "Ignav не вернул подходящий прямой рейс \(outboundOrigin) → \(outboundDestination) на выбранную дату."
+        case .inbound:
+            return "Ignav не вернул подходящий прямой рейс \(inboundOrigin) → \(inboundDestination) на выбранную дату."
+        case .roundTrip:
+            return "Для \(outboundOrigin) → \(outboundDestination) и \(inboundOrigin) → \(inboundDestination) подходящего полного варианта пока нет."
+        }
     }
 
     @MainActor
@@ -391,19 +545,36 @@ struct FlightCurationView: View {
         isSearching = true
         errorMessage = nil
         defer { isSearching = false }
-        let request = BusinessFlightCurationSearchRequest(
-            legs: [
+
+        let legs: [BusinessFlightCurationSearchRequest.Leg]
+        switch searchMode {
+        case .outbound:
+            legs = [
+                .init(origin: outboundOrigin, destination: outboundDestination, departureDate: Self.apiDay.string(from: departureDate), maxStops: 0)
+            ]
+        case .inbound:
+            legs = [
+                .init(origin: inboundOrigin, destination: inboundDestination, departureDate: Self.apiDay.string(from: returnDate), maxStops: 0)
+            ]
+        case .roundTrip:
+            legs = [
                 .init(origin: outboundOrigin, destination: outboundDestination, departureDate: Self.apiDay.string(from: departureDate), maxStops: 0),
                 .init(origin: inboundOrigin, destination: inboundDestination, departureDate: Self.apiDay.string(from: returnDate), maxStops: 0)
-            ],
+            ]
+        }
+
+        let request = BusinessFlightCurationSearchRequest(
+            legs: legs,
             adults: adults,
             children: 0,
             infantsInSeat: 0,
             infantsOnLap: 0,
             cabinClass: "economy",
             airlinesInclude: selectedAirlines.sorted(),
-            allowSelfTransfer: false
+            allowSelfTransfer: false,
+            curationMode: searchMode.apiValue
         )
+
         do {
             let response = try await api.searchFlightsForCuration(request)
             results = response.itineraries
@@ -445,6 +616,52 @@ struct FlightCurationView: View {
         }
     }
 
+    private func fareKindLabel(_ itinerary: BusinessFlightCurationItinerary) -> String {
+        switch itinerary.effectiveOfferType {
+        case "round_trip":
+            return "ТУДА-ОБРАТНО · ЕДИНЫЙ ТАРИФ IGNAV"
+        case "paired_one_way":
+            return "ONE WAY + RETURN · СУММА 2 БИЛЕТОВ"
+        default:
+            return itinerary.effectiveJourneyRole == "return" ? "ONE WAY · ОБРАТНО" : "ONE WAY · ТУДА"
+        }
+    }
+
+    private func fareKindIcon(_ itinerary: BusinessFlightCurationItinerary) -> String {
+        switch itinerary.effectiveOfferType {
+        case "round_trip": return "arrow.left.arrow.right.circle.fill"
+        case "paired_one_way": return "plus.circle.fill"
+        default: return "arrow.right.circle.fill"
+        }
+    }
+
+    private func fareKindColor(_ itinerary: BusinessFlightCurationItinerary) -> Color {
+        switch itinerary.effectiveOfferType {
+        case "round_trip": return .green
+        case "paired_one_way": return .orange
+        default: return .blue
+        }
+    }
+
+    private func publishedKindLabel(_ offer: BusinessCuratedFlightOffer) -> String {
+        let type = offer.offerType ?? offer.itinerary?.effectiveOfferType ?? "paired_one_way"
+        let role = offer.journeyRole ?? offer.itinerary?.effectiveJourneyRole ?? "complete"
+        switch type {
+        case "round_trip": return "ТУДА-ОБРАТНО · IGNAV"
+        case "paired_one_way": return "ONE WAY + RETURN"
+        default: return role == "return" ? "ONE WAY · ОБРАТНО" : "ONE WAY · ТУДА"
+        }
+    }
+
+    private func publishedKindColor(_ offer: BusinessCuratedFlightOffer) -> Color {
+        let type = offer.offerType ?? offer.itinerary?.effectiveOfferType ?? "paired_one_way"
+        switch type {
+        case "round_trip": return .green
+        case "paired_one_way": return .orange
+        default: return .blue
+        }
+    }
+
     private func money(_ value: Double, currency: String) -> String {
         let code = currency.uppercased()
         if code == "USD" { return "$\(Int(value.rounded()))" }
@@ -465,8 +682,6 @@ struct FlightCurationView: View {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
         f.locale = Locale(identifier: "en_US_POSIX")
-        // DatePicker represents a civil calendar day. Formatting it in UTC can
-        // shift the selected date for users in positive-offset time zones.
         f.timeZone = .current
         f.dateFormat = "yyyy-MM-dd"
         return f
