@@ -104,6 +104,9 @@ struct BusinessFlightCurationItinerary: Codable, Identifiable, Hashable {
     let id: String
     let source: String?
     let sourceName: String?
+    let sourceURL: String?
+    let sourcePublishedAt: String?
+    let priceType: String?
     let observedAt: String
     let fareScope: String?
     let price: Price
@@ -116,6 +119,9 @@ struct BusinessFlightCurationItinerary: Codable, Identifiable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id, source, price, legs
         case sourceName = "source_name"
+        case sourceURL = "source_url"
+        case sourcePublishedAt = "source_published_at"
+        case priceType = "price_type"
         case observedAt = "observed_at"
         case fareScope = "fare_scope"
         case cabinClass = "cabin_class"

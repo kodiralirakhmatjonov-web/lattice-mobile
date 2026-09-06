@@ -696,7 +696,7 @@ struct FlightCurationView: View {
             }
 
             HStack(spacing: 8) {
-                Label(itinerary.price.status == "package" ? "Цена пакета" : "Цена билета", systemImage: "banknote")
+                Label(itinerary.priceType == "package" ? "Цена пакета" : "Цена билета", systemImage: "banknote")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
 
@@ -718,7 +718,7 @@ struct FlightCurationView: View {
 
                 Spacer()
 
-                if let source = itinerary.source, let url = URL(string: source), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                if let url = charterSourceURL(itinerary) {
                     Link(destination: url) {
                         Label("Источник", systemImage: "arrow.up.right.square")
                             .font(.caption2.bold())
@@ -1114,9 +1114,8 @@ struct FlightCurationView: View {
                         }
 
                         if offer.itinerary?.fareScope?.lowercased() == "charter",
-                           let source = offer.itinerary?.source,
-                           let url = URL(string: source),
-                           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                           let itinerary = offer.itinerary,
+                           let url = charterSourceURL(itinerary) {
                             HStack(spacing: 6) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.yellow)
@@ -1757,11 +1756,14 @@ struct FlightCurationView: View {
             let generatedID = sourceID?.isEmpty == false ? sourceID! : "charter-\(identity.hashValue.magnitude)"
             parsed.append(BusinessFlightCurationItinerary(
                 id: generatedID,
-                source: sourceURL,
+                source: "charter",
                 sourceName: sourceName,
+                sourceURL: sourceURL,
+                sourcePublishedAt: normalizedObservedAt(input.source.publishedAt),
+                priceType: priceType,
                 observedAt: observedAt,
                 fareScope: "charter",
-                price: .init(amount: input.price.amount, currency: currency, status: priceType),
+                price: .init(amount: input.price.amount, currency: currency, status: "unverified"),
                 legs: [
                     .init(
                         airline: airlineName,
@@ -1845,6 +1847,18 @@ struct FlightCurationView: View {
         if !failures.isEmpty {
             errorMessage = failures.prefix(3).joined(separator: "\n")
         }
+    }
+
+    private func charterSourceURL(_ itinerary: BusinessFlightCurationItinerary) -> URL? {
+        let candidates = [itinerary.sourceURL, itinerary.source]
+        for raw in candidates {
+            guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  let url = URL(string: raw),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { continue }
+            return url
+        }
+        return nil
     }
 
     private var canSearch: Bool {

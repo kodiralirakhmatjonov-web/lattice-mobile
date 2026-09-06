@@ -71,7 +71,7 @@ Optional fields:
 
 - `id` — stable human-readable source ID. If omitted, Business generates an internal ID for that import;
 - `direction` — `outbound` or `return`; defaults to `outbound`;
-- `price.type` — normally `seat`; stored in the itinerary price status;
+- `price.type` — normally `seat`; stored separately as `price_type`. It is **not** used as backend verification status;
 - `source.published_at` — ISO 8601 timestamp (or `YYYY-MM-DD`) for when the source was published/observed;
 - `cabin_class` — defaults to `economy`.
 
@@ -96,11 +96,14 @@ The charter is converted to the existing `BusinessFlightCurationItinerary` contr
 - `fare_scope = charter`
 - `offer_type = one_way`
 - `journey_role = outbound` or `return`
-- `source = source.url`
+- `source = charter`
 - `source_name = source.name`
+- `source_url = source.url`
+- `source_published_at = source.published_at` when provided
 - `price.amount = price.amount`
 - `price.currency = price.currency`
-- `price.status = price.type`
+- `price.status = unverified` (required by the existing curated-flight validation contract for a non-scheduled charter)
+- `price_type = price.type` (`seat`, `package`, etc.)
 - `ignav_id = null`
 - `legs[0]` contains airline, flight number, airports, exact timestamps, calculated duration, `stops = 0`, and cabin class.
 
@@ -130,3 +133,16 @@ The resulting itinerary is published through the same curated-flight endpoint al
 - Charter JSON with a departure date earlier than the current calendar day is rejected before publication.
 - When the Business flight screen loads or the app returns to the foreground, it loads the existing published-flight list, finds offers whose `outbound_date` is earlier than today, and deletes them through the existing curated-flight DELETE endpoint. This removes those rows through the same backend deletion path already used by the manual trash action.
 - This patch does not add or replace a Cloudflare/D1 flight backend. It deliberately reuses the existing curated-flight API.
+
+## v4 publication contract fix
+
+The curated-flight backend reserves `price.status` for verification state and accepts only `verified` / `unverified`. Earlier charter import incorrectly sent `seat` in this field, which caused `INVALID_CURATED_ITINERARY` for every charter.
+
+v4 fixes this without changing the regular Ignav flow:
+
+- charter price verification status is sent as `unverified`;
+- `seat` / `package` is retained separately in `price_type`;
+- source provider is stored as `charter`;
+- the full source link is stored internally as `source_url` instead of being squeezed into the short provider field;
+- `source_published_at` is retained for auditability;
+- public customer recommendations continue to omit supplier/source metadata and supplier fares.
