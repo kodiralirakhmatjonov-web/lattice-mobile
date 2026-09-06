@@ -3,6 +3,7 @@ import SwiftUI
 
 struct FlightCurationView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     private enum SearchMode: String, CaseIterable, Identifiable {
         case outbound
@@ -31,13 +32,15 @@ struct FlightCurationView: View {
     private enum SearchWorkspace: String, CaseIterable, Identifiable {
         case manual
         case bulk
+        case charter
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .manual: return "Один поиск"
-            case .bulk: return "Массовый JSON"
+            case .bulk: return "Массовый"
+            case .charter: return "Чартеры"
             }
         }
     }
@@ -124,6 +127,102 @@ struct FlightCurationView: View {
         }
     }
 
+    private struct CharterJSONEnvelope: Decodable {
+        struct Flight: Decodable {
+            struct Airline: Decodable {
+                let name: String
+                let iata: String
+            }
+
+            struct Price: Decodable {
+                let amount: Double
+                let currency: String
+                let type: String?
+            }
+
+            struct Source: Decodable {
+                let name: String
+                let url: String
+                let publishedAt: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case name, url
+                    case publishedAt = "published_at"
+                }
+            }
+
+            let id: String?
+            let direction: String?
+            let from: String
+            let to: String
+            let airline: Airline
+            let flightNumber: String
+            let departureAt: String
+            let arrivalAt: String
+            let price: Price
+            let source: Source
+            let cabinClass: String?
+
+            enum CodingKeys: String, CodingKey {
+                case id, direction, from, to, airline, price, source
+                case flightNumber = "flight_number"
+                case departureAt = "departure_at"
+                case arrivalAt = "arrival_at"
+                case cabinClass = "cabin_class"
+            }
+        }
+
+        let type: String?
+        let flights: [Flight]
+    }
+
+    private enum CharterJSONError: LocalizedError {
+        case invalidJSON
+        case unsupportedType
+        case empty
+        case tooMany(Int)
+        case invalidDirection(String)
+        case invalidAirport(String)
+        case invalidAirlineCode(String)
+        case invalidFlightNumber(String)
+        case invalidTimestamp(String)
+        case expiredFlight(String)
+        case invalidPrice
+        case invalidCurrency(String)
+        case invalidSourceURL(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidJSON:
+                return "JSON чартеров не удалось прочитать. Проверьте структуру flights, кавычки и запятые."
+            case .unsupportedType:
+                return "Для этой вкладки используйте type: charter."
+            case .empty:
+                return "В JSON нет чартерных рейсов."
+            case .tooMany(let count):
+                return "За один импорт можно сформировать максимум 50 чартерных карточек. Сейчас: \(count)."
+            case .invalidDirection(let value):
+                return "Неизвестное direction: \(value). Используйте outbound или return."
+            case .invalidAirport(let value):
+                return "Некорректный IATA-код аэропорта: \(value). Нужны ровно 3 латинские буквы."
+            case .invalidAirlineCode(let value):
+                return "Некорректный IATA-код авиакомпании: \(value). Нужны 2 буквы/цифры."
+            case .invalidFlightNumber(let value):
+                return "Некорректный номер рейса: \(value)."
+            case .invalidTimestamp(let value):
+                return "Некорректные дата/время: \(value). Используйте ISO 8601 с часовым поясом, например 2026-09-09T15:40:00+05:00."
+            case .expiredFlight(let value):
+                return "Чартер \(value) уже в прошлом. Прошедшие рейсы нельзя импортировать или публиковать."
+            case .invalidPrice:
+                return "Цена чартерного билета должна быть больше 0."
+            case .invalidCurrency(let value):
+                return "Некорректная валюта: \(value). Используйте трёхбуквенный код, например USD."
+            case .invalidSourceURL(let value):
+                return "Некорректная ссылка источника: \(value). Нужна полная http/https ссылка."
+            }
+        }
+    }
+
     @State private var workspace: SearchWorkspace = .manual
     @State private var searchMode: SearchMode = .roundTrip
     @State private var outboundOrigin = "TAS"
@@ -147,6 +246,10 @@ struct FlightCurationView: View {
     @State private var selectedBatchResultKeys: Set<String> = []
     @State private var isBatchSearching = false
     @State private var isBatchPublishing = false
+    @State private var charterJSON = ""
+    @State private var charterResults: [BusinessFlightCurationItinerary] = []
+    @State private var selectedCharterIDs: Set<String> = []
+    @State private var isCharterPublishing = false
 
     private let api = APIClient.shared
 
@@ -188,13 +291,18 @@ struct FlightCurationView: View {
                     } else if hasSearched {
                         emptySearchState
                     }
-                } else {
+                } else if workspace == .bulk {
                     bulkSearchCard
                     airlineFilters
 
                     if !batchSearches.isEmpty {
                         batchProgressSection
                         batchResultsSection
+                    }
+                } else {
+                    charterImportCard
+                    if !charterResults.isEmpty {
+                        charterResultsSection
                     }
                 }
 
@@ -212,6 +320,10 @@ struct FlightCurationView: View {
             }
         }
         .task { await loadPublished() }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await loadPublished() }
+        }
         .onChange(of: searchMode) { _, _ in
             results = []
             hasSearched = false
@@ -232,7 +344,7 @@ struct FlightCurationView: View {
             Text("Поиск и публикация рейсов")
                 .font(.system(size: 26, weight: .bold))
                 .tracking(-0.6)
-            Text("Ручной поиск остаётся без изменений. Массовый JSON запускает до 20 отдельных ONE WAY запросов через тот же рабочий Ignav-поиск, кэш и публикацию. Round-trip остаётся отдельной линейкой и в массовый ONE WAY не смешивается.")
+            Text("Три независимых режима: рабочий ручной Ignav-поиск, массовый ONE WAY через тот же Ignav-кэш и отдельный импорт чартеров из JSON без обращения к Ignav. Round-trip остаётся отдельной линейкой внутри ручного поиска.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -359,6 +471,281 @@ struct FlightCurationView: View {
         .padding(18)
         .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
+    }
+
+    private var charterImportCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Чартерный JSON")
+                        .font(.headline)
+                    Text("Вставьте подтверждённые данные рейсов. Business не вызывает Ignav: он проверяет JSON, формирует карточки и публикует их через существующий flight publication flow.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Text("≤ 50")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .frame(height: 28)
+                    .background(BusinessDesign.secondarySurface, in: Capsule())
+            }
+
+            TextEditor(text: $charterJSON)
+                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .scrollContentBackground(.hidden)
+                .padding(10)
+                .frame(minHeight: 250)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous).stroke(BusinessDesign.line))
+
+            HStack(spacing: 10) {
+                Button("Вставить пример") {
+                    charterJSON = Self.charterJSONExample
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+
+                Spacer()
+
+                if !charterJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button("Очистить") {
+                        charterJSON = ""
+                        charterResults = []
+                        selectedCharterIDs = []
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .disabled(isCharterPublishing)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: "link.badge.plus")
+                    .foregroundStyle(.orange)
+                Text("Источник обязателен для каждого рейса. Ссылка, название источника, цена, валюта, перевозчик, номер рейса и точные ISO-даты сохраняются внутри itinerary, который отправляется в существующую публикацию.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+            Button {
+                parseCharterImport()
+            } label: {
+                HStack {
+                    Image(systemName: "doc.badge.plus")
+                    Text("Сформировать чартерные карточки")
+                        .fontWeight(.semibold)
+                    Spacer()
+                    if !charterResults.isEmpty {
+                        Text("\(charterResults.count)")
+                            .font(.caption.bold())
+                            .padding(7)
+                            .background(.white.opacity(0.18), in: Circle())
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .frame(height: 56)
+                .background(Color.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(charterJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isCharterPublishing)
+            .opacity(charterJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+        }
+        .padding(18)
+        .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
+    }
+
+    private var charterResultsSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Чартерные рейсы")
+                        .font(.title3.bold())
+                    Text("\(charterResults.count) карточек · данные из вставленного JSON")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Label("Без Ignav", systemImage: "checkmark.shield.fill")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 9)
+                    .frame(minHeight: 29)
+                    .background(Color.orange.opacity(0.09), in: Capsule())
+            }
+
+            HStack(spacing: 9) {
+                Button("Выбрать все") {
+                    selectedCharterIDs = Set(charterResults.filter { !isAlreadyPublished($0) }.map(\.id))
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 11)
+                .frame(minHeight: 38)
+                .background(BusinessDesign.secondarySurface, in: Capsule())
+
+                Button("Снять выбор") {
+                    selectedCharterIDs = []
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 11)
+                .frame(minHeight: 38)
+                .background(BusinessDesign.secondarySurface, in: Capsule())
+            }
+
+            Button {
+                Task { await publishSelectedCharters() }
+            } label: {
+                HStack {
+                    Image(systemName: "paperplane.fill")
+                    Text(isCharterPublishing ? "Публикуем…" : "Опубликовать выбранные чартеры")
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Text("\(selectedCharterIDs.count)")
+                        .font(.caption.bold())
+                        .padding(7)
+                        .background(.white.opacity(0.18), in: Circle())
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .frame(height: 50)
+                .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(selectedCharterIDs.isEmpty || isCharterPublishing)
+            .opacity(selectedCharterIDs.isEmpty ? 0.45 : 1)
+
+            ForEach(charterResults) { itinerary in
+                charterResultCard(itinerary)
+            }
+        }
+    }
+
+    private func charterResultCard(_ itinerary: BusinessFlightCurationItinerary) -> some View {
+        let selected = selectedCharterIDs.contains(itinerary.id)
+        let alreadyPublished = isAlreadyPublished(itinerary)
+        let leg = itinerary.legs.first
+
+        return VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 11) {
+                Button {
+                    guard !alreadyPublished else { return }
+                    if selected { selectedCharterIDs.remove(itinerary.id) }
+                    else { selectedCharterIDs.insert(itinerary.id) }
+                } label: {
+                    Image(systemName: alreadyPublished ? "checkmark.seal.fill" : (selected ? "checkmark.circle.fill" : "circle"))
+                        .font(.title3)
+                        .foregroundStyle(alreadyPublished ? Color.green : (selected ? Color.black : Color.secondary))
+                }
+                .buttonStyle(.plain)
+                .disabled(alreadyPublished || isCharterPublishing)
+
+                BusinessAirlineLogoView(airlineIATA: itinerary.primaryAirlineCode, size: 42)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(itinerary.primaryAirlineName)
+                        .font(.subheadline.weight(.semibold))
+                    Text(leg?.flightNumber ?? "Чартер")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Text("CHARTER")
+                        .foregroundStyle(.primary)
+                }
+                .font(.caption2.bold())
+                .padding(.horizontal, 9)
+                .frame(minHeight: 27)
+                .background(Color.yellow.opacity(0.14), in: Capsule())
+            }
+
+            if let leg {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(leg.origin) → \(leg.destination)")
+                            .font(.title3.bold())
+                        Text("\(dateTime(leg.departureAt)) → \(dateTime(leg.arrivalAt))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(money(itinerary.price.amount, currency: itinerary.price.currency))
+                            .font(.title3.bold())
+                        Text("за 1 пассажира")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Label(itinerary.price.status == "package" ? "Цена пакета" : "Цена билета", systemImage: "banknote")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                Label("Вне регулярного расписания", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.monochrome)
+
+                if let sourceName = itinerary.sourceName, !sourceName.isEmpty {
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                    Text(sourceName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                if let source = itinerary.source, let url = URL(string: source), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                    Link(destination: url) {
+                        Label("Источник", systemImage: "arrow.up.right.square")
+                            .font(.caption2.bold())
+                    }
+                }
+            }
+
+            Button {
+                Task { await publishCharter(itinerary) }
+            } label: {
+                HStack {
+                    Image(systemName: alreadyPublished ? "checkmark.circle.fill" : "plus.circle.fill")
+                    Text(alreadyPublished ? "Уже опубликовано" : "Опубликовать чартер")
+                    Spacer()
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(alreadyPublished ? Color.secondary : Color.primary)
+                .padding(.horizontal, 12)
+                .frame(height: 40)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(alreadyPublished || publishingIDs.contains(itinerary.id) || isCharterPublishing)
+        }
+        .padding(15)
+        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
     }
 
     private var routeCard: some View {
@@ -682,41 +1069,67 @@ struct FlightCurationView: View {
                     .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             } else {
                 ForEach(published) { offer in
-                    HStack(spacing: 12) {
-                        BusinessAirlineLogoView(airlineIATA: offer.airlineCodes.first, size: 42)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(offer.airlineNames.first ?? offer.airlineCodes.first ?? "Рейс")
-                                .font(.subheadline.weight(.semibold))
-                            Text(publishedKindLabel(offer))
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 12) {
+                            BusinessAirlineLogoView(airlineIATA: offer.airlineCodes.first, size: 42)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(offer.airlineNames.first ?? offer.airlineCodes.first ?? "Рейс")
+                                    .font(.subheadline.weight(.semibold))
+                                HStack(spacing: 4) {
+                                    if offer.itinerary?.fareScope?.lowercased() == "charter" {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundStyle(.yellow)
+                                    }
+                                    Text(publishedKindLabel(offer))
+                                        .foregroundStyle(offer.itinerary?.fareScope?.lowercased() == "charter" ? Color.primary : publishedKindColor(offer))
+                                }
                                 .font(.caption2.weight(.bold))
-                                .foregroundStyle(publishedKindColor(offer))
-                            Text("\(offer.outboundOrigin) → \(offer.outboundDestination) · \(displayDate(offer.outboundDate))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if let inboundDate = offer.inboundDate,
-                               let inboundOrigin = offer.inboundOrigin,
-                               let inboundDestination = offer.inboundDestination {
-                                Text("\(inboundOrigin) → \(inboundDestination) · \(displayDate(inboundDate))")
+                                Text("\(offer.outboundOrigin) → \(offer.outboundDestination) · \(displayDate(offer.outboundDate))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                if let inboundDate = offer.inboundDate,
+                                   let inboundOrigin = offer.inboundOrigin,
+                                   let inboundDestination = offer.inboundDestination {
+                                    Text("\(inboundOrigin) → \(inboundDestination) · \(displayDate(inboundDate))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 3) {
+                                Text(money(offer.perTravelerFare, currency: offer.currency))
+                                    .font(.subheadline.bold())
+                                Text("себестоимость / чел.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Button(role: .destructive) {
+                                Task { await delete(offer) }
+                            } label: {
+                                Image(systemName: "trash")
+                                    .frame(width: 36, height: 36)
+                                    .background(Color.red.opacity(0.08), in: Circle())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 3) {
-                            Text(money(offer.perTravelerFare, currency: offer.currency))
-                                .font(.subheadline.bold())
-                            Text("себестоимость / чел.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+
+                        if offer.itinerary?.fareScope?.lowercased() == "charter",
+                           let source = offer.itinerary?.source,
+                           let url = URL(string: source),
+                           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.yellow)
+                                Text(offer.itinerary?.sourceName ?? "Источник чартерного тарифа")
+                                    .lineLimit(1)
+                                Spacer()
+                                Link("Открыть", destination: url)
+                                    .fontWeight(.semibold)
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
                         }
-                        Button(role: .destructive) {
-                            Task { await delete(offer) }
-                        } label: {
-                            Image(systemName: "trash")
-                                .frame(width: 36, height: 36)
-                                .background(Color.red.opacity(0.08), in: Circle())
-                        }
-                        .buttonStyle(.plain)
                     }
                     .padding(15)
                     .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -1242,6 +1655,198 @@ struct FlightCurationView: View {
         }
     }
 
+    private func parseCharterImport() {
+        do {
+            charterResults = try parseCharterJSON()
+            selectedCharterIDs = Set(charterResults.filter { !isAlreadyPublished($0) }.map(\.id))
+            errorMessage = nil
+        } catch {
+            charterResults = []
+            selectedCharterIDs = []
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func parseCharterJSON() throws -> [BusinessFlightCurationItinerary] {
+        guard let data = charterJSON.data(using: .utf8) else { throw CharterJSONError.invalidJSON }
+        let envelope: CharterJSONEnvelope
+        do {
+            envelope = try JSONDecoder().decode(CharterJSONEnvelope.self, from: data)
+        } catch {
+            throw CharterJSONError.invalidJSON
+        }
+
+        if let type = envelope.type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !type.isEmpty,
+           type != "charter" {
+            throw CharterJSONError.unsupportedType
+        }
+        guard !envelope.flights.isEmpty else { throw CharterJSONError.empty }
+        guard envelope.flights.count <= 50 else { throw CharterJSONError.tooMany(envelope.flights.count) }
+
+        var seen: Set<String> = []
+        var parsed: [BusinessFlightCurationItinerary] = []
+
+        for input in envelope.flights {
+            guard let direction = BatchDirection(jsonValue: input.direction) else {
+                throw CharterJSONError.invalidDirection(input.direction ?? "")
+            }
+
+            let origin = input.from.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let destination = input.to.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard isValidAirport(origin) else { throw CharterJSONError.invalidAirport(input.from) }
+            guard isValidAirport(destination) else { throw CharterJSONError.invalidAirport(input.to) }
+
+            let airlineCode = input.airline.iata.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard airlineCode.count == 2,
+                  airlineCode.unicodeScalars.allSatisfy({ scalar in
+                      (scalar.value >= 65 && scalar.value <= 90) || (scalar.value >= 48 && scalar.value <= 57)
+                  }) else {
+                throw CharterJSONError.invalidAirlineCode(input.airline.iata)
+            }
+
+            let airlineName = input.airline.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let flightNumber = input.flightNumber.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().replacingOccurrences(of: " ", with: "")
+            guard !airlineName.isEmpty, !flightNumber.isEmpty, flightNumber.count <= 12 else {
+                throw CharterJSONError.invalidFlightNumber(input.flightNumber)
+            }
+
+            guard Self.iso8601.date(from: input.departureAt) != nil else {
+                throw CharterJSONError.invalidTimestamp(input.departureAt)
+            }
+            guard Self.iso8601.date(from: input.arrivalAt) != nil else {
+                throw CharterJSONError.invalidTimestamp(input.arrivalAt)
+            }
+            guard let departure = Self.iso8601.date(from: input.departureAt),
+                  let arrival = Self.iso8601.date(from: input.arrivalAt),
+                  arrival > departure else {
+                throw CharterJSONError.invalidTimestamp("\(input.departureAt) → \(input.arrivalAt)")
+            }
+            let departureDay = Self.apiDay.string(from: departure)
+            let todayDay = Self.apiDay.string(from: Date())
+            if departureDay < todayDay {
+                throw CharterJSONError.expiredFlight("\(origin)→\(destination) · \(departureDay)")
+            }
+
+            guard input.price.amount > 0, input.price.amount.isFinite else { throw CharterJSONError.invalidPrice }
+            let currency = input.price.currency.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard currency.count == 3,
+                  currency.unicodeScalars.allSatisfy({ $0.value >= 65 && $0.value <= 90 }) else {
+                throw CharterJSONError.invalidCurrency(input.price.currency)
+            }
+
+            let sourceURL = input.source.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: sourceURL),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil else {
+                throw CharterJSONError.invalidSourceURL(input.source.url)
+            }
+
+            let sourceName = input.source.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !sourceName.isEmpty else { throw CharterJSONError.invalidSourceURL(input.source.url) }
+
+            let durationMinutes = max(1, Int(arrival.timeIntervalSince(departure) / 60.0))
+            let priceType = (input.price.type ?? "seat").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let observedAt = normalizedObservedAt(input.source.publishedAt) ?? Self.iso8601.string(from: Date())
+            let cabin = (input.cabinClass ?? "economy").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let sourceID = input.id?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let identity = "\(airlineCode)|\(flightNumber)|\(origin)|\(destination)|\(input.departureAt)|\(input.arrivalAt)|\(sourceURL)"
+            if seen.contains(identity) { continue }
+            seen.insert(identity)
+
+            let generatedID = sourceID?.isEmpty == false ? sourceID! : "charter-\(identity.hashValue.magnitude)"
+            parsed.append(BusinessFlightCurationItinerary(
+                id: generatedID,
+                source: sourceURL,
+                sourceName: sourceName,
+                observedAt: observedAt,
+                fareScope: "charter",
+                price: .init(amount: input.price.amount, currency: currency, status: priceType),
+                legs: [
+                    .init(
+                        airline: airlineName,
+                        flightNumber: flightNumber,
+                        airlineCode: airlineCode,
+                        origin: origin,
+                        destination: destination,
+                        departureAt: input.departureAt,
+                        arrivalAt: input.arrivalAt,
+                        durationMinutes: durationMinutes,
+                        stops: 0,
+                        cabinClass: cabin.isEmpty ? "economy" : cabin
+                    )
+                ],
+                cabinClass: cabin.isEmpty ? "economy" : cabin,
+                ignavId: nil,
+                offerType: "one_way",
+                journeyRole: direction == .returnLeg ? "return" : "outbound"
+            ))
+        }
+
+        guard !parsed.isEmpty else { throw CharterJSONError.empty }
+        return parsed.sorted { lhs, rhs in
+            let l = lhs.legs.first?.departureAt ?? ""
+            let r = rhs.legs.first?.departureAt ?? ""
+            if l == r { return lhs.price.amount < rhs.price.amount }
+            return l < r
+        }
+    }
+
+    private func normalizedObservedAt(_ rawValue: String?) -> String? {
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines), !rawValue.isEmpty else { return nil }
+        if let date = Self.iso8601.date(from: rawValue) { return Self.iso8601.string(from: date) }
+        if let day = Self.apiDay.date(from: rawValue) { return Self.iso8601.string(from: day) }
+        return nil
+    }
+
+    @MainActor
+    private func publishCharter(_ itinerary: BusinessFlightCurationItinerary) async {
+        publishingIDs.insert(itinerary.id)
+        defer { publishingIDs.remove(itinerary.id) }
+        do {
+            _ = try await api.publishCuratedFlight(itinerary, travelerCount: 1)
+            published = try await api.curatedFlights()
+            selectedCharterIDs.remove(itinerary.id)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func publishSelectedCharters() async {
+        guard !selectedCharterIDs.isEmpty else { return }
+        isCharterPublishing = true
+        errorMessage = nil
+        defer { isCharterPublishing = false }
+
+        var successful: Set<String> = []
+        var failures: [String] = []
+        for itinerary in charterResults where selectedCharterIDs.contains(itinerary.id) {
+            if isAlreadyPublished(itinerary) {
+                successful.insert(itinerary.id)
+                continue
+            }
+            publishingIDs.insert(itinerary.id)
+            do {
+                _ = try await api.publishCuratedFlight(itinerary, travelerCount: 1)
+                successful.insert(itinerary.id)
+            } catch {
+                failures.append("\(itinerary.legs.first?.origin ?? "")→\(itinerary.legs.first?.destination ?? ""): \(error.localizedDescription)")
+            }
+            publishingIDs.remove(itinerary.id)
+        }
+
+        selectedCharterIDs.subtract(successful)
+        do {
+            published = try await api.curatedFlights()
+        } catch {
+            failures.append(error.localizedDescription)
+        }
+        if !failures.isEmpty {
+            errorMessage = failures.prefix(3).joined(separator: "\n")
+        }
+    }
+
     private var canSearch: Bool {
         guard !selectedAirlines.isEmpty else { return false }
         switch searchMode {
@@ -1349,8 +1954,25 @@ struct FlightCurationView: View {
 
     @MainActor
     private func loadPublished() async {
-        do { published = try await api.curatedFlights() }
-        catch { errorMessage = error.localizedDescription }
+        do {
+            var offers = try await api.curatedFlights()
+            let expired = offers.filter(isExpiredPublishedOffer)
+            if !expired.isEmpty {
+                for offer in expired {
+                    try? await api.deleteCuratedFlight(id: offer.id)
+                }
+                offers = try await api.curatedFlights()
+            }
+            published = offers.filter { !isExpiredPublishedOffer($0) }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func isExpiredPublishedOffer(_ offer: BusinessCuratedFlightOffer) -> Bool {
+        let rawDay = String(offer.outboundDate.prefix(10))
+        guard rawDay.count == 10, Self.apiDay.date(from: rawDay) != nil else { return false }
+        return rawDay < Self.apiDay.string(from: Date())
     }
 
     @MainActor
@@ -1376,6 +1998,9 @@ struct FlightCurationView: View {
     }
 
     private func fareKindLabel(_ itinerary: BusinessFlightCurationItinerary) -> String {
+        if itinerary.fareScope?.lowercased() == "charter" {
+            return itinerary.effectiveJourneyRole == "return" ? "CHARTER · ОБРАТНО" : "CHARTER · ТУДА"
+        }
         switch itinerary.effectiveOfferType {
         case "round_trip":
             return "ТУДА-ОБРАТНО · ЕДИНЫЙ ТАРИФ IGNAV"
@@ -1387,6 +2012,7 @@ struct FlightCurationView: View {
     }
 
     private func fareKindIcon(_ itinerary: BusinessFlightCurationItinerary) -> String {
+        if itinerary.fareScope?.lowercased() == "charter" { return "ticket.fill" }
         switch itinerary.effectiveOfferType {
         case "round_trip": return "arrow.left.arrow.right.circle.fill"
         case "paired_one_way": return "plus.circle.fill"
@@ -1395,6 +2021,7 @@ struct FlightCurationView: View {
     }
 
     private func fareKindColor(_ itinerary: BusinessFlightCurationItinerary) -> Color {
+        if itinerary.fareScope?.lowercased() == "charter" { return .orange }
         switch itinerary.effectiveOfferType {
         case "round_trip": return .green
         case "paired_one_way": return .orange
@@ -1403,6 +2030,10 @@ struct FlightCurationView: View {
     }
 
     private func publishedKindLabel(_ offer: BusinessCuratedFlightOffer) -> String {
+        if offer.itinerary?.fareScope?.lowercased() == "charter" {
+            let role = offer.journeyRole ?? offer.itinerary?.effectiveJourneyRole ?? "outbound"
+            return role == "return" ? "CHARTER · ОБРАТНО" : "CHARTER · ТУДА"
+        }
         let type = offer.offerType ?? offer.itinerary?.effectiveOfferType ?? "paired_one_way"
         let role = offer.journeyRole ?? offer.itinerary?.effectiveJourneyRole ?? "complete"
         switch type {
@@ -1413,6 +2044,7 @@ struct FlightCurationView: View {
     }
 
     private func publishedKindColor(_ offer: BusinessCuratedFlightOffer) -> Color {
+        if offer.itinerary?.fareScope?.lowercased() == "charter" { return .orange }
         let type = offer.offerType ?? offer.itinerary?.effectiveOfferType ?? "paired_one_way"
         switch type {
         case "round_trip": return .green
@@ -1464,6 +2096,46 @@ struct FlightCurationView: View {
         }
         """
     }
+
+    private static var charterJSONExample: String {
+        return """
+        {
+          "type": "charter",
+          "flights": [
+            {
+              "id": "NMA-MED-F39135-2026-09-09",
+              "direction": "outbound",
+              "from": "NMA",
+              "to": "MED",
+              "airline": {
+                "name": "flyadeal",
+                "iata": "F3"
+              },
+              "flight_number": "F39135",
+              "departure_at": "2026-09-09T15:40:00+05:00",
+              "arrival_at": "2026-09-09T19:40:00+03:00",
+              "price": {
+                "amount": 329,
+                "currency": "USD",
+                "type": "seat"
+              },
+              "source": {
+                "name": "Supplier / published source",
+                "url": "https://example.com/charter-source",
+                "published_at": "2026-09-06T17:00:00+05:00"
+              },
+              "cabin_class": "economy"
+            }
+          ]
+        }
+        """
+    }
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withColonSeparatorInTimeZone]
+        return formatter
+    }()
 
     private static let apiDay: DateFormatter = {
         let f = DateFormatter()
