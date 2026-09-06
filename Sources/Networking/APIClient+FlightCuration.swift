@@ -1,7 +1,7 @@
 import Foundation
 
 extension APIClient {
-    func searchFlightsForCuration(_ payload: BusinessFlightCurationSearchRequest) async throws -> [BusinessFlightCurationItinerary] {
+    func searchFlightsForCuration(_ payload: BusinessFlightCurationSearchRequest) async throws -> BusinessFlightCurationSearchResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/package/flights/curation-search"))
         request.httpMethod = "POST"
         request.timeoutInterval = 35
@@ -9,7 +9,7 @@ extension APIClient {
         request.httpBody = try encoder.encode(payload)
         let (data, response) = try await perform(request)
         try validate(response, data: data)
-        return try decoder.decode(BusinessFlightCurationSearchResponse.self, from: data).itineraries
+        return try decoder.decode(BusinessFlightCurationSearchResponse.self, from: data)
     }
 
     func curatedFlights() async throws -> [BusinessCuratedFlightOffer] {

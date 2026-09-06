@@ -10,12 +10,14 @@ struct FlightCurationView: View {
     @State private var departureDate = Calendar.current.date(byAdding: .day, value: 21, to: Date()) ?? Date()
     @State private var returnDate = Calendar.current.date(byAdding: .day, value: 28, to: Date()) ?? Date()
     @State private var adults = 1
-    @State private var selectedAirlines: Set<String> = ["HY", "C6", "HH", "9S", "U7", "FZ", "XY"]
+    @State private var selectedAirlines: Set<String> = ["HY", "C6", "HH", "9S", "2U", "FZ", "XY"]
     @State private var results: [BusinessFlightCurationItinerary] = []
     @State private var published: [BusinessCuratedFlightOffer] = []
     @State private var isSearching = false
     @State private var publishingIDs: Set<String> = []
     @State private var errorMessage: String?
+    @State private var hasSearched = false
+    @State private var searchDiagnostics: BusinessFlightCurationSearchResponse.Diagnostics?
 
     private let api = APIClient.shared
     private struct AirlineFilter: Identifiable {
@@ -29,7 +31,6 @@ struct FlightCurationView: View {
         .init(code: "C6", name: "Centrum Air"),
         .init(code: "HH", name: "Qanot Sharq"),
         .init(code: "9S", name: "Air Samarkand"),
-        .init(code: "U7", name: "Tashkent Air"),
         .init(code: "2U", name: "Fly Khiva"),
         .init(code: "FZ", name: "flydubai"),
         .init(code: "XY", name: "flynas")
@@ -49,6 +50,8 @@ struct FlightCurationView: View {
                         .padding(.vertical, 28)
                 } else if !results.isEmpty {
                     searchResults
+                } else if hasSearched {
+                    emptySearchState
                 }
 
                 publishedSection
@@ -204,6 +207,38 @@ struct FlightCurationView: View {
         .opacity(canSearch ? 1 : 0.45)
     }
 
+    private var emptySearchState: some View {
+        let usable = searchDiagnostics?.usableItinerariesByLeg ?? []
+        let raw = searchDiagnostics?.rawItinerariesByLeg ?? []
+        let outboundUsable = usable.indices.contains(0) ? usable[0] : 0
+        let inboundUsable = usable.indices.contains(1) ? usable[1] : 0
+        let outboundRaw = raw.indices.contains(0) ? raw[0] : 0
+        let inboundRaw = raw.indices.contains(1) ? raw[1] : 0
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "airplane.circle")
+                    .font(.title3)
+                Text("Подходящей пары пока нет")
+                    .font(.headline)
+            }
+
+            Text("Ignav проверил оба участка отдельно: \(outboundOrigin) → \(outboundDestination) и \(inboundOrigin) → \(inboundDestination).")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if searchDiagnostics != nil {
+                Text("Получено от провайдера: \(outboundRaw) / \(inboundRaw). Подошло после проверки прямого рейса и авиакомпании: \(outboundUsable) / \(inboundUsable).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(17)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
+    }
+
     private var searchResults: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -242,6 +277,12 @@ struct FlightCurationView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            if itinerary.price.status?.lowercased() == "unverified" {
+                Label("Ориентировочная цена Ignav — рейс найден, но тариф ещё не подтверждён при booking lookup.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             ForEach(itinerary.legs.indices, id: \.self) { index in
@@ -364,9 +405,14 @@ struct FlightCurationView: View {
             allowSelfTransfer: false
         )
         do {
-            results = try await api.searchFlightsForCuration(request)
+            let response = try await api.searchFlightsForCuration(request)
+            results = response.itineraries
+            searchDiagnostics = response.diagnostics
+            hasSearched = true
         } catch {
             results = []
+            searchDiagnostics = nil
+            hasSearched = false
             errorMessage = error.localizedDescription
         }
     }
@@ -419,7 +465,9 @@ struct FlightCurationView: View {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(secondsFromGMT: 0)
+        // DatePicker represents a civil calendar day. Formatting it in UTC can
+        // shift the selected date for users in positive-offset time zones.
+        f.timeZone = .current
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()

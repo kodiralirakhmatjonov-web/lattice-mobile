@@ -34,12 +34,29 @@ struct BusinessFlightCurationSearchRequest: Encodable {
 }
 
 struct BusinessFlightCurationSearchResponse: Decodable {
+    struct Diagnostics: Decodable {
+        let mode: String?
+        let providerRequests: Int?
+        let rawItinerariesByLeg: [Int]?
+        let usableItinerariesByLeg: [Int]?
+        let broadAirlineFallbackByLeg: [Bool]?
+
+        enum CodingKeys: String, CodingKey {
+            case mode
+            case providerRequests = "provider_requests"
+            case rawItinerariesByLeg = "raw_itineraries_by_leg"
+            case usableItinerariesByLeg = "usable_itineraries_by_leg"
+            case broadAirlineFallbackByLeg = "broad_airline_fallback_by_leg"
+        }
+    }
+
     let ok: Bool
     let observedAt: String?
     let itineraries: [BusinessFlightCurationItinerary]
+    let diagnostics: Diagnostics?
 
     enum CodingKeys: String, CodingKey {
-        case ok, itineraries
+        case ok, itineraries, diagnostics
         case observedAt = "observed_at"
     }
 }
