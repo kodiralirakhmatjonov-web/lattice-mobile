@@ -13,7 +13,7 @@ struct HotelImportSessionView: View {
                     .allowsHitTesting(coordinator.showSource)
 
                 if !coordinator.showSource {
-                    Color.white.ignoresSafeArea()
+                    BusinessDesign.background.ignoresSafeArea()
                     VStack(spacing: 22) {
                         Spacer()
 
@@ -38,7 +38,7 @@ struct HotelImportSessionView: View {
                         }
 
                         ProgressView(value: coordinator.progress)
-                            .tint(.black)
+                            .tint(BusinessDesign.ink)
                             .padding(.horizontal, 48)
 
                         if let message = coordinator.failureMessage {
@@ -50,7 +50,7 @@ struct HotelImportSessionView: View {
 
                             Button("Закрыть") { dismiss() }
                                 .buttonStyle(.borderedProminent)
-                                .tint(.black)
+                                .tint(BusinessDesign.primaryControl)
                         }
 
                         Spacer()
@@ -58,7 +58,7 @@ struct HotelImportSessionView: View {
                     .safeAreaPadding(.horizontal, 16)
                 }
             }
-            .background(Color.white)
+            .background(BusinessDesign.background)
             .navigationTitle(coordinator.showSource ? (coordinator.currentProvider?.rawValue ?? "Источник") : "Импорт по ссылке")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

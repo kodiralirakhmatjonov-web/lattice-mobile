@@ -22,7 +22,7 @@ struct BusinessSessionsView: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color.white, Color(red: 0.965, green: 0.97, blue: 0.985)],
+                colors: [BusinessDesign.background, BusinessDesign.tertiarySurface],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -153,7 +153,7 @@ struct BusinessSessionsView: View {
                     .fill(Color.blue.opacity(0.10))
                     .frame(width: 108, height: 108)
                 Circle()
-                    .stroke(Color.white.opacity(0.9), lineWidth: 1)
+                    .stroke(BusinessDesign.line, lineWidth: 1)
                     .frame(width: 92, height: 92)
                 Image(systemName: "laptopcomputer.and.iphone")
                     .font(.system(size: 43, weight: .medium))

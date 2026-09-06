@@ -59,7 +59,7 @@ struct ChatsView: View {
         }
         .contentMargins(.horizontal, 18, for: .scrollContent)
         .scrollIndicators(.hidden)
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -85,14 +85,14 @@ struct ChatsView: View {
                         Text(item.rawValue)
                         if item == .new {
                             let count = threads.filter(\.unreadForStaff).count
-                            if count > 0 { Text("\(count)").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2).background(item == filter ? Color.white.opacity(0.22) : Color.black.opacity(0.06), in: Capsule()) }
+                            if count > 0 { Text("\(count)").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2).background(item == filter ? BusinessDesign.onPrimaryControl.opacity(0.18) : BusinessDesign.secondarySurface, in: Capsule()) }
                         }
                     }
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(item == filter ? .white : .primary)
+                    .foregroundStyle(item == filter ? BusinessDesign.onPrimaryControl : Color.primary)
                     .padding(.horizontal, 12)
                     .frame(height: 38)
-                    .background(item == filter ? Color.black : BusinessDesign.secondarySurface, in: Capsule())
+                    .background(item == filter ? BusinessDesign.primaryControl : BusinessDesign.secondarySurface, in: Capsule())
                 }
                 .buttonStyle(.plain)
             }
@@ -164,7 +164,7 @@ private struct ThreadCard: View {
                     Text(thread.booking.pilgrimID.map { "Iumrah ID \($0)" } ?? "Iumrah ID —").monospaced()
                     Text("·")
                     Text("\(thread.booking.originCode) → \(thread.booking.outboundDestination)")
-                    if thread.unreadForStaff { Spacer(); Circle().fill(.black).frame(width: 8, height: 8) }
+                    if thread.unreadForStaff { Spacer(); Circle().fill(BusinessDesign.accent).frame(width: 8, height: 8) }
                 }
                 .font(.caption2).foregroundStyle(.secondary)
             }

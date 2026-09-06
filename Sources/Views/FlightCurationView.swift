@@ -449,13 +449,13 @@ struct FlightCurationView: View {
                         Text("\(batchSearches.count)")
                             .font(.caption.bold())
                             .padding(7)
-                            .background(.white.opacity(0.18), in: Circle())
+                            .background(BusinessDesign.onPrimaryControl.opacity(0.18), in: Circle())
                     }
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
                 .padding(.horizontal, 18)
                 .frame(height: 56)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(
@@ -469,7 +469,7 @@ struct FlightCurationView: View {
             )
         }
         .padding(18)
-        .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -548,20 +548,20 @@ struct FlightCurationView: View {
                         Text("\(charterResults.count)")
                             .font(.caption.bold())
                             .padding(7)
-                            .background(.white.opacity(0.18), in: Circle())
+                            .background(BusinessDesign.onPrimaryControl.opacity(0.18), in: Circle())
                     }
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
                 .padding(.horizontal, 18)
                 .frame(height: 56)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(charterJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isCharterPublishing)
             .opacity(charterJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
         }
         .padding(18)
-        .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -615,12 +615,12 @@ struct FlightCurationView: View {
                     Text("\(selectedCharterIDs.count)")
                         .font(.caption.bold())
                         .padding(7)
-                        .background(.white.opacity(0.18), in: Circle())
+                        .background(BusinessDesign.onPrimaryControl.opacity(0.18), in: Circle())
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
                 .padding(.horizontal, 16)
                 .frame(height: 50)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(selectedCharterIDs.isEmpty || isCharterPublishing)
@@ -646,7 +646,7 @@ struct FlightCurationView: View {
                 } label: {
                     Image(systemName: alreadyPublished ? "checkmark.seal.fill" : (selected ? "checkmark.circle.fill" : "circle"))
                         .font(.title3)
-                        .foregroundStyle(alreadyPublished ? Color.green : (selected ? Color.black : Color.secondary))
+                        .foregroundStyle(alreadyPublished ? Color.green : (selected ? BusinessDesign.accent : Color.secondary))
                 }
                 .buttonStyle(.plain)
                 .disabled(alreadyPublished || isCharterPublishing)
@@ -744,7 +744,7 @@ struct FlightCurationView: View {
             .disabled(alreadyPublished || publishingIDs.contains(itinerary.id) || isCharterPublishing)
         }
         .padding(15)
-        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -814,7 +814,7 @@ struct FlightCurationView: View {
             }
         }
         .padding(18)
-        .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
         .onChange(of: departureDate) { _, newValue in
             if returnDate < newValue {
@@ -873,7 +873,7 @@ struct FlightCurationView: View {
                             .foregroundStyle(.primary)
                             .padding(.horizontal, 10)
                             .frame(height: 48)
-                            .background(selected ? Color.green.opacity(0.08) : .white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .background(selected ? Color.green.opacity(0.08) : BusinessDesign.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(selected ? Color.green.opacity(0.24) : BusinessDesign.line))
                         }
                         .buttonStyle(.plain)
@@ -896,13 +896,13 @@ struct FlightCurationView: View {
                     Text("\(selectedAirlines.count)")
                         .font(.caption.bold())
                         .padding(7)
-                        .background(.white.opacity(0.18), in: Circle())
+                        .background(BusinessDesign.onPrimaryControl.opacity(0.18), in: Circle())
                 }
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(BusinessDesign.onPrimaryControl)
             .padding(.horizontal, 18)
             .frame(height: 56)
-            .background(Color.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!canSearch || isSearching)
@@ -940,7 +940,7 @@ struct FlightCurationView: View {
         }
         .padding(17)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -1043,7 +1043,7 @@ struct FlightCurationView: View {
             .disabled(alreadyPublished || publishingIDs.contains(itinerary.id))
         }
         .padding(17)
-        .background(.white, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -1066,7 +1066,7 @@ struct FlightCurationView: View {
                     .foregroundStyle(.secondary)
                     .padding(17)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             } else {
                 ForEach(published) { offer in
                     VStack(alignment: .leading, spacing: 10) {
@@ -1131,7 +1131,7 @@ struct FlightCurationView: View {
                         }
                     }
                     .padding(15)
-                    .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
                 }
             }
@@ -1186,7 +1186,7 @@ struct FlightCurationView: View {
             }
         }
         .padding(17)
-        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -1252,12 +1252,12 @@ struct FlightCurationView: View {
                             Text("\(selectedBatchResultKeys.count)")
                                 .font(.caption.bold())
                                 .padding(7)
-                                .background(.white.opacity(0.18), in: Circle())
+                                .background(BusinessDesign.onPrimaryControl.opacity(0.18), in: Circle())
                         }
-                        .foregroundStyle(.white)
+                        .foregroundStyle(BusinessDesign.onPrimaryControl)
                         .padding(.horizontal, 16)
                         .frame(height: 50)
-                        .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .disabled(selectedBatchResultKeys.isEmpty || isBatchPublishing || isBatchSearching)
@@ -1328,7 +1328,7 @@ struct FlightCurationView: View {
             .contentShape(Rectangle())
         }
         .padding(15)
-        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
     }
 
@@ -1347,7 +1347,7 @@ struct FlightCurationView: View {
                 } label: {
                     Image(systemName: alreadyPublished ? "checkmark.seal.fill" : (selected ? "checkmark.circle.fill" : "circle"))
                         .font(.title3)
-                        .foregroundStyle(alreadyPublished ? Color.green : (selected ? Color.black : Color.secondary))
+                        .foregroundStyle(alreadyPublished ? Color.green : (selected ? BusinessDesign.accent : Color.secondary))
                 }
                 .buttonStyle(.plain)
                 .disabled(alreadyPublished || isBatchPublishing)

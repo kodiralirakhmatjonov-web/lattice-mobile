@@ -9,7 +9,6 @@ struct IumrahBusinessApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(auth)
-                .preferredColorScheme(.light)
                 .task { await BusinessNotifications.prepare() }
         }
     }

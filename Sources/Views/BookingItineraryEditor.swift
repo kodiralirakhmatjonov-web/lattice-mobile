@@ -125,11 +125,11 @@ struct BusinessBookingItineraryEditor: View {
                     .monospacedDigit()
                 Text(Self.weekday(day))
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(selected ? Color.white.opacity(0.76) : Color.secondary)
+                    .foregroundStyle(selected ? BusinessDesign.onPrimaryControl.opacity(0.76) : Color.secondary)
             }
-            .foregroundStyle(selected ? Color.white : Color.primary)
+            .foregroundStyle(selected ? BusinessDesign.onPrimaryControl : Color.primary)
             .frame(width: 58, height: 64)
-            .background(selected ? Color.black : BusinessDesign.secondarySurface)
+            .background(selected ? BusinessDesign.primaryControl : BusinessDesign.secondarySurface)
             .clipShape(RoundedRectangle(cornerRadius: 19, style: .continuous))
         }
         .buttonStyle(.plain)

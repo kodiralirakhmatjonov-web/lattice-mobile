@@ -30,7 +30,7 @@ struct HotelsView: View {
         }
         .contentMargins(.horizontal, 18, for: .scrollContent)
         .scrollIndicators(.hidden)
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() } }
@@ -75,8 +75,8 @@ struct HotelsView: View {
                 Image(systemName: "plus")
                     .font(.system(size: 18, weight: .bold))
                     .frame(width: 44, height: 44)
-                    .foregroundStyle(.white)
-                    .background(.black, in: Circle())
+                    .foregroundStyle(BusinessDesign.onPrimaryControl)
+                    .background(BusinessDesign.primaryControl, in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Импортировать отель")
@@ -91,11 +91,11 @@ struct HotelsView: View {
             HStack(spacing: 13) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.black)
+                        .fill(BusinessDesign.primaryControl)
                         .frame(width: 48, height: 48)
                     Image(systemName: "star.fill")
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(BusinessDesign.onPrimaryControl)
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Primary Hotels").font(.headline)
@@ -394,7 +394,7 @@ struct HotelsView: View {
 
             if job.isActive {
                 ProgressView(value: Double(job.progress), total: 100)
-                    .tint(.black)
+                    .tint(BusinessDesign.ink)
             }
 
             Text(importStageDetail(job))
@@ -428,7 +428,7 @@ struct HotelsView: View {
                         Label("Повторить", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.black)
+                    .tint(BusinessDesign.primaryControl)
                     .controlSize(.small)
                     .disabled(jobActionID == job.id)
                 }
@@ -706,13 +706,13 @@ private struct AddHotelView: View {
                             .frame(height: 56)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.black)
+                    .tint(BusinessDesign.primaryControl)
                     .disabled(validURLs.isEmpty)
                 }
                 .padding(.vertical, 18)
             }
             .contentMargins(.horizontal, 18, for: .scrollContent)
-            .background(Color.white)
+            .background(BusinessDesign.background)
             .navigationTitle("")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

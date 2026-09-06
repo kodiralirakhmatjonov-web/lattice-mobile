@@ -76,7 +76,7 @@ struct HotelBatchImportView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.white.ignoresSafeArea()
+                BusinessDesign.background.ignoresSafeArea()
 
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -125,8 +125,8 @@ struct HotelBatchImportView: View {
                                 .font(.headline)
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 50)
-                                .background(.black, in: Capsule())
-                                .foregroundStyle(.white)
+                                .background(BusinessDesign.primaryControl, in: Capsule())
+                                .foregroundStyle(BusinessDesign.onPrimaryControl)
                             }
                             .padding(16)
                             .background(.ultraThinMaterial)
@@ -195,7 +195,7 @@ private struct HotelBatchImportCard: View {
                         .frame(height: 48)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.black)
+                .tint(BusinessDesign.primaryControl)
             } else {
                 VStack(alignment: .leading, spacing: 9) {
                     Text(coordinator.status)
@@ -203,7 +203,7 @@ private struct HotelBatchImportCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                     if case .importing = item.state {
                         ProgressView(value: coordinator.progress)
-                            .tint(.black)
+                            .tint(BusinessDesign.ink)
                     }
                     if let failure = coordinator.failureMessage {
                         Text(failure)

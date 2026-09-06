@@ -137,7 +137,7 @@ struct BookingSecurityAdminCard: View {
                             .scaledToFit()
                             .frame(maxWidth: .infinity)
                             .frame(height: 190)
-                            .background(Color.black.opacity(0.035))
+                            .background(BusinessDesign.secondarySurface)
                     } else if loadingImage {
                         ProgressView()
                             .frame(maxWidth: .infinity)

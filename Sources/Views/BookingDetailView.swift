@@ -63,7 +63,7 @@ struct BookingDetailView: View {
                     .padding(.top, 60)
             }
         }
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("Бронирование")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -452,7 +452,7 @@ struct BookingDetailView: View {
                 HStack(spacing: 6) {
                     Text("Гид").font(.caption.bold()).foregroundStyle(.secondary)
                     if detail.assignment?.guideIsPrimary == true {
-                        Text("Рекомендует iumrah").font(.caption2.bold()).padding(.horizontal, 8).frame(height: 23).background(Color.black, in: Capsule()).foregroundStyle(.white)
+                        Text("Рекомендует iumrah").font(.caption2.bold()).padding(.horizontal, 8).frame(height: 23).background(BusinessDesign.primaryControl, in: Capsule()).foregroundStyle(BusinessDesign.onPrimaryControl)
                     }
                 }
                 Text(guide?.displayName ?? "Гид не назначен").font(.headline)
@@ -809,7 +809,7 @@ private struct FlightEditorSheet: View {
                         Task { await verify() }
                     } label: {
                         HStack { if verifying { ProgressView().tint(.white) }; Text(verifying ? "Проверяем…" : "Проверить рейс") }
-                            .font(.headline).frame(maxWidth: .infinity).frame(height: 56).background(Color.black, in: Capsule()).foregroundStyle(.white)
+                            .font(.headline).frame(maxWidth: .infinity).frame(height: 56).background(BusinessDesign.primaryControl, in: Capsule()).foregroundStyle(BusinessDesign.onPrimaryControl)
                     }
                     .buttonStyle(.plain).disabled(verifying || flightNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
@@ -845,7 +845,7 @@ private struct FlightEditorSheet: View {
                 }
                 .padding(18)
             }
-            .background(Color.white)
+            .background(BusinessDesign.background)
             .navigationTitle("")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }

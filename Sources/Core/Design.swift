@@ -1,15 +1,61 @@
 import SwiftUI
+import UIKit
 
 enum BusinessDesign {
-    static let background = Color.white
-    static let ink = Color(red: 0.055, green: 0.055, blue: 0.06)
-    static let muted = Color(red: 0.48, green: 0.48, blue: 0.50)
-    static let accent = Color.black
-    static let softOrange = Color.black.opacity(0.04)
-    static let line = Color.black.opacity(0.07)
-    static let card = Color.white
-    static let secondarySurface = Color.black.opacity(0.035)
-    static let tertiarySurface = Color.black.opacity(0.022)
+    private static func adaptive(light: UIColor, dark: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
+        })
+    }
+
+    // Central semantic palette. Light values intentionally preserve the
+    // existing iumrah Business appearance; dark values are tuned for long
+    // operational use at night with clear surface separation and contrast.
+    static let background = adaptive(
+        light: .white,
+        dark: .black
+    )
+    static let ink = adaptive(
+        light: UIColor(red: 0.055, green: 0.055, blue: 0.060, alpha: 1),
+        dark: UIColor(red: 0.965, green: 0.965, blue: 0.975, alpha: 1)
+    )
+    static let muted = adaptive(
+        light: UIColor(red: 0.480, green: 0.480, blue: 0.500, alpha: 1),
+        dark: UIColor(red: 0.610, green: 0.610, blue: 0.640, alpha: 1)
+    )
+    static let accent = adaptive(
+        light: .black,
+        dark: UIColor(red: 0.965, green: 0.965, blue: 0.975, alpha: 1)
+    )
+    static let onAccent = adaptive(
+        light: .white,
+        dark: .black
+    )
+    static let primaryControl = adaptive(
+        light: .black,
+        dark: UIColor(red: 0.205, green: 0.205, blue: 0.220, alpha: 1)
+    )
+    static let onPrimaryControl = Color.white
+    static let softOrange = adaptive(
+        light: UIColor(red: 0.960, green: 0.960, blue: 0.962, alpha: 1),
+        dark: UIColor(red: 0.105, green: 0.105, blue: 0.115, alpha: 1)
+    )
+    static let line = adaptive(
+        light: UIColor(red: 0.930, green: 0.930, blue: 0.935, alpha: 1),
+        dark: UIColor(red: 0.200, green: 0.200, blue: 0.215, alpha: 1)
+    )
+    static let card = adaptive(
+        light: .white,
+        dark: UIColor(red: 0.110, green: 0.110, blue: 0.120, alpha: 1)
+    )
+    static let secondarySurface = adaptive(
+        light: UIColor(red: 0.965, green: 0.965, blue: 0.968, alpha: 1),
+        dark: UIColor(red: 0.165, green: 0.165, blue: 0.178, alpha: 1)
+    )
+    static let tertiarySurface = adaptive(
+        light: UIColor(red: 0.978, green: 0.978, blue: 0.980, alpha: 1),
+        dark: UIColor(red: 0.135, green: 0.135, blue: 0.148, alpha: 1)
+    )
 }
 
 struct BusinessCardModifier: ViewModifier {
@@ -39,8 +85,10 @@ struct BusinessBrandLogo: View {
 
     var body: some View {
         Image("Logo")
+            .renderingMode(.template)
             .resizable()
             .scaledToFit()
+            .foregroundStyle(BusinessDesign.ink)
             .frame(width: width, height: height)
             .accessibilityLabel("iumrah Business")
     }

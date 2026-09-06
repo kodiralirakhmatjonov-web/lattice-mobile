@@ -28,7 +28,7 @@ struct ClientArchiveView: View {
                 }
             }
         }
-        .listStyle(.plain).scrollContentBackground(.hidden).background(Color.white)
+        .listStyle(.plain).scrollContentBackground(.hidden).background(BusinessDesign.background)
         .navigationTitle("Архив клиентов")
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, prompt: "Имя, телефон или ID")
@@ -82,7 +82,7 @@ private struct PilgrimDetailView: View {
                 .padding(18)
             } else if loading { ProgressView().padding(.top, 60) }
         }
-        .background(Color.white).navigationTitle(detail?.pilgrim.displayName ?? "Клиент").navigationBarTitleDisplayMode(.inline)
+        .background(BusinessDesign.background).navigationTitle(detail?.pilgrim.displayName ?? "Клиент").navigationBarTitleDisplayMode(.inline)
         .task { detail = try? await APIClient.shared.pilgrimDetail(id: pilgrimID); loading = false }
     }
 }

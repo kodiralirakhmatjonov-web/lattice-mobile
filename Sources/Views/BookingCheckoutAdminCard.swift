@@ -149,7 +149,7 @@ struct BookingCheckoutAdminCard: View {
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundStyle(traveler.completed ? .green : .secondary)
                             .frame(width: 40, height: 40)
-                            .background(Color.white.opacity(0.82), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                            .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
                         VStack(alignment: .leading, spacing: 3) {
                             let fullName = [traveler.firstName, traveler.middleName, traveler.lastName]
@@ -185,7 +185,7 @@ struct BookingCheckoutAdminCard: View {
                                     }
                                 }
                                 .frame(width: 40, height: 40)
-                                .background(Color.white, in: Circle())
+                                .background(BusinessDesign.tertiarySurface, in: Circle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Открыть паспорт паломника \(traveler.position)")
@@ -288,16 +288,16 @@ struct BookingCheckoutAdminCard: View {
                 Task { await savePayment() }
             } label: {
                 HStack {
-                    if saving { ProgressView().tint(.white) }
+                    if saving { ProgressView().tint(BusinessDesign.onPrimaryControl) }
                     Image(systemName: "checkmark")
                     Text("Сохранить реквизиты")
                     Spacer()
                 }
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
                 .padding(.horizontal, 16)
                 .frame(height: 52)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(saving)

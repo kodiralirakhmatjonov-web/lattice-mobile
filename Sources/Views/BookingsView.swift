@@ -96,13 +96,13 @@ struct BookingsView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
             ToolbarItem(placement: .principal) {
-                Image("Logo").resizable().scaledToFit().frame(width: 116, height: 28)
+                Image("Logo").renderingMode(.template).resizable().scaledToFit().foregroundStyle(BusinessDesign.ink).frame(width: 116, height: 28)
             }
         }
         .overlay {
             if loading || deleting {
                 ZStack {
-                    Color.white.opacity(deleting ? 0.55 : 0.2).ignoresSafeArea()
+                    BusinessDesign.background.opacity(deleting ? 0.88 : 0.72).ignoresSafeArea()
                     ProgressView(deleting ? "Удаляю…" : "")
                 }
             }
@@ -142,14 +142,14 @@ struct BookingsView: View {
                                     .font(.caption2.bold())
                                     .padding(.horizontal, 6)
                                     .frame(height: 20)
-                                    .background(filter == item ? Color.white.opacity(0.18) : Color.black.opacity(0.05), in: Capsule())
+                                    .background(filter == item ? BusinessDesign.onPrimaryControl.opacity(0.18) : BusinessDesign.secondarySurface, in: Capsule())
                             }
                         }
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(filter == item ? Color.white : BusinessDesign.ink)
+                        .foregroundStyle(filter == item ? BusinessDesign.onPrimaryControl : BusinessDesign.ink)
                         .padding(.horizontal, 14)
                         .frame(height: 40)
-                        .background(filter == item ? Color.black : BusinessDesign.secondarySurface, in: Capsule())
+                        .background(filter == item ? BusinessDesign.primaryControl : BusinessDesign.secondarySurface, in: Capsule())
                     }
                     .buttonStyle(.plain)
                 }

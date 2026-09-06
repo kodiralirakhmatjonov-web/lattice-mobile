@@ -40,7 +40,7 @@ struct EmployeesView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("Сотрудники")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

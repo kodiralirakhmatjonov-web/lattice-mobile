@@ -20,7 +20,7 @@ struct ProfileView: View {
                 ContentUnavailableView("Профиль недоступен", systemImage: "person.crop.circle.badge.exclamationmark", description: Text(errorMessage ?? "Попробуйте обновить."))
             }
         }
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("Мой профиль")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

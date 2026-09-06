@@ -203,10 +203,10 @@ struct ESIMCenterView: View {
                 } label: {
                     Text(item.title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(segment == item ? Color.white : BusinessDesign.ink)
+                        .foregroundStyle(segment == item ? BusinessDesign.onPrimaryControl : BusinessDesign.ink)
                         .frame(maxWidth: .infinity)
                         .frame(height: 42)
-                        .background(segment == item ? Color.black : Color.clear, in: Capsule())
+                        .background(segment == item ? BusinessDesign.primaryControl : Color.clear, in: Capsule())
                 }
                 .buttonStyle(.plain)
             }
@@ -404,7 +404,7 @@ private struct ESIMPlanCard: View {
                         .frame(height: 42)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.black)
+                .tint(BusinessDesign.primaryControl)
                 .disabled(!affordable)
             }
         }
@@ -459,7 +459,7 @@ private struct ESIMInventoryCard: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.black)
+                        .tint(BusinessDesign.primaryControl)
                     }
                     Button(action: onRefresh) {
                         Image(systemName: "arrow.clockwise")
@@ -600,7 +600,7 @@ private struct ESIMPurchaseSheet: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .tint(.black)
+            .tint(BusinessDesign.primaryControl)
             .disabled(buying)
         }
     }
@@ -634,7 +634,7 @@ private struct ESIMPurchaseSheet: View {
                 }
                 .frame(width: 190, height: 190)
                 .padding(14)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
             }
 
@@ -658,7 +658,7 @@ private struct ESIMPurchaseSheet: View {
                         .frame(height: 50)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.black)
+                .tint(BusinessDesign.primaryControl)
             } else {
                 Button {
                     Task { await refreshProfile(profile) }

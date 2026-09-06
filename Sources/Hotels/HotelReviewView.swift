@@ -35,7 +35,7 @@ struct HotelReviewView: View {
             }
         }
         .scrollIndicators(.hidden)
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("Проверка отеля")
         .navigationBarTitleDisplayMode(.inline)
         .alert("Возможный дубль", isPresented: $showPossibleDuplicateAlert) {
@@ -559,8 +559,8 @@ struct HotelReviewView: View {
                         .frame(height: 50)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .background(.black, in: Capsule())
+                    .foregroundStyle(BusinessDesign.onPrimaryControl)
+                    .background(BusinessDesign.primaryControl, in: Capsule())
                     .disabled(coordinator.roomRecoveryRunning)
                 }
             } else {
@@ -690,7 +690,7 @@ struct HotelReviewView: View {
                         Text("\(job.progress)%").font(.caption.monospacedDigit())
                     }
                     ProgressView(value: Double(job.progress), total: 100)
-                        .tint(.black)
+                        .tint(BusinessDesign.ink)
                     Text(importProgressText(job))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -742,7 +742,7 @@ struct HotelReviewView: View {
                 .frame(height: 56)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.black)
+            .tint(BusinessDesign.primaryControl)
             .disabled(publishing || importJob?.isActive == true || draft.sources.isEmpty)
 
             Button("Закрыть") { dismiss() }

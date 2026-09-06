@@ -11,12 +11,14 @@ struct LoginView: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Image("Logo")
+                        .renderingMode(.template)
                         .resizable().scaledToFit().frame(width: 150, height: 44)
+                        .foregroundStyle(BusinessDesign.ink)
                     Spacer()
                     Label("Secure", systemImage: "lock.fill")
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 13).frame(height: 42)
-                        .background(.white, in: Capsule())
+                        .background(BusinessDesign.card, in: Capsule())
                 }
 
                 Spacer(minLength: 48)
@@ -35,10 +37,10 @@ struct LoginView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .padding(.horizontal, 18).frame(height: 58)
-                        .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     SecureField("Пароль", text: $password)
                         .padding(.horizontal, 18).frame(height: 58)
-                        .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     if let error = auth.errorMessage {
                         Text(error).font(.footnote).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -46,9 +48,9 @@ struct LoginView: View {
                         working = true
                         Task { await auth.login(login: login, password: password); working = false }
                     } label: {
-                        HStack { if working { ProgressView().tint(.white) }; Text(working ? "Входим…" : "Войти") }
+                        HStack { if working { ProgressView().tint(BusinessDesign.onPrimaryControl) }; Text(working ? "Входим…" : "Войти") }
                             .font(.headline).frame(maxWidth: .infinity).frame(height: 56)
-                            .foregroundStyle(.white).background(BusinessDesign.ink, in: Capsule())
+                            .foregroundStyle(BusinessDesign.onPrimaryControl).background(BusinessDesign.primaryControl, in: Capsule())
                     }
                     .disabled(login.isEmpty || password.isEmpty || working)
                 }

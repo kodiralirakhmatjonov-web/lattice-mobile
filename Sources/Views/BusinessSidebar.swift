@@ -62,7 +62,7 @@ struct BusinessSidebarHost<Content: View>: View {
                 .offset(x: sidebar.isOpen ? min(0, dragOffset) : -drawerWidth + max(0, dragOffset))
                 .shadow(color: .black.opacity(sidebar.isOpen ? 0.12 : 0), radius: 28, x: 10)
         }
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .simultaneousGesture(
             DragGesture(minimumDistance: 12, coordinateSpace: .global)
                 .onChanged { value in
@@ -139,7 +139,7 @@ struct BusinessSidebarHost<Content: View>: View {
         }
         .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial)
-        .overlay(alignment: .trailing) { Rectangle().fill(Color.black.opacity(0.06)).frame(width: 0.5) }
+        .overlay(alignment: .trailing) { Rectangle().fill(BusinessDesign.line).frame(width: 0.5) }
         .ignoresSafeArea(edges: .bottom)
     }
 

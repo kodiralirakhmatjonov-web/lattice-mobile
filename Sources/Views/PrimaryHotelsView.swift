@@ -39,7 +39,7 @@ struct PrimaryHotelsView: View {
             }
             .padding(18)
         }
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -143,7 +143,7 @@ private struct PrimaryHotelCategoryPicker: View {
                                 .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Image(systemName: selectedIDs.contains(hotel.id) ? "checkmark.circle.fill" : "circle").foregroundStyle(selectedIDs.contains(hotel.id) ? .black : .secondary)
+                            Image(systemName: selectedIDs.contains(hotel.id) ? "checkmark.circle.fill" : "circle").foregroundStyle(selectedIDs.contains(hotel.id) ? BusinessDesign.accent : Color.secondary)
                         }
                     }
                     .buttonStyle(.plain)

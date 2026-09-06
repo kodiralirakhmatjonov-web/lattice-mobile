@@ -94,14 +94,14 @@ struct BookingPricingEditorSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.black)
+                .tint(BusinessDesign.primaryControl)
                 .controlSize(.large)
                 .disabled(saving || parsedComponents == nil)
             }
             .padding(18)
             .padding(.bottom, 24)
         }
-        .background(Color.white)
+        .background(BusinessDesign.background)
         .navigationTitle("Редактор цены")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

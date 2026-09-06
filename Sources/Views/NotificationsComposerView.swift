@@ -224,7 +224,7 @@ struct NotificationsComposerView: View {
                     }
                     .foregroundStyle(.primary)
                     .padding(14)
-                    .background(audience == option ? Color.black.opacity(0.065) : BusinessDesign.secondarySurface,
+                    .background(audience == option ? BusinessDesign.tertiarySurface : BusinessDesign.secondarySurface,
                                 in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
                 .buttonStyle(.plain)
@@ -284,20 +284,20 @@ struct NotificationsComposerView: View {
                 showConfirmation = true
             } label: {
                 HStack {
-                    if isSending { ProgressView().tint(.white) }
+                    if isSending { ProgressView().tint(BusinessDesign.onPrimaryControl) }
                     Text(isSending ? "Отправка…" : "Отправить iumrah Signal")
                     Spacer()
                     Text("\(selectedAudienceCount)")
                         .font(.caption.bold().monospacedDigit())
                         .padding(.horizontal, 9)
                         .frame(height: 26)
-                        .background(Color.white.opacity(0.16), in: Capsule())
+                        .background(BusinessDesign.onPrimaryControl.opacity(0.16), in: Capsule())
                 }
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
                 .padding(.horizontal, 17)
                 .frame(height: 58)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(!canSend)

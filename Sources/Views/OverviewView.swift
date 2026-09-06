@@ -189,7 +189,7 @@ private struct StatCard: View {
             Text(subtitle).font(.caption).foregroundStyle(.secondary)
         }
         .padding(18).frame(maxWidth: .infinity, minHeight: 130, alignment: .leading)
-        .background(attention ? BusinessDesign.softOrange : .white, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .background(attention ? BusinessDesign.softOrange : BusinessDesign.card, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(BusinessDesign.line))
     }
 }
@@ -242,7 +242,7 @@ struct BookingRow: View {
                             .foregroundStyle(.primary)
                             .padding(.horizontal, 10)
                             .frame(height: 28)
-                            .background(Color.black.opacity(0.055), in: Capsule())
+                            .background(BusinessDesign.secondarySurface, in: Capsule())
                     }
                     if let pilgrimID = booking.pilgrimID, !pilgrimID.isEmpty {
                         HStack(spacing: 5) {
@@ -255,7 +255,7 @@ struct BookingRow: View {
                         .foregroundStyle(.primary)
                         .padding(.horizontal, 10)
                         .frame(height: 28)
-                        .background(Color.black.opacity(0.055), in: Capsule())
+                        .background(BusinessDesign.secondarySurface, in: Capsule())
                         .textSelection(.enabled)
                         .contextMenu {
                             Button {
@@ -284,7 +284,7 @@ struct BookingRow: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
-        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(BusinessDesign.line, lineWidth: 1))
     }
 }
