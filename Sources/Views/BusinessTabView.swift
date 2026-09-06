@@ -12,8 +12,8 @@ struct BusinessTabView: View {
                     .tabItem { Label("Чаты", systemImage: "message.fill") }
                 NavigationStack { HotelsView() }
                     .tabItem { Label("Отели", systemImage: "building.2.fill") }
-                NavigationStack { PrimaryHotelsView(tabMode: true) }
-                    .tabItem { Label("Primary", systemImage: "star.square.fill") }
+                NavigationStack { FlightCurationView(tabMode: true) }
+                    .tabItem { Label("Авиабилеты", systemImage: "airplane") }
             }
             .tint(BusinessDesign.ink)
         }

@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 
 struct FlightCurationView: View {
+    var tabMode = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
@@ -316,7 +317,11 @@ struct FlightCurationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button("Закрыть") { dismiss() }
+                if tabMode {
+                    BusinessSidebarButton()
+                } else {
+                    Button("Закрыть") { dismiss() }
+                }
             }
         }
         .task { await loadPublished() }

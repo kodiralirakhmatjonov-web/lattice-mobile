@@ -116,7 +116,6 @@ struct BusinessSidebarHost<Content: View>: View {
             sidebarButton("Сотрудники", icon: "person.2", route: .employees)
             sidebarButton("Архив клиентов", icon: "archivebox", route: .archive)
             sidebarButton("Primary Hotels", icon: "building.2.crop.circle", route: .primaryHotels)
-            sidebarButton("Авиабилеты", icon: "airplane", route: .flights)
             if auth.user?.role.lowercased() == "superadmin" {
                 sidebarButton("eSIM Center", icon: "simcard.2.fill", route: .esimCenter)
             }
