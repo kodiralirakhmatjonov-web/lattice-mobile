@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct FlightCurationView: View {
@@ -27,6 +28,103 @@ struct FlightCurationView: View {
         }
     }
 
+    private enum SearchWorkspace: String, CaseIterable, Identifiable {
+        case manual
+        case bulk
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .manual: return "Один поиск"
+            case .bulk: return "Массовый JSON"
+            }
+        }
+    }
+
+    private enum BatchDirection: String {
+        case outbound
+        case returnLeg = "return"
+
+        init?(jsonValue: String?) {
+            let value = (jsonValue ?? "outbound")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            switch value {
+            case "outbound", "there", "forward": self = .outbound
+            case "return", "inbound", "back": self = .returnLeg
+            default: return nil
+            }
+        }
+
+        var title: String { self == .outbound ? "Туда" : "Обратно" }
+        var apiValue: String { self == .outbound ? "outbound_one_way" : "return_one_way" }
+    }
+
+    private enum BatchSearchStatus: String {
+        case pending
+        case searching
+        case found
+        case noResults
+        case failed
+    }
+
+    private struct BatchJSONEnvelope: Decodable {
+        struct Search: Decodable {
+            let id: String?
+            let direction: String?
+            let from: String
+            let to: String
+            let date: String
+        }
+
+        let type: String?
+        let searches: [Search]
+    }
+
+    private struct BatchSearchItem: Identifiable {
+        let id: String
+        let sourceID: String?
+        let direction: BatchDirection
+        let origin: String
+        let destination: String
+        let date: String
+        var status: BatchSearchStatus = .pending
+        var results: [BusinessFlightCurationItinerary] = []
+        var providerRequests: Int?
+        var error: String?
+    }
+
+    private enum BulkJSONError: LocalizedError {
+        case invalidJSON
+        case unsupportedType
+        case empty
+        case tooMany(Int)
+        case invalidDirection(String)
+        case invalidAirport(String)
+        case invalidDate(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidJSON:
+                return "JSON не удалось прочитать. Проверьте запятые, кавычки и структуру searches."
+            case .unsupportedType:
+                return "Массовый режим принимает только type: one_way. Round-trip остаётся отдельным ручным режимом."
+            case .empty:
+                return "В JSON нет поисковых задач."
+            case .tooMany(let count):
+                return "В одном запуске максимум 20 поисков. Сейчас в JSON: \(count). Разделите список на 2–3 блока."
+            case .invalidDirection(let value):
+                return "Неизвестное direction: \(value). Используйте outbound или return."
+            case .invalidAirport(let value):
+                return "Некорректный IATA-код аэропорта: \(value). Нужны ровно 3 латинские буквы."
+            case .invalidDate(let value):
+                return "Некорректная дата: \(value). Используйте формат YYYY-MM-DD и не указывайте прошедший день."
+            }
+        }
+    }
+
+    @State private var workspace: SearchWorkspace = .manual
     @State private var searchMode: SearchMode = .roundTrip
     @State private var outboundOrigin = "TAS"
     @State private var outboundDestination = "JED"
@@ -35,7 +133,7 @@ struct FlightCurationView: View {
     @State private var departureDate = Calendar.current.date(byAdding: .day, value: 21, to: Date()) ?? Date()
     @State private var returnDate = Calendar.current.date(byAdding: .day, value: 28, to: Date()) ?? Date()
     @State private var adults = 1
-    @State private var selectedAirlines: Set<String> = ["HY", "C6", "HH", "9S", "2U", "FZ", "XY"]
+    @State private var selectedAirlines: Set<String> = ["HY", "C6", "HH", "9S", "2U", "FZ", "XY", "F3", "SV"]
     @State private var results: [BusinessFlightCurationItinerary] = []
     @State private var published: [BusinessCuratedFlightOffer] = []
     @State private var isSearching = false
@@ -43,6 +141,12 @@ struct FlightCurationView: View {
     @State private var errorMessage: String?
     @State private var hasSearched = false
     @State private var searchDiagnostics: BusinessFlightCurationSearchResponse.Diagnostics?
+    @State private var bulkJSON = ""
+    @State private var batchSearches: [BatchSearchItem] = []
+    @State private var expandedBatchSearchIDs: Set<String> = []
+    @State private var selectedBatchResultKeys: Set<String> = []
+    @State private var isBatchSearching = false
+    @State private var isBatchPublishing = false
 
     private let api = APIClient.shared
 
@@ -59,25 +163,39 @@ struct FlightCurationView: View {
         .init(code: "9S", name: "Air Samarkand"),
         .init(code: "2U", name: "Fly Khiva"),
         .init(code: "FZ", name: "flydubai"),
-        .init(code: "XY", name: "flynas")
+        .init(code: "XY", name: "flynas"),
+        .init(code: "F3", name: "flyadeal"),
+        .init(code: "SV", name: "Saudia")
     ]
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
                 intro
-                routeCard
-                airlineFilters
-                searchButton
+                workspacePicker
 
-                if isSearching {
-                    ProgressView(searchProgressText)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 28)
-                } else if !results.isEmpty {
-                    searchResults
-                } else if hasSearched {
-                    emptySearchState
+                if workspace == .manual {
+                    routeCard
+                    airlineFilters
+                    searchButton
+
+                    if isSearching {
+                        ProgressView(searchProgressText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
+                    } else if !results.isEmpty {
+                        searchResults
+                    } else if hasSearched {
+                        emptySearchState
+                    }
+                } else {
+                    bulkSearchCard
+                    airlineFilters
+
+                    if !batchSearches.isEmpty {
+                        batchProgressSection
+                        batchResultsSection
+                    }
                 }
 
                 publishedSection
@@ -114,12 +232,133 @@ struct FlightCurationView: View {
             Text("Поиск и публикация рейсов")
                 .font(.system(size: 26, weight: .bold))
                 .tracking(-0.6)
-            Text("Три режима поиска: отдельный рейс туда, отдельный рейс обратно или полный маршрут. В режиме «Туда-обратно» Business отдельно помечает настоящий round-trip Ignav и комбинацию ONE WAY + RETURN, которую собрала система.")
+            Text("Ручной поиск остаётся без изменений. Массовый JSON запускает до 20 отдельных ONE WAY запросов через тот же рабочий Ignav-поиск, кэш и публикацию. Round-trip остаётся отдельной линейкой и в массовый ONE WAY не смешивается.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 10)
+    }
+
+    private var workspacePicker: some View {
+        Picker("Режим работы", selection: $workspace) {
+            ForEach(SearchWorkspace.allCases) { item in
+                Text(item.title).tag(item)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private var bulkSearchCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Массовый ONE WAY")
+                        .font(.headline)
+                    Text("Вставьте один JSON — Business последовательно выполнит каждый поиск через существующий curation-search. Максимум 20 задач за запуск.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Text("≤ 20")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .frame(height: 28)
+                    .background(BusinessDesign.secondarySurface, in: Capsule())
+            }
+
+            TextEditor(text: $bulkJSON)
+                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .scrollContentBackground(.hidden)
+                .padding(10)
+                .frame(minHeight: 210)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous).stroke(BusinessDesign.line))
+
+            HStack(spacing: 10) {
+                Button("Вставить пример") {
+                    bulkJSON = Self.bulkJSONExample
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.semibold))
+
+                Spacer()
+
+                if !bulkJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button("Очистить") {
+                        bulkJSON = ""
+                        batchSearches = []
+                        expandedBatchSearchIDs = []
+                        selectedBatchResultKeys = []
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .disabled(isBatchSearching || isBatchPublishing)
+                }
+            }
+
+            Stepper("Паломники: \(adults)", value: $adults, in: 1...9)
+                .disabled(isBatchSearching || isBatchPublishing)
+
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.trianglehead.branch")
+                Text("Только прямые рейсы · 0 пересадок")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: "externaldrive.badge.checkmark")
+                    .foregroundStyle(.blue)
+                Text("Новый batch не создаёт новую flight-архитектуру: каждый элемент вызывает тот же рабочий ручной endpoint. Поэтому действующий серверный кэш, нормализация результатов, логотипы и публикация сохраняются без отдельной реализации.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+            Button {
+                Task { await startBatchSearch() }
+            } label: {
+                HStack {
+                    Image(systemName: "square.stack.3d.up.fill")
+                    Text(isBatchSearching ? "Выполняем поиски…" : "Начать массовый поиск")
+                        .fontWeight(.semibold)
+                    Spacer()
+                    if !batchSearches.isEmpty {
+                        Text("\(batchSearches.count)")
+                            .font(.caption.bold())
+                            .padding(7)
+                            .background(.white.opacity(0.18), in: Circle())
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .frame(height: 56)
+                .background(Color.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(
+                bulkJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || isBatchSearching
+                || isBatchPublishing
+                || selectedAirlines.isEmpty
+            )
+            .opacity(
+                bulkJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedAirlines.isEmpty ? 0.45 : 1
+            )
+        }
+        .padding(18)
+        .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(BusinessDesign.line))
     }
 
     private var routeCard: some View {
@@ -302,8 +541,7 @@ struct FlightCurationView: View {
             if searchDiagnostics != nil {
                 if searchMode == .roundTrip {
                     let roundTrips = searchDiagnostics?.dedicatedRoundTripCount ?? 0
-                    let pairs = searchDiagnostics?.pairedOneWayCount ?? 0
-                    Text("Готовых round-trip Ignav: \(roundTrips). Комбинаций ONE WAY + RETURN: \(pairs). Отдельные участки от провайдера: \(raw.map(String.init).joined(separator: " / ")).")
+                    Text("Готовых единых round-trip Ignav: \(roundTrips). ONE WAY + RETURN в этом режиме не отображается.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -330,8 +568,8 @@ struct FlightCurationView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if searchMode == .roundTrip, isExactReverseRoute {
-                Text("Список отсортирован по полной цене. Смотрите метку на карточке: настоящий тариф туда-обратно Ignav и сумма двух отдельных one-way — разные продукты.")
+            if searchMode == .roundTrip {
+                Text("Здесь показывается только настоящий единый round-trip тариф Ignav. Комбинации ONE WAY + RETURN намеренно исключены и живут отдельно в ONE WAY inventory.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -488,6 +726,522 @@ struct FlightCurationView: View {
         }
     }
 
+    private var batchProgressSection: some View {
+        let completed = batchSearches.filter { [.found, .noResults, .failed].contains($0.status) }.count
+        let found = batchSearches.filter { $0.status == .found }.count
+        let failed = batchSearches.filter { $0.status == .failed }.count
+        let noResults = batchSearches.filter { $0.status == .noResults }.count
+        let fraction = batchSearches.isEmpty ? 0 : Double(completed) / Double(batchSearches.count)
+
+        return VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Массовый поиск")
+                        .font(.title3.bold())
+                    Text("\(completed) из \(batchSearches.count) завершено")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isBatchSearching {
+                    ProgressView()
+                } else {
+                    Image(systemName: failed == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(failed == 0 ? Color.green : Color.orange)
+                }
+            }
+
+            ProgressView(value: fraction)
+
+            HStack(spacing: 10) {
+                batchCounter("Найдено", value: found, color: .green)
+                batchCounter("Нет рейсов", value: noResults, color: .secondary)
+                batchCounter("Ошибка", value: failed, color: failed > 0 ? .orange : .secondary)
+            }
+
+            if failed > 0 && !isBatchSearching {
+                Button {
+                    Task { await retryFailedBatchSearches() }
+                } label: {
+                    Label("Повторить только ошибки (\(failed))", systemImage: "arrow.clockwise")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isBatchPublishing)
+            }
+        }
+        .padding(17)
+        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
+    }
+
+    private func batchCounter(_ title: String, value: Int, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)")
+                .font(.headline)
+                .foregroundStyle(color)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 11)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+    }
+
+    private var batchResultsSection: some View {
+        let foundCount = batchSearches.reduce(0) { $0 + $1.results.count }
+        let unpublishedCount = batchSearches.reduce(0) { partial, item in
+            partial + item.results.filter { !isAlreadyPublished($0) }.count
+        }
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Результаты batch")
+                        .font(.title3.bold())
+                    Text("\(foundCount) тарифов · \(unpublishedCount) ещё не опубликовано")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if foundCount > 0 {
+                VStack(spacing: 9) {
+                    HStack(spacing: 9) {
+                        Button("Самый дешёвый / поиск") { selectCheapestFromEachBatchSearch() }
+                            .buttonStyle(.plain)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 11)
+                            .frame(minHeight: 38)
+                            .background(BusinessDesign.secondarySurface, in: Capsule())
+
+                        Button("Выбрать все") { selectAllBatchResults() }
+                            .buttonStyle(.plain)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 11)
+                            .frame(minHeight: 38)
+                            .background(BusinessDesign.secondarySurface, in: Capsule())
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        Task { await publishSelectedBatchResults() }
+                    } label: {
+                        HStack {
+                            Image(systemName: "paperplane.fill")
+                            Text(isBatchPublishing ? "Публикуем…" : "Опубликовать выбранные")
+                                .fontWeight(.semibold)
+                            Spacer()
+                            Text("\(selectedBatchResultKeys.count)")
+                                .font(.caption.bold())
+                                .padding(7)
+                                .background(.white.opacity(0.18), in: Circle())
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 50)
+                        .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(selectedBatchResultKeys.isEmpty || isBatchPublishing || isBatchSearching)
+                    .opacity(selectedBatchResultKeys.isEmpty ? 0.45 : 1)
+                }
+            }
+
+            ForEach(batchSearches) { item in
+                batchSearchDisclosure(item)
+            }
+        }
+    }
+
+    private func batchSearchDisclosure(_ item: BatchSearchItem) -> some View {
+        DisclosureGroup(isExpanded: expansionBinding(item.id)) {
+            VStack(spacing: 10) {
+                if item.status == .failed {
+                    Text(item.error ?? "Неизвестная ошибка")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if item.status == .noResults {
+                    Text("Тот же ручной поиск не вернул прямых рейсов на эту дату. Это не считается ошибкой batch.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if !item.results.isEmpty {
+                    ForEach(item.results.prefix(20)) { itinerary in
+                        batchResultRow(searchID: item.id, itinerary: itinerary)
+                    }
+                    if item.results.count > 20 {
+                        Text("Показаны первые 20 из \(item.results.count) тарифов.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 11) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        Text("\(item.origin) → \(item.destination)")
+                            .font(.subheadline.bold())
+                        Text(item.direction.title.uppercased())
+                            .font(.caption2.bold())
+                            .foregroundStyle(item.direction == .outbound ? Color.blue : Color.purple)
+                    }
+                    HStack(spacing: 7) {
+                        Text(displayDate(item.date))
+                        if let providerRequests = item.providerRequests {
+                            Text("· \(providerRequests) provider req")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+
+                if let cheapest = item.results.min(by: { $0.price.amount < $1.price.amount }) {
+                    Text(money(cheapest.price.amount, currency: cheapest.price.currency))
+                        .font(.subheadline.bold())
+                }
+
+                batchStatusBadge(item.status)
+            }
+            .contentShape(Rectangle())
+        }
+        .padding(15)
+        .background(.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
+    }
+
+    private func batchResultRow(searchID: String, itinerary: BusinessFlightCurationItinerary) -> some View {
+        let key = batchSelectionKey(searchID: searchID, itinerary: itinerary)
+        let selected = selectedBatchResultKeys.contains(key)
+        let alreadyPublished = isAlreadyPublished(itinerary)
+        let perTraveler = itinerary.price.amount / Double(max(adults, 1))
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 11) {
+                Button {
+                    guard !alreadyPublished else { return }
+                    if selected { selectedBatchResultKeys.remove(key) }
+                    else { selectedBatchResultKeys.insert(key) }
+                } label: {
+                    Image(systemName: alreadyPublished ? "checkmark.seal.fill" : (selected ? "checkmark.circle.fill" : "circle"))
+                        .font(.title3)
+                        .foregroundStyle(alreadyPublished ? Color.green : (selected ? Color.black : Color.secondary))
+                }
+                .buttonStyle(.plain)
+                .disabled(alreadyPublished || isBatchPublishing)
+
+                BusinessAirlineLogoView(airlineIATA: itinerary.primaryAirlineCode, size: 36)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(itinerary.primaryAirlineName)
+                        .font(.subheadline.weight(.semibold))
+                    Text(itinerary.legs.map(\.flightNumber).filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(money(itinerary.price.amount, currency: itinerary.price.currency))
+                        .font(.subheadline.bold())
+                    Text("\(money(perTraveler, currency: itinerary.price.currency)) / чел.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let leg = itinerary.legs.first {
+                HStack {
+                    Text("\(leg.origin) → \(leg.destination) · \(dateTime(leg.departureAt))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Прямой")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Button {
+                Task { await publish(itinerary) }
+            } label: {
+                HStack {
+                    Image(systemName: alreadyPublished ? "checkmark.circle.fill" : "plus.circle.fill")
+                    Text(alreadyPublished ? "Уже опубликовано" : "Опубликовать этот тариф")
+                    Spacer()
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(alreadyPublished ? Color.secondary : Color.primary)
+                .padding(.horizontal, 12)
+                .frame(height: 40)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(alreadyPublished || publishingIDs.contains(itinerary.id) || isBatchPublishing)
+        }
+        .padding(12)
+        .background(BusinessDesign.secondarySurface.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func batchStatusBadge(_ status: BatchSearchStatus) -> some View {
+        let configuration: (String, String, Color) = {
+            switch status {
+            case .pending: return ("Ожидает", "clock", .secondary)
+            case .searching: return ("Поиск", "magnifyingglass", .blue)
+            case .found: return ("Найдено", "checkmark.circle.fill", .green)
+            case .noResults: return ("Нет", "minus.circle", .secondary)
+            case .failed: return ("Ошибка", "exclamationmark.triangle.fill", .orange)
+            }
+        }()
+
+        return Label(configuration.0, systemImage: configuration.1)
+            .font(.caption2.bold())
+            .foregroundStyle(configuration.2)
+            .padding(.horizontal, 8)
+            .frame(minHeight: 27)
+            .background(configuration.2.opacity(0.09), in: Capsule())
+    }
+
+    private func expansionBinding(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedBatchSearchIDs.contains(id) },
+            set: { expanded in
+                if expanded { expandedBatchSearchIDs.insert(id) }
+                else { expandedBatchSearchIDs.remove(id) }
+            }
+        )
+    }
+
+    @MainActor
+    private func startBatchSearch() async {
+        do {
+            let parsed = try parseBatchJSON()
+            batchSearches = parsed
+            expandedBatchSearchIDs = []
+            selectedBatchResultKeys = []
+            await executeBatch(indices: Array(batchSearches.indices))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func retryFailedBatchSearches() async {
+        let failedIndices = batchSearches.indices.filter { batchSearches[$0].status == .failed }
+        guard !failedIndices.isEmpty else { return }
+        await executeBatch(indices: Array(failedIndices))
+    }
+
+    @MainActor
+    private func executeBatch(indices: [Int]) async {
+        guard !indices.isEmpty else { return }
+        isBatchSearching = true
+        errorMessage = nil
+        let frozenAdults = adults
+        let frozenAirlines = selectedAirlines.sorted()
+        defer { isBatchSearching = false }
+
+        for index in indices {
+            guard batchSearches.indices.contains(index) else { continue }
+            let item = batchSearches[index]
+            batchSearches[index].status = .searching
+            batchSearches[index].error = nil
+            batchSearches[index].results = []
+            batchSearches[index].providerRequests = nil
+
+            let request = BusinessFlightCurationSearchRequest(
+                legs: [
+                    .init(
+                        origin: item.origin,
+                        destination: item.destination,
+                        departureDate: item.date,
+                        maxStops: 0
+                    )
+                ],
+                adults: frozenAdults,
+                children: 0,
+                infantsInSeat: 0,
+                infantsOnLap: 0,
+                cabinClass: "economy",
+                airlinesInclude: frozenAirlines,
+                allowSelfTransfer: false,
+                curationMode: item.direction.apiValue
+            )
+
+            do {
+                let response = try await api.searchFlightsForCuration(request)
+                let sorted = response.itineraries.sorted { lhs, rhs in
+                    if lhs.price.amount == rhs.price.amount {
+                        return lhs.observedAt > rhs.observedAt
+                    }
+                    return lhs.price.amount < rhs.price.amount
+                }
+                batchSearches[index].results = sorted
+                batchSearches[index].providerRequests = response.diagnostics?.providerRequests
+                batchSearches[index].status = sorted.isEmpty ? .noResults : .found
+                if !sorted.isEmpty {
+                    expandedBatchSearchIDs.insert(item.id)
+                }
+            } catch {
+                batchSearches[index].status = .failed
+                batchSearches[index].error = error.localizedDescription
+            }
+
+            if index != indices.last! {
+                try? await Task.sleep(nanoseconds: 180_000_000)
+            }
+        }
+    }
+
+    private func parseBatchJSON() throws -> [BatchSearchItem] {
+        guard let data = bulkJSON.data(using: .utf8) else { throw BulkJSONError.invalidJSON }
+        let envelope: BatchJSONEnvelope
+        do {
+            envelope = try JSONDecoder().decode(BatchJSONEnvelope.self, from: data)
+        } catch {
+            throw BulkJSONError.invalidJSON
+        }
+
+        if let type = envelope.type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !type.isEmpty,
+           type != "one_way" {
+            throw BulkJSONError.unsupportedType
+        }
+        guard !envelope.searches.isEmpty else { throw BulkJSONError.empty }
+        guard envelope.searches.count <= 20 else { throw BulkJSONError.tooMany(envelope.searches.count) }
+
+        var seen: Set<String> = []
+        var parsed: [BatchSearchItem] = []
+
+        for input in envelope.searches {
+            guard let direction = BatchDirection(jsonValue: input.direction) else {
+                throw BulkJSONError.invalidDirection(input.direction ?? "")
+            }
+            let origin = input.from.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let destination = input.to.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard isValidAirport(origin) else { throw BulkJSONError.invalidAirport(input.from) }
+            guard isValidAirport(destination) else { throw BulkJSONError.invalidAirport(input.to) }
+
+            let day = input.date.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let parsedDay = Self.apiDay.date(from: day),
+                  Self.apiDay.string(from: parsedDay) == day,
+                  Calendar.current.startOfDay(for: parsedDay) >= Calendar.current.startOfDay(for: Date()) else {
+                throw BulkJSONError.invalidDate(input.date)
+            }
+
+            let key = "\(direction.rawValue)|\(origin)|\(destination)|\(day)"
+            if seen.contains(key) { continue }
+            seen.insert(key)
+
+            parsed.append(BatchSearchItem(
+                id: key,
+                sourceID: input.id,
+                direction: direction,
+                origin: origin,
+                destination: destination,
+                date: day
+            ))
+        }
+
+        guard !parsed.isEmpty else { throw BulkJSONError.empty }
+        return parsed
+    }
+
+    private func isValidAirport(_ value: String) -> Bool {
+        value.count == 3 && value.unicodeScalars.allSatisfy { scalar in
+            scalar.value >= 65 && scalar.value <= 90
+        }
+    }
+
+    private func batchSelectionKey(searchID: String, itinerary: BusinessFlightCurationItinerary) -> String {
+        "\(searchID)|\(itinerary.publicationIdentity)"
+    }
+
+    private func isAlreadyPublished(_ itinerary: BusinessFlightCurationItinerary) -> Bool {
+        published.contains { offer in
+            offer.publicationIdentity == itinerary.publicationIdentity || offer.sourceCandidateID == itinerary.id
+        }
+    }
+
+    private func selectCheapestFromEachBatchSearch() {
+        var next: Set<String> = []
+        for item in batchSearches where !item.results.isEmpty {
+            let candidate = item.results
+                .filter { !isAlreadyPublished($0) }
+                .min(by: { $0.price.amount < $1.price.amount })
+            if let candidate {
+                next.insert(batchSelectionKey(searchID: item.id, itinerary: candidate))
+            }
+        }
+        selectedBatchResultKeys = next
+    }
+
+    private func selectAllBatchResults() {
+        var next: Set<String> = []
+        for item in batchSearches {
+            for itinerary in item.results where !isAlreadyPublished(itinerary) {
+                next.insert(batchSelectionKey(searchID: item.id, itinerary: itinerary))
+            }
+        }
+        selectedBatchResultKeys = next
+    }
+
+    @MainActor
+    private func publishSelectedBatchResults() async {
+        guard !selectedBatchResultKeys.isEmpty else { return }
+        isBatchPublishing = true
+        errorMessage = nil
+        defer { isBatchPublishing = false }
+
+        var seenPublicationIdentities: Set<String> = []
+        var failures: [String] = []
+        var successfulKeys: Set<String> = []
+
+        for item in batchSearches {
+            for itinerary in item.results {
+                let key = batchSelectionKey(searchID: item.id, itinerary: itinerary)
+                guard selectedBatchResultKeys.contains(key) else { continue }
+                guard !isAlreadyPublished(itinerary) else {
+                    successfulKeys.insert(key)
+                    continue
+                }
+                guard !seenPublicationIdentities.contains(itinerary.publicationIdentity) else {
+                    successfulKeys.insert(key)
+                    continue
+                }
+                seenPublicationIdentities.insert(itinerary.publicationIdentity)
+                publishingIDs.insert(itinerary.id)
+                do {
+                    _ = try await api.publishCuratedFlight(itinerary, travelerCount: adults)
+                    successfulKeys.insert(key)
+                } catch {
+                    failures.append("\(item.origin)→\(item.destination): \(error.localizedDescription)")
+                }
+                publishingIDs.remove(itinerary.id)
+            }
+        }
+
+        selectedBatchResultKeys.subtract(successfulKeys)
+        do {
+            published = try await api.curatedFlights()
+        } catch {
+            failures.append(error.localizedDescription)
+        }
+
+        if !failures.isEmpty {
+            errorMessage = failures.prefix(3).joined(separator: "\n")
+        }
+    }
+
     private var canSearch: Bool {
         guard !selectedAirlines.isEmpty else { return false }
         switch searchMode {
@@ -498,6 +1252,7 @@ struct FlightCurationView: View {
         case .roundTrip:
             return [outboundOrigin, outboundDestination, inboundOrigin, inboundDestination].allSatisfy { $0.count == 3 }
                 && departureDate <= returnDate
+                && isExactReverseRoute
         }
     }
 
@@ -507,16 +1262,16 @@ struct FlightCurationView: View {
 
     private var roundTripRouteNote: String {
         if isExactReverseRoute {
-            return "Маршрут зеркальный. Business сравнит настоящий round-trip тариф Ignav с нашей суммой ONE WAY + RETURN."
+            return "Маршрут зеркальный. Business ищет только единый round-trip тариф Ignav. ONE WAY + RETURN сюда не смешивается."
         }
-        return "Это open-jaw маршрут. У Ignav нет единого round-trip тарифа для разных аэропортов возврата, поэтому здесь будет только чётко помеченная комбинация ONE WAY + RETURN."
+        return "Это open-jaw, а не round-trip. Используйте отдельные режимы «Туда» и «Обратно» или массовый ONE WAY JSON."
     }
 
     private var searchButtonTitle: String {
         switch searchMode {
         case .outbound: return "Найти рейсы туда"
         case .inbound: return "Найти рейсы обратно"
-        case .roundTrip: return "Сравнить туда-обратно"
+        case .roundTrip: return "Найти round-trip"
         }
     }
 
@@ -524,7 +1279,7 @@ struct FlightCurationView: View {
         switch searchMode {
         case .outbound: return "Ищем прямые рейсы туда…"
         case .inbound: return "Ищем прямые рейсы обратно…"
-        case .roundTrip: return "Сравниваем варианты туда-обратно…"
+        case .roundTrip: return "Ищем единый round-trip тариф…"
         }
     }
 
@@ -535,7 +1290,7 @@ struct FlightCurationView: View {
         case .inbound:
             return "Ignav не вернул подходящий прямой рейс \(inboundOrigin) → \(inboundDestination) на выбранную дату."
         case .roundTrip:
-            return "Для \(outboundOrigin) → \(outboundDestination) и \(inboundOrigin) → \(inboundDestination) подходящего полного варианта пока нет."
+            return "Ignav не вернул единый round-trip тариф для \(outboundOrigin) → \(outboundDestination) → \(inboundDestination) на выбранные даты."
         }
     }
 
@@ -577,7 +1332,11 @@ struct FlightCurationView: View {
 
         do {
             let response = try await api.searchFlightsForCuration(request)
-            results = response.itineraries
+            if searchMode == .roundTrip {
+                results = response.itineraries.filter { $0.effectiveOfferType == "round_trip" }
+            } else {
+                results = response.itineraries
+            }
             searchDiagnostics = response.diagnostics
             hasSearched = true
         } catch {
@@ -676,6 +1435,34 @@ struct FlightCurationView: View {
     private func displayDate(_ apiDate: String) -> String {
         guard let date = Self.apiDay.date(from: apiDate) else { return apiDate }
         return Self.displayDay.string(from: date)
+    }
+
+    private static var bulkJSONExample: String {
+        let firstDate = Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date()
+        let secondDate = Calendar.current.date(byAdding: .day, value: 14, to: Date()) ?? firstDate
+        let firstDay = apiDay.string(from: firstDate)
+        let secondDay = apiDay.string(from: secondDate)
+        return """
+        {
+          "type": "one_way",
+          "searches": [
+            {
+              "id": "TAS-JED-\(firstDay)",
+              "direction": "outbound",
+              "from": "TAS",
+              "to": "JED",
+              "date": "\(firstDay)"
+            },
+            {
+              "id": "JED-TAS-\(secondDay)",
+              "direction": "return",
+              "from": "JED",
+              "to": "TAS",
+              "date": "\(secondDay)"
+            }
+          ]
+        }
+        """
     }
 
     private static let apiDay: DateFormatter = {
