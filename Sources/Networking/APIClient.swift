@@ -461,6 +461,16 @@ actor APIClient {
         return try decoder.decode(HotelAdminDetailResponse.self, from: data).hotel
     }
 
+    func updateHotelCity(id: String, city: String) async throws -> HotelAdminDetail {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(HotelCityUpdatePayload(city: city))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelAdminDetailResponse.self, from: data).hotel
+    }
+
     func refreshHotelPrice(id: String) async throws -> HotelPriceResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/refresh"))
         request.httpMethod = "POST"

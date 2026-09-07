@@ -4249,8 +4249,8 @@ function hotelPriceFromRow(row, options = {}) {
       : sourceExpiresAt;
 
   return {
-    provider: row.price_provider || null,
-    sourceURL: row.price_source_url || null,
+    provider: row.price_provider || row.price_locked_provider || null,
+    sourceURL: row.price_source_url || row.price_locked_source_url || null,
     resolvedURL: row.price_resolved_url || null,
     amountOriginal: row.price_amount_original == null ? null : Number(row.price_amount_original),
     currencyOriginal: row.price_currency_original || null,
@@ -4301,6 +4301,8 @@ const HOTEL_PRICE_SELECT = `
   hp.last_attempt_at AS price_last_attempt_at,
   hp.next_retry_at AS price_next_retry_at,
   hp.error AS price_error,
+  hps.provider AS price_locked_provider,
+  hps.source_url AS price_locked_source_url,
   hpo.nightly_price_usd AS price_manual_nightly_usd,
   hpo.updated_at AS price_manual_updated_at
 `;
@@ -4311,6 +4313,7 @@ async function readHotelPriceRow(env, hotelID) {
     FROM hotels h
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
     LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
     WHERE h.id=?
     LIMIT 1
   `).bind(hotelID).first();
@@ -4811,26 +4814,53 @@ async function updateHotelAdmin(request, env, hotelID) {
   const payload = await readJSON(request, 100_000);
   if (!payload.ok) return payload.response;
 
-  const existing = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  const existing = await env.HOTELS_DB.prepare('SELECT id, city FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
   if (!existing) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
 
   const body = payload.value && typeof payload.value === 'object' ? payload.value : {};
-  if (!Object.prototype.hasOwnProperty.call(body, 'stars')) {
-    return json({ ok: false, error: 'HOTEL_STARS_REQUIRED' }, 400);
+  const hasStars = Object.prototype.hasOwnProperty.call(body, 'stars');
+  const hasCity = Object.prototype.hasOwnProperty.call(body, 'city');
+  if (!hasStars && !hasCity) {
+    return json({ ok: false, error: 'HOTEL_UPDATE_REQUIRED' }, 400);
   }
 
-  const stars = Number(body.stars);
-  if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
-    return json({ ok: false, error: 'INVALID_HOTEL_STARS' }, 400);
+  let stars = null;
+  if (hasStars) {
+    stars = Number(body.stars);
+    if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+      return json({ ok: false, error: 'INVALID_HOTEL_STARS' }, 400);
+    }
   }
 
-  await env.HOTELS_DB.prepare('UPDATE hotels SET stars=?, updated_at=? WHERE id=?')
-    .bind(stars, new Date().toISOString(), hotelID)
-    .run();
+  let city = null;
+  if (hasCity) {
+    city = detectUmrahCity(body.city);
+    if (city !== 'Makkah' && city !== 'Madinah') {
+      return json({ ok: false, error: 'INVALID_HOTEL_CITY' }, 400);
+    }
+  }
 
-  // Only the canonical hotel row changes. Source snapshots remain untouched so
-  // provider-import evidence is preserved. Public catalog endpoints read h.stars,
-  // therefore the client application receives the updated value from the same D1 row.
+  const now = new Date().toISOString();
+  if (hasStars && hasCity) {
+    await env.HOTELS_DB.prepare('UPDATE hotels SET stars=?, city=?, updated_at=? WHERE id=?')
+      .bind(stars, city, now, hotelID).run();
+  } else if (hasStars) {
+    await env.HOTELS_DB.prepare('UPDATE hotels SET stars=?, updated_at=? WHERE id=?')
+      .bind(stars, now, hotelID).run();
+  } else {
+    await env.HOTELS_DB.prepare('UPDATE hotels SET city=?, updated_at=? WHERE id=?')
+      .bind(city, now, hotelID).run();
+  }
+
+  if (hasCity && canonicalCity(existing.city) !== city) {
+    // An editorial Primary assignment under the old city is no longer valid.
+    // Remove only this hotel's mismatched assignment; do not reshuffle any other slot.
+    await env.HOTELS_DB.prepare('DELETE FROM primary_hotels WHERE hotel_id=? AND LOWER(city)<>LOWER(?)')
+      .bind(hotelID, city).run();
+  }
+
+  // Source snapshots remain untouched as import evidence. The canonical hotels row
+  // is the single value read by the public catalog and package generator.
   return hotelDetail(env, hotelID, true);
 }
 
@@ -7046,7 +7076,9 @@ function detectUmrahCity(...values) {
       .trim();
     if (!text) continue;
     if (/\b(?:makkah|mecca|makkah al mukarramah|makkah almukarramah)\b/.test(text) || text.includes('مكة')) return 'Makkah';
+    if (/\b(?:ajyad|jabal omar|ibrahim al khalil|ibrahim alkhalil|al hajlah|al misfalah)\b/.test(text)) return 'Makkah';
     if (/\b(?:madinah|medina|al madinah|madinah al munawwarah|medina al munawwarah)\b/.test(text) || text.includes('المدينة')) return 'Madinah';
+    if (/\b(?:abi ayoub al ansari|abi ayyub al ansari|abu ayoub al ansari|abu ayyub al ansari|masjid an nabawi|masjid al nabawi|prophet'?s mosque)\b/.test(text)) return 'Madinah';
   }
   return null;
 }

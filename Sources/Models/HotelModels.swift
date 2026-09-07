@@ -541,6 +541,10 @@ struct HotelStarsUpdatePayload: Codable {
     let stars: Int
 }
 
+struct HotelCityUpdatePayload: Codable {
+    let city: String
+}
+
 struct HotelManualPriceUpdatePayload: Codable {
     let nightlyUSD: Double
 }

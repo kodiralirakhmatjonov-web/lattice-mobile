@@ -8,16 +8,19 @@ struct HotelAdminDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var hotel: HotelAdminDetail?
     @State private var selectedStars = 3
+    @State private var selectedCity = ""
     @State private var loading = true
     @State private var refreshingPrice = false
     @State private var editingManualPrice = false
     @State private var manualPriceText = ""
     @State private var savingManualPrice = false
     @State private var savingStars = false
+    @State private var savingCity = false
     @State private var deleting = false
     @State private var showDeleteConfirmation = false
     @State private var errorMessage: String?
     @State private var savedMessage: String?
+    @State private var citySavedMessage: String?
     @State private var priceNotice: String?
 
     var body: some View {
@@ -25,6 +28,7 @@ struct HotelAdminDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 if let hotel {
                     hero(hotel)
+                    cityCard(hotel)
                     priceCard(hotel)
                     starsCard(hotel)
                     sourceCard(hotel)
@@ -116,6 +120,69 @@ struct HotelAdminDetailView: View {
                 statusPill(hotel)
             }
         }
+    }
+
+    private func cityCard(_ hotel: HotelAdminDetail) -> some View {
+        let current = canonicalManagedCity(hotel.city)
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Город")
+                        .font(.title2.bold())
+                    Text("Сохраняется в D1 и сразу используется клиентским каталогом и Primary Hotels.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                if current == nil {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            if current == nil {
+                Label("Город не распознан. Выберите Makkah или Madinah вручную.", systemImage: "mappin.slash")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            }
+
+            Picker("Город", selection: $selectedCity) {
+                Text("Мекка").tag("Makkah")
+                Text("Медина").tag("Madinah")
+            }
+            .pickerStyle(.segmented)
+
+            if let citySavedMessage {
+                Label(citySavedMessage, systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+            }
+
+            Button {
+                Task { await saveCity() }
+            } label: {
+                HStack {
+                    if savingCity { ProgressView() }
+                    Text(savingCity ? "Сохраняю…" : "Сохранить город")
+                    Spacer()
+                    Image(systemName: "checkmark")
+                }
+                .font(.headline)
+                .padding(.horizontal, 16)
+                .frame(height: 50)
+                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .disabled(savingCity || selectedCity.isEmpty || selectedCity == current)
+        }
+        .padding(17)
+        .businessCard(radius: 28)
     }
 
     private func priceCard(_ hotel: HotelAdminDetail) -> some View {
@@ -438,6 +505,7 @@ struct HotelAdminDetailView: View {
             let detail = try await APIClient.shared.hotelDetail(id: hotelID)
             hotel = detail
             selectedStars = detail.stars ?? 3
+            selectedCity = canonicalManagedCity(detail.city) ?? ""
             if !editingManualPrice { manualPriceText = editablePrice(detail.price?.nightlyUSD) }
             errorMessage = nil
         } catch {
@@ -505,6 +573,31 @@ struct HotelAdminDetailView: View {
             manualPriceText = editablePrice(latest.price?.nightlyUSD)
             editingManualPrice = false
             savedMessage = "Ручная цена сохранена в базе"
+            onChanged()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func canonicalManagedCity(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value == "makkah" || value == "mecca" { return "Makkah" }
+        if value == "madinah" || value == "medina" { return "Madinah" }
+        return nil
+    }
+
+    @MainActor
+    private func saveCity() async {
+        guard selectedCity == "Makkah" || selectedCity == "Madinah" else { return }
+        savingCity = true
+        citySavedMessage = nil
+        defer { savingCity = false }
+        do {
+            let updated = try await APIClient.shared.updateHotelCity(id: hotelID, city: selectedCity)
+            hotel = updated
+            selectedCity = canonicalManagedCity(updated.city) ?? selectedCity
+            citySavedMessage = "Город сохранён в базе"
             onChanged()
             errorMessage = nil
         } catch {
