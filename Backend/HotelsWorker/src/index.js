@@ -1,5 +1,5 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
-import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch } from './hotel-price.js';
+import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -99,11 +99,17 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
   }
 
   if (parts[0] === 'operations') {
-    return handleBusinessOperations(request, env, url, parts.slice(1), user);
+    return handleBusinessOperations(request, env, url, parts.slice(1), user, businessSession);
   }
 
   const hotelID = safeID(parts[0]);
   if (!hotelID) return json({ ok: false, error: 'INVALID_HOTEL_ID' }, 400);
+
+  if (parts.length === 2 && parts[1] === 'price') {
+    if (request.method === 'PUT') return setManualHotelPrice(request, env, hotelID, user);
+    if (request.method === 'DELETE') return clearManualHotelPrice(env, hotelID);
+    return methodNotAllowed();
+  }
 
   if (parts.length === 3 && parts[1] === 'price' && parts[2] === 'refresh') {
     if (request.method !== 'POST') return methodNotAllowed();
@@ -878,7 +884,7 @@ const TRIP_TRANSITIONS = {
   cancelled: new Set(['cancelled'])
 };
 
-async function handleBusinessOperations(request, env, url, parts, user) {
+async function handleBusinessOperations(request, env, url, parts, user, businessSession = null) {
   if (parts.length === 1 && parts[0] === 'me') {
     if (request.method === 'GET') return businessProfileMe(env, user);
     if (request.method === 'PUT') return saveBusinessProfileMe(request, env, user);
@@ -893,7 +899,18 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     if (parts.length === 2 && request.method === 'GET') return adminTeamMember(env, memberID);
     if (parts.length === 2 && request.method === 'PUT') return updateTeamMember(request, env, memberID);
     if (parts.length === 2 && request.method === 'DELETE') return deleteTeamMember(env, memberID);
+    if (parts.length === 3 && parts[2] === 'photo') {
+      if (request.method === 'GET') return serveAdminTeamMemberPhoto(env, memberID);
+      if (request.method === 'POST') return uploadTeamMemberPhoto(request, env, memberID);
+      if (request.method === 'DELETE') return deleteTeamMemberPhoto(env, memberID);
+      return methodNotAllowed();
+    }
     return methodNotAllowed();
+  }
+
+  if (parts.length === 1 && parts[0] === 'ignav-usage') {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return adminIgnavUsage(env);
   }
 
   if (parts[0] === 'flight-verify') {
@@ -905,6 +922,25 @@ async function handleBusinessOperations(request, env, url, parts, user) {
     if (parts.length === 1 && request.method === 'GET') return listClientSystemNotifications(env);
     if (parts.length === 1 && request.method === 'POST') return createClientSystemNotification(request, env, user);
     if (parts.length === 2 && parts[1] === 'audience' && request.method === 'GET') return clientNotificationAudience(env);
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === 'esim-access') {
+    const role = String(user?.role || '').toLowerCase();
+    if (role !== 'superadmin') return json({ ok: false, error: 'ESIM_ACCESS_PURCHASE_SUPERADMIN_ONLY' }, 403);
+    if (parts.length === 2 && parts[1] === 'balance' && request.method === 'GET') return adminEsimAccessBalance(env);
+    if (parts.length === 2 && parts[1] === 'packages' && request.method === 'GET') return adminEsimAccessPackages(env, url);
+    if (parts.length === 2 && parts[1] === 'inventory' && request.method === 'GET') return adminEsimAccessInventory(env);
+    if (parts.length === 2 && parts[1] === 'orders' && request.method === 'POST') {
+      if (businessSession && Number(businessSession.is_primary || 0) !== 1) return json({ ok: false, error: 'ESIM_ACCESS_PURCHASE_PRIMARY_ONLY' }, 403);
+      return purchaseEsimAccessProfile(request, env, user);
+    }
+    if (parts.length === 4 && parts[1] === 'inventory' && parts[3] === 'refresh' && request.method === 'POST') {
+      return refreshEsimAccessInventory(env, parts[2]);
+    }
+    if (parts.length === 4 && parts[1] === 'inventory' && parts[3] === 'assign' && request.method === 'POST') {
+      return assignEsimAccessInventory(request, env, parts[2], user);
+    }
     return methodNotAllowed();
   }
 
@@ -971,6 +1007,34 @@ async function handleBusinessOperations(request, env, url, parts, user) {
   return json({ ok: false, error: 'NOT_FOUND' }, 404);
 }
 
+
+async function adminIgnavUsage(env) {
+  const period = new Date().toISOString().slice(0, 7);
+  const configuredBudget = Math.trunc(Number(env.IGNAV_MONTHLY_REQUEST_BUDGET || 6000));
+  const monthlyBudget = Number.isFinite(configuredBudget) && configuredBudget > 0 ? configuredBudget : 6000;
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT period, successful_requests, first_success_at, last_success_at, updated_at
+    FROM ignav_api_usage_monthly
+    WHERE period=?
+    LIMIT 1
+  `).bind(period).first().catch(() => null);
+  const successfulRequests = Math.max(0, Math.trunc(Number(row?.successful_requests || 0)));
+  const remainingRequests = Math.max(0, monthlyBudget - successfulRequests);
+  const usedFraction = monthlyBudget > 0 ? Math.min(1, successfulRequests / monthlyBudget) : 0;
+  return json({
+    ok: true,
+    usage: {
+      period,
+      monthlyBudget,
+      successfulRequests,
+      remainingRequests,
+      usedFraction,
+      firstSuccessAt: row?.first_success_at || null,
+      lastSuccessAt: row?.last_success_at || null,
+      trackingNote: 'Серверный счётчик iumrah: учитываются успешные Ignav-запросы, записанные в общий D1.'
+    }
+  });
+}
 
 const FLIGHT_DIRECTIONS = new Set(['outbound','return']);
 
@@ -1410,7 +1474,11 @@ function mapTeamMember(row, admin = true) {
     publicVisible: Number(row.public_visible || 0) === 1,
     active: Number(row.active || 0) === 1,
     isOwner: Number(row.is_owner || 0) === 1,
-    photoURL: row.photo_object_key ? `/api/catalog/hotels/team/${encodeURIComponent(row.public_slug)}/photo` : null
+    photoURL: row.photo_object_key
+      ? (admin
+          ? `/api/admin/hotels/operations/team/${encodeURIComponent(row.id)}/photo?v=${encodeURIComponent(row.updated_at || '')}`
+          : `/api/catalog/hotels/team/${encodeURIComponent(row.public_slug)}/photo?v=${encodeURIComponent(row.updated_at || '')}`)
+      : null
   };
   if (admin) base.staffLogin = row.staff_login || null;
   return base;
@@ -1497,11 +1565,56 @@ async function updateTeamMember(request, env, memberID) {
   return adminTeamMember(env, memberID);
 }
 
+async function serveAdminTeamMemberPhoto(env, memberID) {
+  const row = await env.HOTELS_DB.prepare('SELECT photo_object_key, photo_content_type FROM team_members WHERE id=? LIMIT 1').bind(memberID).first();
+  if (!row?.photo_object_key) return json({ ok: false, error: 'PHOTO_NOT_FOUND' }, 404);
+  const object = await env.HOTELS_MEDIA.get(row.photo_object_key);
+  if (!object) return json({ ok: false, error: 'PHOTO_NOT_FOUND' }, 404);
+  return new Response(object.body, {
+    headers: {
+      'content-type': row.photo_content_type || 'image/jpeg',
+      'cache-control': 'private, max-age=3600'
+    }
+  });
+}
+
+async function uploadTeamMemberPhoto(request, env, memberID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE id=? LIMIT 1').bind(memberID).first();
+  if (!row) return json({ ok: false, error: 'TEAM_MEMBER_NOT_FOUND' }, 404);
+
+  const uploaded = await privateImageUpload(request, env, `team-photos/${memberID}`);
+  if (!uploaded.ok) return uploaded.response;
+
+  const previousKey = row.photo_object_key || null;
+  const now = new Date().toISOString();
+  try {
+    await env.HOTELS_DB.prepare('UPDATE team_members SET photo_object_key=?, photo_content_type=?, updated_at=? WHERE id=?')
+      .bind(uploaded.key, uploaded.ct, now, memberID).run();
+  } catch (error) {
+    await env.HOTELS_MEDIA.delete(uploaded.key).catch(() => {});
+    throw error;
+  }
+  if (previousKey && previousKey !== uploaded.key) await env.HOTELS_MEDIA.delete(previousKey).catch(() => {});
+  return adminTeamMember(env, memberID);
+}
+
+async function deleteTeamMemberPhoto(env, memberID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM team_members WHERE id=? LIMIT 1').bind(memberID).first();
+  if (!row) return json({ ok: false, error: 'TEAM_MEMBER_NOT_FOUND' }, 404);
+  const previousKey = row.photo_object_key || null;
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare('UPDATE team_members SET photo_object_key=NULL, photo_content_type=NULL, updated_at=? WHERE id=?')
+    .bind(now, memberID).run();
+  if (previousKey) await env.HOTELS_MEDIA.delete(previousKey).catch(() => {});
+  return adminTeamMember(env, memberID);
+}
+
 async function deleteTeamMember(env, memberID) {
-  const row = await env.HOTELS_DB.prepare('SELECT is_owner FROM team_members WHERE id=?').bind(memberID).first();
+  const row = await env.HOTELS_DB.prepare('SELECT is_owner, photo_object_key FROM team_members WHERE id=?').bind(memberID).first();
   if (!row) return json({ ok: true });
   if (Number(row.is_owner || 0) === 1) return json({ ok: false, error: 'OWNER_CANNOT_BE_DELETED' }, 409);
   await env.HOTELS_DB.prepare('DELETE FROM team_members WHERE id=?').bind(memberID).run();
+  if (row.photo_object_key) await env.HOTELS_MEDIA.delete(row.photo_object_key).catch(() => {});
   return json({ ok: true });
 }
 
@@ -2736,6 +2849,396 @@ async function clientBookingEsims(env, bookingID) {
 }
 
 
+async function esimAccessPost(env, endpoint, body = {}) {
+  const accessCode = String(env.ESIM_ACCESS_CODE || '').trim();
+  if (!accessCode) throw new Error('ESIM_ACCESS_NOT_CONFIGURED');
+
+  const secretKey = String(env.ESIM_ACCESS_SECRET || '').trim();
+  const requestBody = JSON.stringify(body || {});
+  const headers = {
+    'content-type': 'application/json',
+    'RT-AccessCode': accessCode
+  };
+
+  // eSIM Access supports the simplified RT-AccessCode-only mode. When the
+  // account's SecretKey is configured as a Cloudflare secret, use the stronger
+  // signed form recommended for write operations without ever exposing either
+  // credential to the iOS application.
+  if (secretKey) {
+    const timestamp = Date.now().toString();
+    const requestID = crypto.randomUUID();
+    const signData = timestamp + requestID + accessCode + requestBody;
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secretKey),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const signatureBuffer = await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(signData));
+    const signature = [...new Uint8Array(signatureBuffer)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    headers['RT-Timestamp'] = timestamp;
+    headers['RT-RequestID'] = requestID;
+    headers['RT-Signature'] = signature;
+  }
+
+  const response = await fetch(`https://api.esimaccess.com/api/v1/open${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: requestBody
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload) {
+    const error = new Error(`ESIM_ACCESS_HTTP_${response.status}`);
+    error.httpStatus = response.status;
+    throw error;
+  }
+  if (payload.success === false) {
+    const code = String(payload.errorCode || '').trim();
+    if (code === '200007') throw new Error('ESIM_ACCESS_BALANCE_INSUFFICIENT');
+    if (code === '401001') throw new Error('ESIM_ACCESS_AUTH_FAILED');
+    const error = new Error(code ? `ESIM_ACCESS_PROVIDER_${code}` : 'ESIM_ACCESS_PROVIDER_ERROR');
+    error.providerMessage = cleanText(payload.errorMsg, 360) || '';
+    throw error;
+  }
+  return payload;
+}
+
+function esimAccessBalanceValue(payload) {
+  const raw = Number(payload?.obj?.balance ?? payload?.balance ?? 0);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+}
+
+function esimAccessNetworkNames(raw) {
+  const roots = Array.isArray(raw?.locationNetworkList) ? raw.locationNetworkList : [];
+  const values = [];
+  for (const item of roots) {
+    const direct = [item?.networkName, item?.operatorName, item?.name].filter(Boolean);
+    values.push(...direct);
+    const nested = Array.isArray(item?.networkList) ? item.networkList : [];
+    for (const network of nested) values.push(network?.networkName || network?.operatorName || network?.name || '');
+  }
+  return [...new Set(values.map(value => safeHumanText(value, 100)).filter(Boolean))].slice(0, 8);
+}
+
+function mapEsimAccessPackage(raw) {
+  if (!raw) return null;
+  const packageCode = cleanText(raw.packageCode, 160);
+  if (!packageCode) return null;
+  const priceRaw = esimNumber(raw.price);
+  const retailPriceRaw = raw.retailPrice == null ? null : esimNumber(raw.retailPrice);
+  const locationRaw = raw.locationCode || raw.location || '';
+  const locationCode = Array.isArray(locationRaw) ? cleanText(locationRaw[0], 12) || '' : cleanText(locationRaw, 12) || '';
+  return {
+    packageCode,
+    slug: cleanText(raw.slug, 180) || '',
+    name: safeHumanText(raw.name || raw.packageName || packageCode, 240) || packageCode,
+    priceRaw,
+    priceUSD: priceRaw / 10000,
+    retailPriceRaw,
+    retailPriceUSD: retailPriceRaw == null ? null : retailPriceRaw / 10000,
+    currencyCode: cleanText(raw.currencyCode, 12) || 'USD',
+    volumeBytes: esimNumber(raw.volume),
+    duration: Math.max(0, Math.trunc(esimNumber(raw.duration))),
+    durationUnit: cleanText(raw.durationUnit, 30) || 'DAY',
+    locationCode: locationCode.toUpperCase(),
+    speed: safeHumanText(raw.speed || '', 80) || '',
+    supportsTopUp: Number(raw.supportTopUpType || 0) >= 2,
+    activeType: raw.activeType == null ? null : Number(raw.activeType),
+    networkNames: esimAccessNetworkNames(raw)
+  };
+}
+
+async function esimAccessPackages(env, countryCode = '', packageCode = '') {
+  const payload = await esimAccessPost(env, '/package/list', {
+    locationCode: String(countryCode || '').toUpperCase(),
+    type: '',
+    slug: '',
+    packageCode: packageCode || '',
+    iccid: ''
+  });
+  const rows = Array.isArray(payload?.obj?.packageList) ? payload.obj.packageList : [];
+  return rows
+    .filter(raw => Number(raw?.dataType || 0) !== 2)
+    .map(mapEsimAccessPackage)
+    .filter(Boolean);
+}
+
+async function esimAccessBalance(env) {
+  const payload = await esimAccessPost(env, '/balance/query', {});
+  const rawAmount = esimAccessBalanceValue(payload);
+  return { rawAmount, amountUSD: rawAmount / 10000, currencyCode: 'USD' };
+}
+
+async function adminEsimAccessBalance(env) {
+  try { return json({ ok: true, balance: await esimAccessBalance(env) }); }
+  catch (error) { return esimAccessErrorResponse(error); }
+}
+
+async function adminEsimAccessPackages(env, url) {
+  const countryCode = (cleanText(url.searchParams.get('country'), 8) || 'SA').toUpperCase();
+  try {
+    const packages = await esimAccessPackages(env, countryCode, '');
+    return json({ ok: true, countryCode, packages });
+  } catch (error) { return esimAccessErrorResponse(error); }
+}
+
+function esimAccessErrorResponse(error) {
+  const code = String(error?.message || 'ESIM_ACCESS_FAILED');
+  let status = 502;
+  if (code === 'ESIM_ACCESS_NOT_CONFIGURED') status = 503;
+  else if (code === 'ESIM_ACCESS_BALANCE_INSUFFICIENT') status = 409;
+  else if (code === 'ESIM_ACCESS_PACKAGE_NOT_FOUND') status = 404;
+  else if (code === 'ESIM_ACCESS_PRICE_CHANGED') status = 409;
+  else if (code === 'ESIM_ACCESS_PROFILE_NOT_READY') status = 409;
+  else if (code === 'ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED') status = 409;
+  else if (code === 'ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW') status = 409;
+  return json({ ok: false, error: code }, status);
+}
+
+function mapEsimAccessInventory(row) {
+  if (!row) return null;
+  const total = esimNumber(row.total_volume_bytes || row.volume_bytes);
+  const used = esimNumber(row.used_volume_bytes);
+  return {
+    id: row.id,
+    clientRequestID: row.client_request_id || '',
+    transactionID: row.transaction_id || '',
+    orderNo: row.order_no || null,
+    esimTranNo: row.esim_tran_no || null,
+    packageCode: row.package_code || '',
+    packageName: row.package_name || row.package_code || '',
+    countryCode: row.country_code || '',
+    priceUSD: esimNumber(row.price_raw) / 10000,
+    currencyCode: row.currency_code || 'USD',
+    volumeBytes: esimNumber(row.volume_bytes),
+    duration: row.duration == null ? null : Number(row.duration),
+    durationUnit: row.duration_unit || null,
+    iccid: row.iccid || null,
+    lpaString: row.lpa_string || null,
+    smdpAddress: row.smdp_address || null,
+    activationCode: row.activation_code || null,
+    qrCodeURL: row.qr_code_url || null,
+    shortURL: row.short_url || null,
+    smdpStatus: row.smdp_status || null,
+    esimStatus: row.esim_status || null,
+    totalVolumeBytes: total,
+    usedVolumeBytes: used,
+    remainingVolumeBytes: Math.max(0, total - used),
+    expiresAt: row.expires_at || null,
+    purchaseStatus: row.purchase_status || 'pending',
+    assignedBookingID: row.assigned_booking_id || null,
+    assignedBookingEsimID: row.assigned_booking_esim_id || null,
+    assignedTravelerPosition: row.assigned_traveler_position == null ? null : Number(row.assigned_traveler_position),
+    createdBy: row.created_by || null,
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || ''
+  };
+}
+
+async function adminEsimAccessInventory(env) {
+  const rows = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory ORDER BY created_at DESC LIMIT 500').all();
+  return json({ ok: true, profiles: (rows.results || []).map(mapEsimAccessInventory).filter(Boolean) });
+}
+
+function esimAccessListFromPayload(payload) {
+  const candidates = [payload?.obj?.esimList, payload?.esimList, payload?.data?.esimList, payload?.obj?.list, payload?.data?.list];
+  return candidates.find(Array.isArray) || [];
+}
+
+async function esimAccessQueryProfile(env, { orderNo = '', iccid = '' } = {}) {
+  const body = { orderNo: orderNo || '', iccid: iccid || '', pager: { pageNum: 1, pageSize: 20 } };
+  let payload;
+  try {
+    payload = await esimAccessPost(env, '/esim/query', body);
+  } catch (error) {
+    if (!String(error?.message || '').startsWith('ESIM_ACCESS_HTTP_')) throw error;
+    payload = await esimAccessPost(env, '/esim/list', body);
+  }
+  const list = esimAccessListFromPayload(payload);
+  if (iccid) return list.find(item => String(item?.iccid || '') === String(iccid)) || list[0] || null;
+  if (orderNo) return list.find(item => String(item?.orderNo || '') === String(orderNo)) || list[0] || null;
+  return list[0] || null;
+}
+
+async function updateEsimAccessInventoryFromProfile(env, inventoryID, profile) {
+  if (!profile) return env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(inventoryID).first();
+  const packageInfo = Array.isArray(profile.packageList) ? profile.packageList[0] || {} : {};
+  const lpaString = cleanText(profile.ac, 1000) || '';
+  const parsed = lpaParts(lpaString);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`UPDATE esim_access_inventory SET
+      esim_tran_no=COALESCE(?,esim_tran_no), package_name=CASE WHEN ?<>'' THEN ? ELSE package_name END,
+      country_code=CASE WHEN ?<>'' THEN ? ELSE country_code END, volume_bytes=CASE WHEN ?>0 THEN ? ELSE volume_bytes END,
+      duration=COALESCE(?,duration), duration_unit=COALESCE(?,duration_unit), iccid=COALESCE(?,iccid),
+      lpa_string=CASE WHEN ?<>'' THEN ? ELSE lpa_string END, smdp_address=CASE WHEN ?<>'' THEN ? ELSE smdp_address END,
+      activation_code=CASE WHEN ?<>'' THEN ? ELSE activation_code END, qr_code_url=COALESCE(?,qr_code_url), short_url=COALESCE(?,short_url),
+      smdp_status=COALESCE(?,smdp_status), esim_status=COALESCE(?,esim_status), total_volume_bytes=?, used_volume_bytes=?,
+      expires_at=COALESCE(?,expires_at), purchase_status='ready', provider_payload_json=?, updated_at=? WHERE id=?`)
+    .bind(
+      cleanText(profile.esimTranNo, 120) || null,
+      safeHumanText(packageInfo.packageName || '', 240) || '', safeHumanText(packageInfo.packageName || '', 240) || '',
+      cleanText(packageInfo.locationCode, 12) || '', (cleanText(packageInfo.locationCode, 12) || '').toUpperCase(),
+      esimNumber(packageInfo.volume || profile.totalVolume), esimNumber(packageInfo.volume || profile.totalVolume),
+      profile.totalDuration == null ? null : Math.max(0, Math.trunc(Number(profile.totalDuration))),
+      cleanText(profile.durationUnit || packageInfo.durationUnit, 30) || null,
+      cleanText(profile.iccid, 80) || null,
+      lpaString, lpaString,
+      parsed.smdpAddress, parsed.smdpAddress,
+      parsed.activationCode, parsed.activationCode,
+      cleanText(profile.qrCodeUrl, 1500) || null,
+      cleanText(profile.shortUrl, 1500) || null,
+      cleanText(profile.smdpStatus, 80) || null,
+      cleanText(profile.esimStatus, 80) || null,
+      esimNumber(profile.totalVolume || packageInfo.volume),
+      esimNumber(profile.orderUsage),
+      cleanText(profile.expiredTime, 100) || null,
+      JSON.stringify(profile).slice(0, 50000), now, inventoryID
+    ).run();
+  return env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(inventoryID).first();
+}
+
+async function purchaseEsimAccessProfile(request, env, user) {
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const packageCode = cleanText(payload.packageCode, 160);
+  const clientRequestID = safeID(payload.clientRequestID);
+  const expectedPriceRaw = Number(payload.expectedPriceRaw);
+  if (!packageCode || !clientRequestID || !Number.isFinite(expectedPriceRaw) || expectedPriceRaw < 0) {
+    return json({ ok: false, error: 'INVALID_ESIM_PURCHASE_REQUEST' }, 400);
+  }
+
+  const duplicate = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE client_request_id=? LIMIT 1').bind(clientRequestID).first();
+  if (duplicate) {
+    let row = duplicate;
+    if (!row.iccid && row.order_no) {
+      try {
+        const profile = await esimAccessQueryProfile(env, { orderNo: row.order_no });
+        if (profile) row = await updateEsimAccessInventoryFromProfile(env, row.id, profile);
+      } catch (_) {}
+    }
+    if (!row.order_no && ['failed', 'pending'].includes(String(row.purchase_status || '').toLowerCase())) {
+      return json({ ok: false, error: 'ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW', transactionID: row.transaction_id }, 409);
+    }
+    const balance = await esimAccessBalance(env).catch(() => null);
+    return json({ ok: true, profile: mapEsimAccessInventory(row), balance });
+  }
+
+  try {
+    const plans = await esimAccessPackages(env, '', packageCode);
+    const plan = plans.find(item => item.packageCode === packageCode) || plans[0];
+    if (!plan) throw new Error('ESIM_ACCESS_PACKAGE_NOT_FOUND');
+    if (Math.abs(plan.priceRaw - expectedPriceRaw) > 0.01) throw new Error('ESIM_ACCESS_PRICE_CHANGED');
+    const balance = await esimAccessBalance(env);
+    if (balance.rawAmount + 0.0001 < plan.priceRaw) throw new Error('ESIM_ACCESS_BALANCE_INSUFFICIENT');
+
+    const inventoryID = `esimp-${crypto.randomUUID()}`;
+    const transactionID = `iumrah_${Date.now()}_${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    await env.HOTELS_DB.prepare(`INSERT INTO esim_access_inventory
+      (id,client_request_id,transaction_id,package_code,package_name,country_code,price_raw,currency_code,volume_bytes,duration,duration_unit,purchase_status,created_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(inventoryID, clientRequestID, transactionID, plan.packageCode, plan.name, plan.locationCode, plan.priceRaw, plan.currencyCode, plan.volumeBytes, plan.duration, plan.durationUnit, 'pending', cleanText(user?.login, 180) || null, now, now).run();
+
+    let orderPayload;
+    try {
+      orderPayload = await esimAccessPost(env, '/esim/order', {
+        transactionId: transactionID,
+        amount: plan.priceRaw,
+        packageInfoList: [{ packageCode: plan.packageCode, count: 1, price: plan.priceRaw }]
+      });
+    } catch (error) {
+      await env.HOTELS_DB.prepare("UPDATE esim_access_inventory SET purchase_status='failed', updated_at=? WHERE id=?").bind(new Date().toISOString(), inventoryID).run().catch(() => {});
+      throw error;
+    }
+
+    const orderNo = cleanText(orderPayload?.obj?.orderNo || orderPayload?.orderNo, 160);
+    if (!orderNo) {
+      await env.HOTELS_DB.prepare("UPDATE esim_access_inventory SET purchase_status='failed', provider_payload_json=?, updated_at=? WHERE id=?")
+        .bind(JSON.stringify(orderPayload).slice(0, 50000), new Date().toISOString(), inventoryID).run();
+      throw new Error('ESIM_ACCESS_ORDER_NUMBER_MISSING');
+    }
+    await env.HOTELS_DB.prepare("UPDATE esim_access_inventory SET order_no=?, purchase_status='provisioning', provider_payload_json=?, updated_at=? WHERE id=?")
+      .bind(orderNo, JSON.stringify(orderPayload).slice(0, 50000), new Date().toISOString(), inventoryID).run();
+
+    let row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(inventoryID).first();
+    for (let attempt = 0; attempt < 5 && !row.iccid; attempt += 1) {
+      if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 1100));
+      const profile = await esimAccessQueryProfile(env, { orderNo }).catch(() => null);
+      if (profile) row = await updateEsimAccessInventoryFromProfile(env, inventoryID, profile);
+    }
+    const afterBalance = await esimAccessBalance(env).catch(() => null);
+    return json({ ok: true, profile: mapEsimAccessInventory(row), balance: afterBalance }, 201);
+  } catch (error) {
+    console.error('ESIM_ACCESS_PURCHASE_FAILED', error);
+    return esimAccessErrorResponse(error);
+  }
+}
+
+async function refreshEsimAccessInventory(env, rawID) {
+  const id = safeID(rawID);
+  if (!id) return json({ ok: false, error: 'INVALID_ESIM_INVENTORY_ID' }, 400);
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=? LIMIT 1').bind(id).first();
+  if (!row) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_NOT_FOUND' }, 404);
+  try {
+    const profile = await esimAccessQueryProfile(env, { orderNo: row.order_no || '', iccid: row.iccid || '' });
+    if (!profile) return json({ ok: true, profile: mapEsimAccessInventory(row), balance: null });
+    row = await updateEsimAccessInventoryFromProfile(env, id, profile);
+    return json({ ok: true, profile: mapEsimAccessInventory(row), balance: null });
+  } catch (error) { return esimAccessErrorResponse(error); }
+}
+
+async function assignEsimAccessInventory(request, env, rawID, user) {
+  const id = safeID(rawID);
+  if (!id) return json({ ok: false, error: 'INVALID_ESIM_INVENTORY_ID' }, 400);
+  let row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=? LIMIT 1').bind(id).first();
+  if (!row) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_NOT_FOUND' }, 404);
+  if (!row.iccid) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_NOT_READY' }, 409);
+
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const bookingID = cleanText(payload.bookingID, 180);
+  if (!bookingID) return json({ ok: false, error: 'INVALID_BOOKING_ID' }, 400);
+  let travelerPosition = payload.travelerPosition == null ? 1 : Math.trunc(Number(payload.travelerPosition));
+  if (!Number.isFinite(travelerPosition) || travelerPosition < 1) travelerPosition = 1;
+
+  if (row.assigned_booking_id) {
+    if (String(row.assigned_booking_id) !== bookingID) return json({ ok: false, error: 'ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED' }, 409);
+    const existing = row.assigned_booking_esim_id ? await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=? AND booking_id=? LIMIT 1').bind(row.assigned_booking_esim_id, bookingID).first() : null;
+    if (existing) return json({ ok: true, profile: mapEsimAccessInventory(row), esim: mapBookingEsim(existing) });
+  }
+
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
+  await ensureTravelerRows(env, bookingID, trip);
+  const travelerCountRow = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM booking_travelers WHERE booking_id=?').bind(bookingID).first();
+  const travelerCount = Math.max(1, Number(travelerCountRow?.count || 1));
+  if (travelerPosition > travelerCount) return json({ ok: false, error: 'INVALID_TRAVELER_POSITION' }, 400);
+
+  const bookingEsimID = `esim-${crypto.randomUUID()}`;
+  const totalMB = bytesToMB(row.total_volume_bytes || row.volume_bytes);
+  const usedMB = bytesToMB(row.used_volume_bytes);
+  const remainingMB = Math.max(0, totalMB - usedMB);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.batch([
+    env.HOTELS_DB.prepare(`INSERT INTO booking_esims
+      (id,booking_id,traveler_position,label,provider,provider_esim_id,iccid,plan_name,country_code,total_mb,used_mb,remaining_mb,validity_days,status,provider_status,provider_smdp_status,smdp_address,activation_code,lpa_string,qr_code_url,expires_at,last_usage_sync_at,usage_source,updated_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(
+        bookingEsimID, bookingID, travelerPosition, row.package_name || 'eSIM', ESIM_PROVIDER_ESIM_ACCESS, row.esim_tran_no || null,
+        row.iccid, row.package_name || '', row.country_code || 'SA', totalMB, usedMB, remainingMB, row.duration == null ? null : Number(row.duration),
+        row.esim_status || 'ready', row.esim_status || null, row.smdp_status || null, row.smdp_address || '', row.activation_code || '', row.lpa_string || '',
+        row.qr_code_url || null, row.expires_at || null, now, 'provider', cleanText(user?.login, 180) || null, now, now
+      ),
+    env.HOTELS_DB.prepare(`UPDATE esim_access_inventory SET assigned_booking_id=?, assigned_booking_esim_id=?, assigned_traveler_position=?, updated_at=? WHERE id=?`)
+      .bind(bookingID, bookingEsimID, travelerPosition, now, id)
+  ]);
+  row = await env.HOTELS_DB.prepare('SELECT * FROM esim_access_inventory WHERE id=?').bind(id).first();
+  const bookingEsim = await env.HOTELS_DB.prepare('SELECT * FROM booking_esims WHERE id=?').bind(bookingEsimID).first();
+  return json({ ok: true, profile: mapEsimAccessInventory(row), esim: mapBookingEsim(bookingEsim) });
+}
+
+
 async function adminCheckoutDetail(env, bookingID, trip) {
   if (!trip) return null;
   await ensureTravelerRows(env, bookingID, trip);
@@ -3699,7 +4202,11 @@ async function requireStaff(request, env, options = {}) {
 
 
 function hotelPriceFromRow(row) {
-  if (!row || row.price_status == null) return null;
+  if (!row) return null;
+  const manualNightly = row.price_manual_nightly_usd == null ? null : Number(row.price_manual_nightly_usd);
+  const sourceNightly = row.price_nightly_price_usd == null ? null : Number(row.price_nightly_price_usd);
+  const hasManual = Number.isFinite(manualNightly) && manualNightly > 0;
+  if (!hasManual && row.price_status == null) return null;
   return {
     provider: row.price_provider || null,
     sourceURL: row.price_source_url || null,
@@ -3707,18 +4214,20 @@ function hotelPriceFromRow(row) {
     amountOriginal: row.price_amount_original == null ? null : Number(row.price_amount_original),
     currencyOriginal: row.price_currency_original || null,
     priceBasis: row.price_basis || null,
-    nightlyUSD: row.price_nightly_price_usd == null ? null : Number(row.price_nightly_price_usd),
-    quoteTotalUSD: row.price_quote_total_usd == null ? null : Number(row.price_quote_total_usd),
+    nightlyUSD: hasManual ? manualNightly : sourceNightly,
+    sourceNightlyUSD: sourceNightly,
+    isManualOverride: hasManual,
+    quoteTotalUSD: hasManual ? null : (row.price_quote_total_usd == null ? null : Number(row.price_quote_total_usd)),
     checkIn: row.price_quote_check_in || null,
     checkOut: row.price_quote_check_out || null,
     nights: row.price_quote_nights == null ? null : Number(row.price_quote_nights),
     adults: row.price_quote_adults == null ? null : Number(row.price_quote_adults),
     rooms: row.price_quote_rooms == null ? null : Number(row.price_quote_rooms),
     confidence: row.price_confidence == null ? null : Number(row.price_confidence),
-    method: row.price_method || null,
-    status: row.price_status,
-    fetchedAt: row.price_fetched_at || null,
-    expiresAt: row.price_expires_at || null,
+    method: hasManual ? 'admin-manual-override' : (row.price_method || null),
+    status: hasManual ? 'manual' : row.price_status,
+    fetchedAt: hasManual ? (row.price_manual_updated_at || null) : (row.price_fetched_at || null),
+    expiresAt: hasManual ? null : (row.price_expires_at || null),
     lastAttemptAt: row.price_last_attempt_at || null,
     nextRetryAt: row.price_next_retry_at || null,
     error: row.price_error || null
@@ -3746,14 +4255,18 @@ const HOTEL_PRICE_SELECT = `
   hp.expires_at AS price_expires_at,
   hp.last_attempt_at AS price_last_attempt_at,
   hp.next_retry_at AS price_next_retry_at,
-  hp.error AS price_error
+  hp.error AS price_error,
+  hpo.nightly_price_usd AS price_manual_nightly_usd,
+  hpo.updated_at AS price_manual_updated_at
 `;
 
 async function readHotelPriceRow(env, hotelID) {
   return env.HOTELS_DB.prepare(`
     SELECT ${HOTEL_PRICE_SELECT}
-    FROM hotel_price_cache hp
-    WHERE hp.hotel_id=?
+    FROM hotels h
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
+    WHERE h.id=?
     LIMIT 1
   `).bind(hotelID).first();
 }
@@ -3911,17 +4424,207 @@ async function runHotelPriceMaintenance(env) {
   });
 }
 
+async function setManualHotelPrice(request, env, hotelID, user) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+  const payload = await readJSON(request, 100_000);
+  if (!payload.ok) return payload.response;
+  const nightlyUSD = Number(payload.value?.nightlyUSD);
+  if (!Number.isFinite(nightlyUSD) || nightlyUSD < 1 || nightlyUSD > 10_000) {
+    return json({ ok: false, error: 'INVALID_HOTEL_PRICE' }, 400);
+  }
+  const rounded = Math.round(nightlyUSD * 100) / 100;
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_overrides (hotel_id, nightly_price_usd, updated_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      nightly_price_usd=excluded.nightly_price_usd,
+      updated_by=excluded.updated_by,
+      updated_at=excluded.updated_at
+  `).bind(hotelID, rounded, cleanText(user?.login, 180) || null, now, now).run();
+  const row = await readHotelPriceRow(env, hotelID);
+  return json({ ok: true, price: hotelPriceFromRow(row), error: null });
+}
+
+async function clearManualHotelPrice(env, hotelID) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+  await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+  const row = await readHotelPriceRow(env, hotelID);
+  return json({ ok: true, price: hotelPriceFromRow(row), error: null });
+}
+
+function normalizedHotelPriceProvider(value, sourceURL = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'booking' || raw === 'booking.com') return 'Booking';
+  if (raw === 'expedia' || raw === 'expedia.com') return 'Expedia';
+  try { return detectRoomProvider(new URL(sourceURL)); } catch (_) { return null; }
+}
+
+async function ensureHotelPriceSourceLock(env, hotelID) {
+  let row = await env.HOTELS_DB.prepare(`
+    SELECT hps.source_id, hps.provider, hps.source_url
+    FROM hotel_price_sources hps
+    WHERE hps.hotel_id=?
+    LIMIT 1
+  `).bind(hotelID).first().catch(() => null);
+  if (row?.source_url) return row;
+
+  row = await env.HOTELS_DB.prepare(`
+    SELECT hs.id AS source_id, hs.provider, hs.source_url
+    FROM hotel_sources hs
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=hs.hotel_id
+    WHERE hs.hotel_id=? AND LOWER(hs.provider) IN ('booking','booking.com','expedia','expedia.com')
+    ORDER BY CASE WHEN hp.source_id=hs.id THEN 0 WHEN hp.source_url=hs.source_url THEN 1 ELSE 2 END,
+             hs.checked_at ASC
+    LIMIT 1
+  `).bind(hotelID).first();
+  if (!row?.source_url) return null;
+
+  const provider = normalizedHotelPriceProvider(row.provider, row.source_url);
+  if (!provider) return null;
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT OR IGNORE INTO hotel_price_sources (hotel_id, source_id, provider, source_url, locked_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(hotelID, row.source_id, provider, row.source_url, now, now).run().catch(() => {});
+  return { ...row, provider };
+}
+
+async function readExactHotelSourcePage(env, sourceURL) {
+  const headers = new Headers({
+    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
+    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'accept-language': 'en-US,en;q=0.9',
+    'cache-control': 'no-cache'
+  });
+  let response;
+  try {
+    response = await fetch(sourceURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
+  } catch (_) {
+    throw new Error('HOTEL_PRICE_SOURCE_FETCH_FAILED');
+  }
+  if (!response.ok) throw new Error(`HOTEL_PRICE_SOURCE_HTTP_${response.status}`);
+  const html = await response.text();
+  if (!html || html.length < 500) throw new Error('HOTEL_PRICE_SOURCE_EMPTY_PAGE');
+  if (html.length > 8_000_000) throw new Error('HOTEL_PRICE_SOURCE_PAGE_TOO_LARGE');
+  if (isProviderChallengeHTML(html)) throw new Error('HOTEL_PRICE_SOURCE_CHALLENGE');
+  return { response, html, finalURL: response.url || sourceURL };
+}
+
+async function fetchExactHotelSourcePrice(env, hotelID) {
+  const source = await ensureHotelPriceSourceLock(env, hotelID);
+  if (!source?.source_url) throw new Error('HOTEL_PRICE_SOURCE_MISSING');
+  const sourceURL = cleanURL(source.source_url);
+  if (!sourceURL) throw new Error('HOTEL_PRICE_SOURCE_INVALID');
+  const provider = normalizedHotelPriceProvider(source.provider, sourceURL);
+  if (!provider) throw new Error('HOTEL_PRICE_SOURCE_UNSUPPORTED');
+
+  const page = await readExactHotelSourcePage(env, sourceURL);
+  const response = page.response;
+  const html = page.html;
+  const finalURL = page.finalURL;
+  let finalParsed;
+  try { finalParsed = new URL(finalURL); } catch (_) { throw new Error('HOTEL_PRICE_SOURCE_BAD_REDIRECT'); }
+  const finalProvider = detectRoomProvider(finalParsed) || provider;
+  if (finalProvider !== provider || !providerRoomHostAllowed(finalParsed, provider)) {
+    throw new Error('HOTEL_PRICE_SOURCE_REDIRECT_MISMATCH');
+  }
+
+  const quote = quoteContextFromProbeURL(finalURL, provider);
+  const extracted = extractHotelPriceFromHTML(html, provider, quote.nights);
+  if (!extracted?.nightlyUSD) throw new Error('HOTEL_PRICE_NOT_FOUND_ON_SOURCE');
+
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  const expiresAt = new Date(nowDate.getTime() + HOTEL_PRICE_TTL_MS).toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, resolved_url,
+      amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+      quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+      confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
+      last_http_status, error, pending_nightly_price_usd, pending_seen_count,
+      pending_first_seen_at, pending_last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fresh', ?, ?, ?, NULL, ?, NULL, NULL, 0, NULL, NULL, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=excluded.source_id,
+      provider=excluded.provider,
+      source_url=excluded.source_url,
+      resolved_url=excluded.resolved_url,
+      amount_original=excluded.amount_original,
+      currency_original=excluded.currency_original,
+      price_basis=excluded.price_basis,
+      nightly_price_usd=excluded.nightly_price_usd,
+      quote_total_usd=excluded.quote_total_usd,
+      quote_check_in=excluded.quote_check_in,
+      quote_check_out=excluded.quote_check_out,
+      quote_nights=excluded.quote_nights,
+      quote_adults=excluded.quote_adults,
+      quote_rooms=excluded.quote_rooms,
+      confidence=excluded.confidence,
+      method=excluded.method,
+      status='fresh',
+      fetched_at=excluded.fetched_at,
+      expires_at=excluded.expires_at,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=NULL,
+      last_http_status=excluded.last_http_status,
+      error=NULL,
+      pending_nightly_price_usd=NULL,
+      pending_seen_count=0,
+      pending_first_seen_at=NULL,
+      pending_last_seen_at=NULL,
+      updated_at=excluded.updated_at
+  `).bind(
+    hotelID,
+    source.source_id || null,
+    provider,
+    sourceURL,
+    finalURL,
+    extracted.amount,
+    extracted.currency,
+    extracted.priceBasis,
+    extracted.nightlyUSD,
+    extracted.stayTotalUSD,
+    quote.checkIn,
+    quote.checkOut,
+    quote.nights,
+    quote.adults,
+    quote.rooms,
+    extracted.confidence,
+    extracted.method,
+    now,
+    expiresAt,
+    now,
+    response.status,
+    now,
+    now
+  ).run();
+
+  // A successful explicit provider refresh means the administrator wants the
+  // canonical source price again, so the temporary manual override is removed.
+  await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+  return readHotelPriceRow(env, hotelID);
+}
+
 async function refreshHotelPriceResponse(env, hotelID) {
   const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
   if (!hotel) return json({ ok: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
 
-  await runHotelPriceMaintenance(env);
-  const row = await readHotelPriceRow(env, hotelID);
-  const price = hotelPriceFromRow(row);
-  if (!price) {
-    return json({ ok: false, price: null, error: 'PRICE_REQUIRES_SOURCE_REIMPORT' }, 409);
+  try {
+    const row = await fetchExactHotelSourcePrice(env, hotelID);
+    return json({ ok: true, price: hotelPriceFromRow(row), error: null });
+  } catch (error) {
+    const code = cleanText(error?.message, 220) || 'HOTEL_PRICE_REFRESH_FAILED';
+    console.warn('HOTEL_PRICE_ADMIN_REFRESH_FAILED', hotelID, code);
+    await markHotelPriceRefreshFailure(env, hotelID, code).catch(() => {});
+    const status = code === 'HOTEL_PRICE_SOURCE_MISSING' ? 409
+      : code === 'HOTEL_PRICE_NOT_FOUND_ON_SOURCE' || code === 'HOTEL_PRICE_SOURCE_CHALLENGE' ? 422
+      : 502;
+    return json({ ok: false, price: hotelPriceFromRow(await readHotelPriceRow(env, hotelID)), error: code }, status);
   }
-  return json({ ok: true, price, error: null });
 }
 
 async function health(env, admin) {
@@ -3975,6 +4678,8 @@ async function listHotels(env, url, publishedOnly) {
       h.status,
       h.lifecycle_state,
       h.updated_at,
+      hps.provider AS locked_source_provider,
+      hps.source_url AS locked_source_url,
       ${HOTEL_PRICE_SELECT},
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id = h.id) AS room_count,
@@ -3987,6 +4692,8 @@ async function listHotels(env, url, publishedOnly) {
       ) AS cover_image_id
     FROM hotels h
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id = h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id = h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id = h.id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY
       CASE LOWER(h.city) WHEN 'makkah' THEN 0 WHEN 'madinah' THEN 1 ELSE 2 END,
@@ -3995,7 +4702,7 @@ async function listHotels(env, url, publishedOnly) {
   `;
 
   const result = await env.HOTELS_DB.prepare(sql).bind(...values).all();
-  const hotels = (result.results || []).map(row => hotelSummary(row));
+  const hotels = (result.results || []).map(row => hotelSummary(row, !publishedOnly));
   return json({ hotels }, 200, publishedOnly ? PUBLIC_CACHE_HEADERS : undefined);
 }
 
@@ -6112,6 +6819,8 @@ async function summaryRow(env, hotelID) {
       h.status,
       h.lifecycle_state,
       h.updated_at,
+      hps.provider AS locked_source_provider,
+      hps.source_url AS locked_source_url,
       ${HOTEL_PRICE_SELECT},
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id = h.id) AS room_count,
@@ -6123,11 +6832,13 @@ async function summaryRow(env, hotelID) {
       ) AS cover_image_id
     FROM hotels h
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id = h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id = h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id = h.id
     WHERE h.id = ?
   `).bind(hotelID).first();
 }
 
-function hotelSummary(row) {
+function hotelSummary(row, includeSource = true) {
   if (!row) return null;
   return {
     id: row.id,
@@ -6142,6 +6853,8 @@ function hotelSummary(row) {
     imageCount: Number(row.image_count || 0),
     roomCount: Number(row.room_count || 0),
     price: hotelPriceFromRow(row),
+    sourceProvider: includeSource ? (row.locked_source_provider || row.price_provider || null) : null,
+    sourceURL: includeSource ? (row.locked_source_url || row.price_source_url || null) : null,
     updatedAt: row.updated_at
   };
 }

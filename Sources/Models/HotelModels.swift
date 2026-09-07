@@ -447,6 +447,8 @@ struct HotelCachedPrice: Codable, Hashable {
     let currencyOriginal: String?
     let priceBasis: String?
     let nightlyUSD: Double?
+    let sourceNightlyUSD: Double?
+    let isManualOverride: Bool?
     let quoteTotalUSD: Double?
     let checkIn: String?
     let checkOut: String?
@@ -462,7 +464,7 @@ struct HotelCachedPrice: Codable, Hashable {
     let nextRetryAt: String?
     let error: String?
 
-    var hasUsablePrice: Bool { nightlyUSD != nil && (status == "fresh" || status == "stale") }
+    var hasUsablePrice: Bool { nightlyUSD != nil && (status == "fresh" || status == "stale" || status == "manual") }
 }
 
 struct HotelPriceResponse: Codable {
@@ -537,6 +539,10 @@ struct HotelAdminDetailResponse: Codable {
 
 struct HotelStarsUpdatePayload: Codable {
     let stars: Int
+}
+
+struct HotelManualPriceUpdatePayload: Codable {
+    let nightlyUSD: Double
 }
 
 struct HotelDuplicate: Codable, Identifiable {

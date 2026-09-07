@@ -44,14 +44,59 @@ test('large hotel price jumps are staged instead of replacing the accepted price
 test('price refresh is exact-source only and has no alternate URL or static fallback', () => {
   assert.match(worker, /ensureHotelPriceSourceLock\(env, hotelID\)/);
   assert.match(worker, /readExactHotelSourcePage\(env, sourceURL\)/);
-  assert.doesNotMatch(worker, /buildHotelPriceProbeURLs/);
-  assert.doesNotMatch(worker, /staticHotelHTML\(/);
-  assert.doesNotMatch(worker, /roomRecoveryProbeURLs/);
-  assert.doesNotMatch(worker, /source-rooms/);
+
+  // Scope the negative contract to price refresh. Room recovery is a separate
+  // admin utility and may probe availability dates without being used for price.
+  const start = worker.indexOf('async function fetchExactHotelSourcePrice');
+  const end = worker.indexOf('async function health', start);
+  const refreshImplementation = worker.slice(start, end);
+  assert.doesNotMatch(refreshImplementation, /buildHotelPriceProbeURLs/);
+  assert.doesNotMatch(refreshImplementation, /staticHotelHTML\(/);
+  assert.doesNotMatch(refreshImplementation, /roomRecoveryProbeURLs/);
+  assert.doesNotMatch(refreshImplementation, /source-rooms/);
 });
 
 test('hotel list exposes locked source URL only to Business admin summaries', () => {
   assert.match(worker, /LEFT JOIN hotel_price_sources hps ON hps\.hotel_id = h\.id/);
   assert.match(worker, /sourceProvider:\s*includeSource/);
   assert.match(worker, /sourceURL:\s*includeSource/);
+});
+
+
+test('manual hotel price override is returned by both admin and client hotel summaries', () => {
+  assert.match(worker, /LEFT JOIN hotel_price_overrides hpo ON hpo\.hotel_id = h\.id/);
+  assert.match(worker, /nightlyUSD:\s*hasManual \? manualNightly : sourceNightly/);
+  assert.match(worker, /status:\s*hasManual \? 'manual' : row\.price_status/);
+});
+
+test('successful source refresh removes the manual hotel price override only after a real source price is persisted', () => {
+  const start = worker.indexOf('async function fetchExactHotelSourcePrice');
+  const end = worker.indexOf('async function refreshHotelPriceResponse', start);
+  const implementation = worker.slice(start, end);
+  const persistAt = implementation.indexOf('INSERT INTO hotel_price_cache');
+  const clearAt = implementation.indexOf("DELETE FROM hotel_price_overrides WHERE hotel_id=?");
+  assert.ok(persistAt >= 0, 'source price cache write is missing');
+  assert.ok(clearAt > persistAt, 'manual override must only be cleared after a successful source cache write');
+});
+
+test('Business team photo endpoint supports authenticated read, upload and delete', () => {
+  assert.match(worker, /parts\[2\] === 'photo'/);
+  assert.match(worker, /request\.method === 'GET'\) return serveAdminTeamMemberPhoto/);
+  assert.match(worker, /request\.method === 'POST'\) return uploadTeamMemberPhoto/);
+  assert.match(worker, /request\.method === 'DELETE'\) return deleteTeamMemberPhoto/);
+  assert.match(worker, /team-photos\/\$\{memberID\}/);
+});
+
+test('eSIM Access Business routes are permanent Worker endpoints rather than deploy-time data', () => {
+  assert.match(worker, /parts\[0\] === 'esim-access'/);
+  assert.match(worker, /adminEsimAccessBalance\(env\)/);
+  assert.match(worker, /adminEsimAccessPackages\(env, url\)/);
+  assert.match(worker, /adminEsimAccessInventory\(env\)/);
+  assert.match(worker, /api\.esimaccess\.com\/api\/v1\/open/);
+});
+
+test('Ignav usage endpoint reads the shared monthly counter without exposing the Ignav API key to iOS', () => {
+  assert.match(worker, /parts\[0\] === 'ignav-usage'/);
+  assert.match(worker, /FROM ignav_api_usage_monthly/);
+  assert.match(worker, /IGNAV_MONTHLY_REQUEST_BUDGET/);
 });

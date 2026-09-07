@@ -312,17 +312,32 @@ struct ESIMCenterView: View {
             refreshing = false
         }
         errorMessage = nil
-        do {
-            async let balanceTask = APIClient.shared.esimAccessBalance()
-            async let packagesTask = APIClient.shared.esimAccessPackages(countryCode: country.code)
-            async let inventoryTask = APIClient.shared.esimAccessInventory()
-            let values = try await (balanceTask, packagesTask, inventoryTask)
-            balance = values.0
-            packages = values.1
-            inventory = values.2
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+
+        // Keep the three eSIM Access requests independent. Previously `async let`
+        // made the whole screen fail with `cancelled` when only one endpoint
+        // returned an error; tariffs should remain usable even if balance or
+        // inventory is temporarily unavailable.
+        let balanceTask = Task { try await APIClient.shared.esimAccessBalance() }
+        let packagesTask = Task { try await APIClient.shared.esimAccessPackages(countryCode: country.code) }
+        let inventoryTask = Task { try await APIClient.shared.esimAccessInventory() }
+
+        var errors: [String] = []
+        do { balance = try await balanceTask.value }
+        catch { errors.append(esimErrorText(error, area: "Баланс")) }
+
+        do { packages = try await packagesTask.value }
+        catch { errors.append(esimErrorText(error, area: "Тарифы")) }
+
+        do { inventory = try await inventoryTask.value }
+        catch { errors.append(esimErrorText(error, area: "Профили")) }
+
+        if !errors.isEmpty { errorMessage = errors.joined(separator: " · ") }
+    }
+
+    private func esimErrorText(_ error: Error, area: String) -> String {
+        if error is CancellationError { return "\(area): запрос был прерван — повторите обновление" }
+        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(area): \(message.isEmpty ? "временно недоступно" : message)"
     }
 
     @MainActor private func loadPackages() async {

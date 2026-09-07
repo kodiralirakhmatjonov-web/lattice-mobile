@@ -470,6 +470,24 @@ actor APIClient {
         return try decoder.decode(HotelPriceResponse.self, from: data)
     }
 
+    func setManualHotelPrice(id: String, nightlyUSD: Double) async throws -> HotelPriceResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(HotelManualPriceUpdatePayload(nightlyUSD: nightlyUSD))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceResponse.self, from: data)
+    }
+
+    func clearManualHotelPrice(id: String) async throws -> HotelPriceResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceResponse.self, from: data)
+    }
+
     func hotelCloudHealth() async throws -> HotelCloudHealthResponse {
         let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/health"))
         try validate(response, data: data)
@@ -720,6 +738,11 @@ enum APIError: LocalizedError {
             case "ESIM_ACCESS_PROFILE_NOT_READY": return "eSIM ещё выпускается. Подождите несколько секунд и обновите профиль."
             case "ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED": return "Эта eSIM уже назначена другой поездке."
             case "ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW": return "Предыдущая попытка покупки не получила подтверждение. Проверьте заказ в eSIM Access перед повторной покупкой, чтобы исключить двойное списание."
+            case "INVALID_HOTEL_PRICE": return "Введите корректную цену за одну ночь в долларах."
+            case "HOTEL_PRICE_SOURCE_MISSING": return "Для этого отеля не закреплён источник Booking или Expedia."
+            case "HOTEL_PRICE_SOURCE_CHALLENGE": return "Источник запросил проверку браузера. Ручная цена сохранится; попробуйте обновить из источника позже."
+            case "HOTEL_PRICE_NOT_FOUND_ON_SOURCE": return "Источник открылся, но актуальную цену на странице определить не удалось."
+            case "HOTEL_PRICE_SOURCE_FETCH_FAILED": return "Не удалось открыть источник цены. Попробуйте ещё раз позже."
             default: return value
             }
         }

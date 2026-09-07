@@ -10,6 +10,9 @@ struct HotelAdminDetailView: View {
     @State private var selectedStars = 3
     @State private var loading = true
     @State private var refreshingPrice = false
+    @State private var editingManualPrice = false
+    @State private var manualPriceText = ""
+    @State private var savingManualPrice = false
     @State private var savingStars = false
     @State private var deleting = false
     @State private var showDeleteConfirmation = false
@@ -34,8 +37,10 @@ struct HotelAdminDetailView: View {
                     )
                 }
             }
-            .padding(.horizontal, 18)
+            .frame(maxWidth: 720, alignment: .leading)
+            .padding(.horizontal, 24)
             .padding(.vertical, 16)
+            .frame(maxWidth: .infinity)
         }
         .background(BusinessDesign.background.ignoresSafeArea())
         .navigationTitle("Отель")
@@ -113,7 +118,7 @@ struct HotelAdminDetailView: View {
     }
 
     private func priceCard(_ hotel: HotelAdminDetail) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 15) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Цена")
                     .font(.title2.bold())
@@ -121,7 +126,7 @@ struct HotelAdminDetailView: View {
                 if let price = hotel.price {
                     Text(priceStatus(price))
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(price.status == "failed" ? Color.orange : Color.secondary)
+                        .foregroundStyle(price.status == "failed" ? Color.orange : (price.isManualOverride == true ? BusinessDesign.accent : Color.secondary))
                 }
             }
 
@@ -135,15 +140,26 @@ struct HotelAdminDetailView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
-                    if let provider = price.provider ?? hotel.sources.first?.provider {
-                        Text(provider.capitalized)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let fetchedAt = price.fetchedAt {
-                        Text("Последнее обновление: \(compactDate(fetchedAt))")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                    if price.isManualOverride == true {
+                        Text("Ручная цена · сохранена в D1")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(BusinessDesign.accent)
+                        if let sourceNightly = price.sourceNightlyUSD {
+                            Text("Последняя цена источника: \(sourceNightly.formatted(.currency(code: "USD").precision(.fractionLength(0))))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        if let provider = price.provider ?? hotel.sources.first?.provider {
+                            Text(provider.capitalized)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let fetchedAt = price.fetchedAt {
+                            Text("Последнее обновление: \(compactDate(fetchedAt))")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                 }
             } else if hotel.price?.status == "pending" {
@@ -154,6 +170,50 @@ struct HotelAdminDetailView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if editingManualPrice {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Цена за одну ночь · USD")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Text("$")
+                            .font(.title2.bold())
+                        TextField("173", text: $manualPriceText)
+                            .keyboardType(.decimalPad)
+                            .font(.title2.monospacedDigit())
+                            .textFieldStyle(.plain)
+                        Button(savingManualPrice ? "Сохраняю…" : "Сохранить") {
+                            Task { await saveManualPrice() }
+                        }
+                        .fontWeight(.semibold)
+                        .disabled(savingManualPrice || parsedManualPrice == nil)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 54)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+
+                    Text("Ручное значение становится текущей ценой в D1 и сразу используется клиентским каталогом.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Button {
+                if !editingManualPrice {
+                    manualPriceText = editablePrice(hotel.price?.nightlyUSD)
+                }
+                withAnimation(.easeInOut(duration: 0.2)) { editingManualPrice.toggle() }
+            } label: {
+                Label(editingManualPrice ? "Скрыть ручное изменение" : "Изменить цену вручную", systemImage: "pencil")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+
             Button {
                 Task { await refreshPrice() }
             } label: {
@@ -163,7 +223,7 @@ struct HotelAdminDetailView: View {
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }
-                    Text(refreshingPrice ? "Обновляем цену…" : "Обновить цену")
+                    Text(refreshingPrice ? "Читаем источник…" : "Обновить из источника")
                     Spacer()
                 }
                 .font(.headline)
@@ -173,9 +233,9 @@ struct HotelAdminDetailView: View {
                 .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(refreshingPrice)
+            .disabled(refreshingPrice || savingManualPrice)
         }
-        .padding(17)
+        .padding(18)
         .businessCard(radius: 28)
     }
 
@@ -346,6 +406,7 @@ struct HotelAdminDetailView: View {
 
     private func priceStatus(_ price: HotelCachedPrice) -> String {
         switch price.status {
+        case "manual": return "Ручная цена"
         case "fresh": return "Актуально"
         case "stale": return "Нужно обновить"
         case "pending": return "Обновляется"
@@ -368,6 +429,7 @@ struct HotelAdminDetailView: View {
             let detail = try await APIClient.shared.hotelDetail(id: hotelID)
             hotel = detail
             selectedStars = detail.stars ?? 3
+            if !editingManualPrice { manualPriceText = editablePrice(detail.price?.nightlyUSD) }
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -380,7 +442,11 @@ struct HotelAdminDetailView: View {
         defer { refreshingPrice = false }
         do {
             _ = try await APIClient.shared.refreshHotelPrice(id: hotelID)
-            hotel = try await APIClient.shared.hotelDetail(id: hotelID)
+            let latest = try await APIClient.shared.hotelDetail(id: hotelID)
+            hotel = latest
+            manualPriceText = editablePrice(latest.price?.nightlyUSD)
+            editingManualPrice = false
+            savedMessage = "Цена обновлена из источника"
             onChanged()
             errorMessage = nil
         } catch {
@@ -388,6 +454,39 @@ struct HotelAdminDetailView: View {
             if let latest = try? await APIClient.shared.hotelDetail(id: hotelID) {
                 hotel = latest
             }
+        }
+    }
+
+    private var parsedManualPrice: Double? {
+        let normalized = manualPriceText
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: ",", with: ".")
+        guard let value = Double(normalized), value >= 1, value <= 10_000 else { return nil }
+        return value
+    }
+
+    private func editablePrice(_ value: Double?) -> String {
+        guard let value else { return "" }
+        if value.rounded() == value { return String(Int(value)) }
+        return String(format: "%.2f", value)
+    }
+
+    @MainActor
+    private func saveManualPrice() async {
+        guard let value = parsedManualPrice else { return }
+        savingManualPrice = true
+        defer { savingManualPrice = false }
+        do {
+            _ = try await APIClient.shared.setManualHotelPrice(id: hotelID, nightlyUSD: value)
+            let latest = try await APIClient.shared.hotelDetail(id: hotelID)
+            hotel = latest
+            manualPriceText = editablePrice(latest.price?.nightlyUSD)
+            editingManualPrice = false
+            savedMessage = "Ручная цена сохранена в базе"
+            onChanged()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
