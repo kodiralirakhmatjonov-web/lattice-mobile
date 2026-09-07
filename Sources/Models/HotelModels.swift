@@ -473,6 +473,11 @@ struct HotelPriceResponse: Codable {
     let error: String?
 }
 
+struct HotelBrowserPriceUpdatePayload: Codable {
+    let sourceURL: String
+    let price: ProviderPriceSnapshot
+}
+
 struct HotelListItem: Codable, Identifiable {
     let id: String
     let name: String

@@ -480,6 +480,17 @@ actor APIClient {
         return try decoder.decode(HotelPriceResponse.self, from: data)
     }
 
+    func saveBrowserHotelPrice(id: String, sourceURL: String, price: ProviderPriceSnapshot) async throws -> HotelPriceResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/browser"))
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(HotelBrowserPriceUpdatePayload(sourceURL: sourceURL, price: price))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceResponse.self, from: data)
+    }
+
     func setManualHotelPrice(id: String, nightlyUSD: Double) async throws -> HotelPriceResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price"))
         request.httpMethod = "PUT"

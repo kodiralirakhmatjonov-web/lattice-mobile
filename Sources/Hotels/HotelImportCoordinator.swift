@@ -154,9 +154,17 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 : "Открываем карточку \(provider.rawValue)…"
             progress = 0.08
 
-            var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
+            let navigationURL = provider == .booking ? Self.bookingOperationalURL(normalized) : normalized
+            var request = URLRequest(url: navigationURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
             request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
             request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            // Booking often remembers the device-local currency (for example UZS) and may
+            // omit a stable room rate when no dates are present. For the internal importer
+            // only, request a deterministic 1-night / 2-adult USD quote. Expedia is left
+            // completely untouched.
+            if provider == .booking {
+                request.setValue("selected_currency=USD", forHTTPHeaderField: "Cookie")
+            }
             webView.load(request)
         }
     }
@@ -287,6 +295,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         _ = try? await webView.evaluateJavaScript(Self.initializeMediaCaptureScript(provider: provider, sourceURL: currentURL.absoluteString))
         await captureVisibleMedia(provider: provider, sourceURL: currentURL)
+        if provider == .booking { await captureBookingEmbeddedMedia() }
 
         // Warm the exact property page so lazy property sections are available, but do not
         // harvest arbitrary page images while scrolling. Expedia places recommendations,
@@ -306,17 +315,20 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         _ = try? await webView.evaluateJavaScript("window.scrollTo(0, 0);")
         try? await Task.sleep(nanoseconds: 220_000_000)
         await captureVisibleMedia(provider: provider, sourceURL: currentURL)
+        if provider == .booking { await captureBookingEmbeddedMedia() }
 
         status = "Открываем полную галерею именно этого отеля…"
-        let openedGallery = ((try? await webView.evaluateJavaScript(Self.openGalleryScript())) as? Bool) == true
+        let openedGallery = ((try? await webView.evaluateJavaScript(Self.openGalleryScript(provider: provider))) as? Bool) == true
         if openedGallery {
             try? await Task.sleep(nanoseconds: 650_000_000)
             await captureVisibleMedia(provider: provider, sourceURL: currentURL)
+            if provider == .booking { await captureBookingEmbeddedMedia() }
             let galleryFractions: [Double] = [0.0, 0.08, 0.16, 0.24, 0.32, 0.40, 0.48, 0.56, 0.64, 0.72, 0.80, 0.88, 0.94, 1.0]
             for (index, fraction) in galleryFractions.enumerated() {
                 _ = try? await webView.evaluateJavaScript(Self.scrollGalleryScript(fraction: fraction))
                 try? await Task.sleep(nanoseconds: 130_000_000)
                 await captureVisibleMedia(provider: provider, sourceURL: currentURL)
+                if provider == .booking { await captureBookingEmbeddedMedia() }
                 progress = 0.42 + (Double(index + 1) / Double(galleryFractions.count)) * 0.24
             }
             _ = try? await webView.evaluateJavaScript(Self.closeGalleryScript())
@@ -335,6 +347,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             _ = try? await webView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
             try? await Task.sleep(nanoseconds: 260_000_000)
             await captureVisibleMedia(provider: provider, sourceURL: currentURL)
+            if provider == .booking { await captureBookingEmbeddedMedia() }
         }
 
         stage = .extracting
@@ -430,6 +443,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
     private func captureVisibleMedia(provider: Provider, sourceURL: URL) async {
         _ = try? await webView.evaluateJavaScript(Self.captureVisibleMediaScript(provider: provider, sourceURL: sourceURL.absoluteString))
+    }
+
+    private func captureBookingEmbeddedMedia() async {
+        _ = try? await webView.evaluateJavaScript(Self.captureBookingEmbeddedMediaScript())
     }
 
     private static func mergeRooms(_ primary: [HotelRoomDraft], _ recovered: [HotelRoomDraft]) -> [HotelRoomDraft] {
@@ -905,6 +922,44 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         return components.url
     }
 
+    private static func bookingOperationalURL(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+
+        func set(_ name: String, _ value: String, onlyIfMissing: Bool = false) {
+            if let index = items.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                if !onlyIfMissing { items[index] = URLQueryItem(name: name, value: value) }
+            } else {
+                items.append(URLQueryItem(name: name, value: value))
+            }
+        }
+
+        set("selected_currency", "USD")
+        set("changed_currency", "1")
+        set("group_adults", "2", onlyIfMissing: true)
+        set("group_children", "0", onlyIfMissing: true)
+        set("no_rooms", "1", onlyIfMissing: true)
+
+        let hasCheckIn = items.contains { $0.name.caseInsensitiveCompare("checkin") == .orderedSame && !($0.value ?? "").isEmpty }
+        let hasCheckOut = items.contains { $0.name.caseInsensitiveCompare("checkout") == .orderedSame && !($0.value ?? "").isEmpty }
+        if !hasCheckIn || !hasCheckOut {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            let start = calendar.startOfDay(for: Date()).addingTimeInterval(86_400)
+            let end = start.addingTimeInterval(86_400)
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            if !hasCheckIn { set("checkin", formatter.string(from: start)) }
+            if !hasCheckOut { set("checkout", formatter.string(from: end)) }
+        }
+
+        components.queryItems = items
+        return components.url ?? url
+    }
+
     private static func propertyID(from url: URL, provider: Provider) -> String? {
         guard provider == .expedia else { return nil }
         if let explicit = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
@@ -1105,8 +1160,119 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         """
     }
 
-    private static func openGalleryScript() -> String {
-        """
+    private static func captureBookingEmbeddedMediaScript() -> String {
+        #"""
+        (() => {
+          window.__iumrahHotelMedia = window.__iumrahHotelMedia || {};
+          const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+          const normalize = raw => {
+            try {
+              const value = String(raw || '').replace(/&amp;/g, '&').replace(/\\u002f/ig, '/').replace(/\\\//g, '/');
+              const u = new URL(value, location.href);
+              if (!u.hostname.toLowerCase().endsWith('bstatic.com')) return null;
+              if (!u.pathname.toLowerCase().includes('/xdata/images/hotel/')) return null;
+              u.hash = '';
+              return u.toString();
+            } catch (_) { return null; }
+          };
+          const quality = raw => {
+            const s = String(raw || '');
+            const m = s.match(/(?:max|square|smart)(\d+)(?:x(\d+))?/i);
+            if (m) return Number(m[1] || 0) * Number(m[2] || m[1] || 0);
+            return 0;
+          };
+          const keyFor = raw => {
+            try {
+              const u = new URL(raw);
+              return (u.hostname + u.pathname.replace(/\/(?:max|square|smart)[0-9x_-]+\//ig, '/SIZE/')).toLowerCase();
+            } catch (_) { return String(raw || '').toLowerCase(); }
+          };
+          const add = (raw, label) => {
+            const url = normalize(raw);
+            if (!url) return;
+            const key = keyFor(url);
+            const previous = window.__iumrahHotelMedia[key];
+            const q = quality(url);
+            if (!previous || q >= Number(previous.quality || 0)) {
+              window.__iumrahHotelMedia[key] = { url, label: clean(label).slice(0, 500) || null, quality: q };
+            }
+          };
+
+          const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+          const roots = [
+            dialogs[dialogs.length - 1],
+            document.querySelector('[data-testid="property-gallery"]'),
+            document.querySelector('[data-testid*="gallery-container"]'),
+            document.querySelector('#photo_wrapper'),
+            document.querySelector('.bh-photo-grid'),
+            document.querySelector('#hprt-table'),
+            document.querySelector('[data-testid="availability-table"]'),
+            document.querySelector('[data-testid="property-header"]')
+          ].filter(Boolean);
+
+          for (const root of roots) {
+            for (const img of root.querySelectorAll?.('img') || []) {
+              const label = clean([img.alt, img.title, img.getAttribute?.('aria-label')].filter(Boolean).join(' '));
+              [
+                img.currentSrc, img.src, img.dataset?.src, img.dataset?.lazySrc, img.dataset?.highres,
+                img.dataset?.large, img.getAttribute?.('data-original'), img.getAttribute?.('data-highres'),
+                img.getAttribute?.('data-large')
+              ].forEach(v => add(v, label));
+              const srcset = img.srcset || img.getAttribute?.('data-srcset') || '';
+              for (const part of String(srcset).split(',')) add(part.trim().split(/\s+/)[0], label);
+            }
+
+            let html = String(root.innerHTML || '')
+              .replace(/&amp;/g, '&')
+              .replace(/\\u002f/ig, '/')
+              .replace(/\\\//g, '/');
+            const urls = html.match(/https?:\/\/(?:[A-Za-z0-9-]+\.)*bstatic\.com\/xdata\/images\/hotel\/[^\s"'<>\)]+/ig) || [];
+            for (const raw of urls.slice(0, 700)) add(raw, 'Booking gallery');
+          }
+
+          return Object.keys(window.__iumrahHotelMedia).length;
+        })();
+        """#
+    }
+
+    private static func openGalleryScript(provider: Provider) -> String {
+        if provider == .booking {
+            return #"""
+            (() => {
+              const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+              const text = el => clean(`${el?.innerText || ''} ${el?.getAttribute?.('aria-label') || ''}`).toLowerCase();
+              const directSelectors = [
+                '[data-testid="gallery-button"]',
+                '[data-testid="property-gallery"] button',
+                '[data-testid="gallery-thumbnail"]',
+                '[data-testid*="gallery"] button',
+                '#photo_wrapper button',
+                '.bh-photo-grid button'
+              ];
+              const direct = directSelectors.flatMap(selector => [...document.querySelectorAll(selector)])
+                .find(el => el && el.offsetParent !== null);
+              if (direct) {
+                try { direct.scrollIntoView({ block: 'center' }); direct.click(); return true; } catch (_) {}
+              }
+
+              const candidates = [...document.querySelectorAll('button,a,[role="button"]')].filter(el => {
+                const t = text(el);
+                if (!/(view|show|see|all|more|\d+)/i.test(t)) return false;
+                if (!/(photos?|gallery|images?|pictures?)/i.test(t)) return false;
+                let node = el;
+                for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+                  const marker = clean(`${node.getAttribute?.('data-testid') || ''} ${node.id || ''} ${typeof node.className === 'string' ? node.className : ''}`).toLowerCase();
+                  if (/(property-card|recommend|similar|search-result|other-property|room-card)/i.test(marker)) return false;
+                }
+                return true;
+              });
+              const target = candidates.find(el => el.offsetParent !== null) || candidates[0];
+              if (!target) return false;
+              try { target.scrollIntoView({ block: 'center' }); target.click(); return true; } catch (_) { return false; }
+            })();
+            """#
+        }
+        return """
         (() => {
           const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
           const text = el => clean(`${el.innerText || ''} ${el.getAttribute?.('aria-label') || ''}`).toLowerCase();
@@ -1345,6 +1511,46 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             || (!bestHotelID && sameIdentityName(bestHotelName, visibleH1));
           const hotel = identitySafe ? bestHotel : {};
 
+          // Booking exposes additional property-owned photos in JSON-LD / embedded state
+          // even before every lazy gallery tile is mounted. Harvest only image-like fields
+          // from the already identity-checked hotel object, so recommendation hotels are
+          // never mixed into this property. Expedia deliberately keeps its existing path.
+          const structuredPropertyImages = [];
+          if (provider === 'Booking' && hotel && typeof hotel === 'object') {
+            const imageSeenObjects = new WeakSet();
+            let imageBudget = 2200;
+            const collectImageValue = (value, label = 'Booking property photo', depth = 0) => {
+              if (value == null || depth > 8 || imageBudget <= 0) return;
+              imageBudget -= 1;
+              if (typeof value === 'string') {
+                const normalized = value.replace(/&amp;/g, '&');
+                try {
+                  const imageURL = new URL(normalized, location.href);
+                  const imageHost = imageURL.hostname.toLowerCase();
+                  const imagePath = imageURL.pathname.toLowerCase();
+                  if (imageHost.endsWith('bstatic.com') && imagePath.includes('/xdata/images/hotel/')) {
+                    structuredPropertyImages.push({ url: imageURL.toString(), label });
+                  }
+                } catch (_) {}
+                return;
+              }
+              if (Array.isArray(value)) {
+                for (const child of value.slice(0, 420)) collectImageValue(child, label, depth + 1);
+                return;
+              }
+              if (typeof value !== 'object' || imageSeenObjects.has(value)) return;
+              imageSeenObjects.add(value);
+              for (const [key, child] of Object.entries(value).slice(0, 220)) {
+                if (/image|photo|picture|src|url|large|highres|original|thumbnail/i.test(key)) {
+                  collectImageValue(child, clean(value.caption || value.alt || value.name || label), depth + 1);
+                }
+              }
+            };
+            for (const key of ['image','images','photo','photos','photoUrls','photoURLs','gallery','media']) {
+              if (hotel[key] != null) collectImageValue(hotel[key], 'Booking property photo');
+            }
+          }
+
           const canonicalURL = (() => {
             const choices = [
               document.querySelector('link[rel=\"canonical\"]')?.href,
@@ -1436,7 +1642,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             if (postalMatch) postalCode = postalMatch[1];
           }
 
+          const bookingDescription = provider === 'Booking' ? clean(
+            document.querySelector('[data-testid="property-description"]')?.innerText ||
+            document.querySelector('#property_description_content')?.innerText ||
+            document.querySelector('[data-testid*="property-description"]')?.innerText || ''
+          ) : null;
           const description = clean(
+            bookingDescription ||
             hotel.description ||
             meta('description','name') ||
             meta('og:description','property') ||
@@ -1450,6 +1662,20 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           let rating = numberFrom(hotel.aggregateRating?.ratingValue);
           let ratingScale = numberFrom(hotel.aggregateRating?.bestRating);
           let reviewCount = integerFrom(hotel.aggregateRating?.reviewCount ?? hotel.aggregateRating?.ratingCount);
+
+          if (provider === 'Booking') {
+            const scoreRoot = document.querySelector('[data-testid="review-score-right-component"]')
+              || document.querySelector('[data-testid="review-score-component"]')
+              || document.querySelector('[data-testid*="review-score"]');
+            const scoreText = clean(scoreRoot?.innerText || scoreRoot?.textContent || '');
+            const scoreMatch = scoreText.match(/(?:^|[^0-9])([0-9](?:[.,][0-9])?)(?:\\s*\\/\\s*10)?(?:[^0-9]|$)/);
+            if (scoreMatch) {
+              const parsed = Number(scoreMatch[1].replace(',', '.'));
+              if (Number.isFinite(parsed) && parsed > 0 && parsed <= 10) { rating = parsed; ratingScale = 10; }
+            }
+            const reviewMatch = scoreText.match(/([0-9][0-9,.\\s]*)\\s+(?:reviews?|отзыв|отзывов)\\b/i);
+            if (reviewMatch) reviewCount = integerFrom(reviewMatch[1]);
+          }
 
           const fullBodyText = clean(document.body?.innerText || '');
           if (rating == null) {
@@ -1465,6 +1691,19 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           }
 
           let stars = integerFrom(hotel.starRating?.ratingValue);
+          if (stars == null && provider === 'Booking') {
+            const starRoot = document.querySelector('[data-testid="rating-stars"]')
+              || document.querySelector('[data-testid*="rating-stars"]');
+            if (starRoot) {
+              const aria = clean(starRoot.getAttribute?.('aria-label') || '');
+              const ariaMatch = aria.match(/([1-5])(?:\\.0)?\\s*(?:out of 5|stars?|звезд)/i);
+              if (ariaMatch) stars = Number(ariaMatch[1]);
+              if (stars == null) {
+                const iconCount = starRoot.querySelectorAll?.('svg,[data-testid*="star"],span[class*="star"]').length || 0;
+                if (iconCount >= 1 && iconCount <= 5) stars = iconCount;
+              }
+            }
+          }
           if (stars == null) {
             const propertyClass = fullBodyText.match(/property\\s+class\\s*:?\\s*([1-5])(?:\\.0)?\\b/i);
             if (propertyClass) stars = Number(propertyClass[1]);
@@ -1568,6 +1807,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           };
           featureWalk(featureValues);
           const amenitySelectors = [
+            '[data-testid="property-most-popular-facilities-wrapper"] li',
+            '[data-testid="property-most-popular-facilities-wrapper"] [data-testid*="facility"]',
+            '[data-testid="facility-group-container"] li',
             '[data-testid*="facilit"] li','[data-testid*="amenit"] li','[data-testid*="popular-facilit"] *',
             '[data-stid*="amenit"] li','[data-stid*="amenit"] span','[class*="facility"] li','[class*="Facility"] li'
           ];
@@ -2151,6 +2393,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           };
 
           const captured = Object.values(window.__iumrahHotelMedia || {});
+          if (provider === 'Booking') {
+            for (const item of structuredPropertyImages) captured.push(item);
+          }
           const imageMetadata = [];
           const imageSeen = new Set();
           const isAllowed = raw => {

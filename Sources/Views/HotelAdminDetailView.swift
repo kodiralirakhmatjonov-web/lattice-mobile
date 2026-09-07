@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import WebKit
 
 struct HotelAdminDetailView: View {
     let hotelID: String
@@ -518,21 +519,43 @@ struct HotelAdminDetailView: View {
         refreshingPrice = true
         defer { refreshingPrice = false }
         do {
-            let response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
+            let response: HotelPriceResponse
+            if let currentHotel = hotel, let source = preferredSource(currentHotel),
+               source.provider.lowercased().contains("booking"),
+               let sourceURL = URL(string: source.url) {
+                do {
+                    // Booking blocks server-side datacenter refreshes with HTTP 429. Read the
+                    // live rate in a private WKWebView on this iPhone, then persist only that
+                    // verified price snapshot back to the existing D1 price cache. Expedia
+                    // keeps its current server refresh path unchanged.
+                    let reader = BookingLivePriceReader()
+                    let live = try await reader.read(sourceURL: sourceURL)
+                    response = try await APIClient.shared.saveBrowserHotelPrice(
+                        id: hotelID,
+                        sourceURL: live.sourceURL.absoluteString,
+                        price: live.price
+                    )
+                } catch {
+                    // Keep the existing server fallback as a safety net for Booking. The
+                    // backend preserves the last accepted price if Booking is temporarily
+                    // unavailable, so a refresh failure never makes the hotel unusable.
+                    response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
+                }
+            } else {
+                response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
+            }
+
             let latest = try await APIClient.shared.hotelDetail(id: hotelID)
             hotel = latest
             manualPriceText = editablePrice(latest.price?.nightlyUSD)
             editingManualPrice = false
             if let warning = response.error, !warning.isEmpty {
                 savedMessage = nil
-                switch warning {
-                case "HOTEL_PRICE_SOURCE_HTTP_429":
-                    priceNotice = "Источник временно ограничил запросы. Последняя сохранённая цена остаётся активной; система повторит обновление автоматически."
-                case "HOTEL_PRICE_SOURCE_CHALLENGE":
-                    priceNotice = "Источник запросил браузерную проверку. Последняя сохранённая цена остаётся активной; система повторит обновление автоматически."
-                default:
-                    priceNotice = "Источник сейчас не обновился. Последняя сохранённая цена остаётся активной; система повторит обновление автоматически."
-                }
+                // Do not interrupt the operator with a raw provider error. The last good
+                // D1 price remains active and the scheduled retry continues in background.
+                priceNotice = latest.price?.hasUsablePrice == true
+                    ? "Последняя рабочая цена сохранена. Автообновление повторится позже."
+                    : "Booking пока не вернул новую цену. Повторите обновление чуть позже."
             } else {
                 priceNotice = nil
                 savedMessage = "Цена обновлена из источника"
@@ -540,9 +563,22 @@ struct HotelAdminDetailView: View {
             onChanged()
             errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
             if let latest = try? await APIClient.shared.hotelDetail(id: hotelID) {
                 hotel = latest
+                manualPriceText = editablePrice(latest.price?.nightlyUSD)
+                if preferredSource(latest)?.provider.lowercased().contains("booking") == true {
+                    // Booking may rate-limit both the device browser and the server on a
+                    // particular attempt. Never expose transport/provider codes to the
+                    // operator and never invalidate the last accepted D1 price.
+                    errorMessage = nil
+                    priceNotice = latest.price?.hasUsablePrice == true
+                        ? "Booking временно не отдал новую цену. Последняя рабочая цена остаётся активной; автообновление повторится позже."
+                        : "Booking временно не отдал цену. Повторите обновление чуть позже."
+                } else {
+                    errorMessage = error.localizedDescription
+                }
+            } else {
+                errorMessage = "Не удалось обновить цену. Повторите попытку чуть позже."
             }
         }
     }
@@ -635,4 +671,283 @@ struct HotelAdminDetailView: View {
             errorMessage = error.localizedDescription
         }
     }
+}
+
+private struct BookingLivePriceResult {
+    let sourceURL: URL
+    let price: ProviderPriceSnapshot
+}
+
+@MainActor
+private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<BookingLivePriceResult, Error>?
+    private var webView: WKWebView?
+    private var timeoutTask: Task<Void, Never>?
+    private var evaluating = false
+
+    func read(sourceURL: URL) async throws -> BookingLivePriceResult {
+        guard continuation == nil else {
+            throw NSError(domain: "iumrah.booking-price", code: 1, userInfo: [NSLocalizedDescriptionKey: "BOOKING_PRICE_READER_BUSY"])
+        }
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = self
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
+        self.webView = webView
+
+        let preparedURL = Self.preparedURL(sourceURL)
+        var request = URLRequest(url: preparedURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("selected_currency=USD", forHTTPHeaderField: "Cookie")
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            self.timeoutTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 28_000_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.finish(.failure(NSError(
+                        domain: "iumrah.booking-price",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "BOOKING_PRICE_TIMEOUT"]
+                    )))
+                }
+            }
+            webView.load(request)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard continuation != nil, !evaluating else { return }
+        evaluating = true
+        Task { [weak self, weak webView] in
+            guard let self, let webView else { return }
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            _ = try? await webView.evaluateJavaScript(Self.preparePageScript)
+            try? await Task.sleep(nanoseconds: 950_000_000)
+
+            if let result = await self.extract(from: webView) {
+                self.finish(.success(result))
+                return
+            }
+
+            _ = try? await webView.evaluateJavaScript("""
+            (() => {
+              const target = document.querySelector('#hprt-table')
+                || document.querySelector('[data-testid="availability-table"]')
+                || document.querySelector('[data-testid*="availability"]');
+              if (target) target.scrollIntoView({ block: 'start' });
+              else window.scrollTo(0, document.documentElement.scrollHeight * 0.55);
+              return !!target;
+            })();
+            """)
+            try? await Task.sleep(nanoseconds: 1_250_000_000)
+
+            if let result = await self.extract(from: webView) {
+                self.finish(.success(result))
+            } else {
+                self.finish(.failure(NSError(
+                    domain: "iumrah.booking-price",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "BOOKING_LIVE_PRICE_NOT_FOUND"]
+                )))
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finish(.failure(error))
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finish(.failure(error))
+    }
+
+    private func extract(from webView: WKWebView) async -> BookingLivePriceResult? {
+        let javascriptValue = try? await webView.evaluateJavaScript(Self.extractPriceScript)
+        guard let raw = javascriptValue as? String,
+              let data = raw.data(using: .utf8),
+              let price = try? JSONDecoder().decode(ProviderPriceSnapshot.self, from: data),
+              price.isUsable,
+              let resolvedURL = webView.url else { return nil }
+        return BookingLivePriceResult(sourceURL: resolvedURL, price: price)
+    }
+
+    private func finish(_ result: Result<BookingLivePriceResult, Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        evaluating = false
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil
+        webView = nil
+        continuation.resume(with: result)
+    }
+
+    private static func preparedURL(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = components.queryItems ?? []
+
+        func set(_ name: String, _ value: String, onlyIfMissing: Bool = false) {
+            if let index = items.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                if !onlyIfMissing { items[index] = URLQueryItem(name: name, value: value) }
+            } else {
+                items.append(URLQueryItem(name: name, value: value))
+            }
+        }
+
+        set("selected_currency", "USD")
+        set("changed_currency", "1")
+        set("group_adults", "2", onlyIfMissing: true)
+        set("group_children", "0", onlyIfMissing: true)
+        set("no_rooms", "1", onlyIfMissing: true)
+
+        let hasCheckIn = items.contains { $0.name.caseInsensitiveCompare("checkin") == .orderedSame && !($0.value ?? "").isEmpty }
+        let hasCheckOut = items.contains { $0.name.caseInsensitiveCompare("checkout") == .orderedSame && !($0.value ?? "").isEmpty }
+        if !hasCheckIn || !hasCheckOut {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            let start = calendar.startOfDay(for: Date()).addingTimeInterval(86_400)
+            let end = start.addingTimeInterval(86_400)
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            if !hasCheckIn { set("checkin", formatter.string(from: start)) }
+            if !hasCheckOut { set("checkout", formatter.string(from: end)) }
+        }
+
+        components.queryItems = items
+        return components.url ?? url
+    }
+
+    private static let preparePageScript = #"""
+    (() => {
+      const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const buttons = [...document.querySelectorAll('button,a,[role="button"]')];
+      const availability = buttons.find(el => /see availability|show prices|check availability|view prices/i.test(clean(`${el.innerText || ''} ${el.getAttribute?.('aria-label') || ''}`)));
+      if (availability && availability.offsetParent !== null) {
+        try { availability.scrollIntoView({ block: 'center' }); availability.click(); } catch (_) {}
+      }
+      const table = document.querySelector('#hprt-table') || document.querySelector('[data-testid="availability-table"]');
+      if (table) table.scrollIntoView({ block: 'start' });
+      return true;
+    })();
+    """#
+
+    private static let extractPriceScript = #"""
+    (() => {
+      const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const parseAmount = raw => {
+        let text = clean(raw).replace(/[\u00a0\u202f\s]/g, '').replace(/[^0-9.,]/g, '');
+        if (!text) return null;
+        const comma = text.lastIndexOf(',');
+        const dot = text.lastIndexOf('.');
+        if (comma >= 0 && dot >= 0) {
+          if (dot > comma) text = text.replace(/,/g, '');
+          else text = text.replace(/\./g, '').replace(',', '.');
+        } else if (comma >= 0) {
+          const after = text.length - comma - 1;
+          text = (after === 1 || after === 2) ? text.replace(',', '.') : text.replace(/,/g, '');
+        } else if (dot >= 0) {
+          const after = text.length - dot - 1;
+          if (after !== 1 && after !== 2) text = text.replace(/\./g, '');
+        }
+        const amount = Number(text);
+        return Number.isFinite(amount) && amount > 0 ? amount : null;
+      };
+      const currencyFor = text => {
+        const value = String(text || '').toUpperCase();
+        if (/US\$|USD/.test(value) || /(^|[^A-Z])\$\s*[0-9]/.test(value)) return 'USD';
+        if (/SAR|(^|[^A-Z])SR\b|ر\.?س\.?/.test(value)) return 'SAR';
+        if (/AED|د\.?إ\.?/.test(value)) return 'AED';
+        return null;
+      };
+      const moneyFrom = text => {
+        const value = clean(text);
+        const patterns = [
+          /(?:US\$|USD|\$|SAR|SR|ر\.?س\.?|AED|د\.?إ\.?)\s*([0-9][0-9.,\s]*)/i,
+          /([0-9][0-9.,\s]*)\s*(?:US\$|USD|\$|SAR|SR|ر\.?س\.?|AED|د\.?إ\.?)/i
+        ];
+        for (const pattern of patterns) {
+          const match = value.match(pattern);
+          if (!match) continue;
+          const amount = parseAmount(match[1]);
+          const currency = currencyFor(match[0]);
+          if (amount && currency) return { amount, currency };
+        }
+        return null;
+      };
+      const hidden = el => {
+        const style = window.getComputedStyle?.(el);
+        const rect = el.getBoundingClientRect?.();
+        return !!(style && (style.display === 'none' || style.visibility === 'hidden')) || !!(rect && rect.width === 0 && rect.height === 0);
+      };
+      const selectors = [
+        '#hprt-table [data-testid="price-and-discounted-price"]',
+        '[data-testid="availability-table"] [data-testid="price-and-discounted-price"]',
+        '[data-testid="price-and-discounted-price"]',
+        '#hprt-table [data-testid="price-for-x-nights"]',
+        '[data-testid="price-for-x-nights"]',
+        '#hprt-table .prco-valign-middle-helper',
+        '.bui-price-display__value'
+      ];
+      const candidates = [];
+      let order = 0;
+      for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+          if (hidden(el) || el.closest('s,del')) continue;
+          const context = clean(el.innerText || el.textContent || '');
+          const money = moneyFrom(context);
+          if (!money || money.amount < 10) continue;
+          let roomName = null;
+          let node = el;
+          for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+            const heading = clean(node.querySelector?.('[data-testid="room-name"],h2,h3,h4,[role="heading"]')?.innerText || '');
+            if (heading && heading.length <= 180) { roomName = heading; break; }
+          }
+          let score = 100 - order;
+          if (selector.includes('price-and-discounted-price')) score += 30;
+          if (el.closest('#hprt-table,[data-testid="availability-table"]')) score += 25;
+          if (/member|genius|sign in|reward/i.test(context)) score -= 5;
+          candidates.push({ ...money, roomName, score, order: order++ });
+        }
+        if (candidates.length) break;
+      }
+      if (!candidates.length) return null;
+      candidates.sort((a,b) => b.score - a.score || a.order - b.order || a.amount - b.amount);
+      const chosen = candidates[0];
+      const query = new URL(location.href).searchParams;
+      const checkIn = query.get('checkin');
+      const checkOut = query.get('checkout');
+      let nights = 1;
+      if (checkIn && checkOut) {
+        const a = Date.parse(`${checkIn}T00:00:00Z`);
+        const b = Date.parse(`${checkOut}T00:00:00Z`);
+        const rawNights = Math.round((b - a) / 86400000);
+        if (Number.isFinite(rawNights) && rawNights > 0 && rawNights <= 30) nights = rawNights;
+      }
+      return JSON.stringify({
+        amount: chosen.amount,
+        currency: chosen.currency,
+        totalAmount: null,
+        totalCurrency: null,
+        priceBasis: nights === 1 ? 'nightly' : 'stay_total',
+        checkIn: checkIn || null,
+        checkOut: checkOut || null,
+        nights,
+        adults: Math.max(1, Number(query.get('group_adults')) || 2),
+        rooms: Math.max(1, Number(query.get('no_rooms')) || 1),
+        roomName: chosen.roomName || null,
+        method: 'booking-ios-live-browser-v1',
+        confidence: 0.995
+      });
+    })();
+    """#
 }

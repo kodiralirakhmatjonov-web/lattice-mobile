@@ -38,7 +38,7 @@ struct BookingPricingEditorSheet: View {
                     ForEach(Array(report.components.enumerated()), id: \.element.code) { index, component in
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(component.label).font(.subheadline.weight(.semibold))
+                                Text(russianPricingComponentLabel(code: component.code, fallback: component.label)).font(.subheadline.weight(.semibold))
                                 Text(component.code).font(.caption2.monospaced()).foregroundStyle(.tertiary)
                             }
                             Spacer(minLength: 12)
@@ -115,6 +115,25 @@ struct BookingPricingEditorSheet: View {
 
     private var markupRate: Double { max(0, (Double(markupPercent.replacingOccurrences(of: ",", with: ".")) ?? 0) / 100) }
     private var feeRate: Double { min(0.49, max(0, (Double(feePercent.replacingOccurrences(of: ",", with: ".")) ?? 0) / 100)) }
+    private func russianPricingComponentLabel(code: String, fallback: String) -> String {
+        let value = code.lowercased()
+        if value.hasPrefix("flight_") || value.contains("airfare") { return "Авиабилет" }
+        if value == "makkah_hotel" { return "Отель в Мекке" }
+        if value == "madinah_hotel" { return "Отель в Медине" }
+        if value == "hotel" || value.contains("hotel") { return "Отель" }
+        if value.contains("transfer") || value.contains("transport") { return "Трансфер" }
+        if value.contains("accompaniment") || value.contains("guide") { return "Гид" }
+        if value.contains("visa") { return "Виза" }
+        if value.contains("meal") || value.contains("food") { return "Питание" }
+        if value.contains("haramain") || value.contains("train") { return "Поезд Haramain" }
+        if value == "ziyarat_makkah" { return "Зиярат в Мекке" }
+        if value == "ziyarat_madinah" { return "Зиярат в Медине" }
+        if value.contains("ziyarat") { return "Зиярат" }
+        if value.contains("care") || value.contains("support") { return "iumrah Care" }
+        if value.contains("esim") || value == "sim" { return "eSIM" }
+        return fallback.isEmpty ? "Компонент" : fallback
+    }
+
     private var supplierTotal: Double { parsedComponents?.reduce(0) { $0 + $1.supplierCostUsd } ?? 0 }
     private var calculatedSelling: Double { (supplierTotal * (1 + markupRate)) / max(0.51, 1 - feeRate) }
     private var publicPerPilgrim: Double { max(5, (calculatedSelling / Double(travelerCount) / 5).rounded() * 5) }

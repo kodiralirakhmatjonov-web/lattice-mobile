@@ -116,6 +116,11 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
     return refreshHotelPriceResponse(env, hotelID);
   }
 
+  if (parts.length === 3 && parts[1] === 'price' && parts[2] === 'browser') {
+    if (request.method !== 'PUT') return methodNotAllowed();
+    return saveBrowserHotelPrice(request, env, hotelID);
+  }
+
   if (parts.length === 1) {
     if (request.method === 'GET') return hotelDetail(env, hotelID, true, url);
     if (request.method === 'PATCH') return updateHotelAdmin(request, env, hotelID);
@@ -1999,15 +2004,147 @@ function humanizeFieldKey(value) {
     .replace(/^./, char => char.toUpperCase());
 }
 
+function russianPricingComponentLabel(codeValue, labelValue, index = null) {
+  const code = String(codeValue || '').trim().toLowerCase();
+  const label = String(labelValue || '').trim();
+  if (/^flight_|airfare|journey_fare|air_ticket/.test(code)) return 'Авиабилет';
+  if (code === 'makkah_hotel') return 'Отель в Мекке';
+  if (code === 'madinah_hotel') return 'Отель в Медине';
+  if (code === 'hotel' || /hotel/.test(code)) return 'Отель';
+  if (/^visa/.test(code)) return 'Виза';
+  if (/meal|food/.test(code)) return 'Питание';
+  if (/transfer|transport/.test(code)) return 'Трансфер';
+  if (/haramain|train/.test(code)) return 'Поезд Haramain';
+  if (/accompaniment|guide/.test(code)) return 'Гид';
+  if (code === 'ziyarat_makkah') return 'Зиярат в Мекке';
+  if (code === 'ziyarat_madinah') return 'Зиярат в Медине';
+  if (/ziyarat/.test(code)) return 'Зиярат';
+  if (/esim|sim/.test(code)) return 'eSIM';
+  if (/care|support/.test(code)) return 'iumrah Care';
+  if (/platform|service/.test(code)) return 'Сервис iumrah';
+
+  const lowerLabel = label.toLowerCase();
+  if (/flight|airfare|air ticket|перел[её]т|авиабилет/.test(lowerLabel)) return 'Авиабилет';
+  if (/makkah.*hotel|hotel.*makkah|отель.*мекк/.test(lowerLabel)) return 'Отель в Мекке';
+  if (/madinah.*hotel|hotel.*madinah|отель.*медин/.test(lowerLabel)) return 'Отель в Медине';
+  if (/hotel|отель/.test(lowerLabel)) return 'Отель';
+  if (/transfer|трансфер/.test(lowerLabel)) return 'Трансфер';
+  if (/guide|accompan|сопровожд|гид/.test(lowerLabel)) return 'Гид';
+  if (/visa|виз/.test(lowerLabel)) return 'Виза';
+  if (/meal|food|питан/.test(lowerLabel)) return 'Питание';
+  if (/ziyarat|зиярат/.test(lowerLabel)) return label || 'Зиярат';
+  if (label && /[А-Яа-яЁё]/.test(label)) return label;
+  return index != null ? `Компонент ${index}` : 'Компонент';
+}
+
+function legacyPricingComponentLabel(index, total, hasSeparateMadinahHotel) {
+  const n = Number(index || 0);
+  const count = Number(total || 0);
+  if (!Number.isInteger(n) || n < 1) return null;
+
+  // Older pricing snapshots sometimes persisted component amounts without their
+  // `code`/`label`. Preserve the exact component order emitted by the existing
+  // LocalPackagePricingEngine instead of exposing JSON paths to Business users.
+  if (hasSeparateMadinahHotel) {
+    const hasTrain = count >= 11;
+    const labels = hasTrain
+      ? ['Авиабилет', 'Отель в Мекке', 'Отель в Медине', 'Виза', 'Питание', 'Трансфер', 'Поезд Haramain', 'Гид', 'Зиярат в Мекке', 'Зиярат в Медине', 'iumrah Care']
+      : ['Авиабилет', 'Отель в Мекке', 'Отель в Медине', 'Виза', 'Питание', 'Трансфер', 'Гид', 'Зиярат в Мекке', 'Зиярат в Медине', 'iumrah Care'];
+    return labels[n - 1] || null;
+  }
+
+  // Single-hotel storefront/legacy mode. A 10-item snapshot contains Haramain;
+  // a 9-item snapshot does not.
+  if (count >= 9) {
+    const hasTrain = count >= 10;
+    const labels = hasTrain
+      ? ['Авиабилет', 'Отель', 'Виза', 'Питание', 'Трансфер', 'Поезд Haramain', 'Гид', 'Зиярат в Мекке', 'Зиярат в Медине', 'iumrah Care']
+      : ['Авиабилет', 'Отель', 'Виза', 'Питание', 'Трансфер', 'Гид', 'Зиярат в Мекке', 'Зиярат в Медине', 'iumrah Care'];
+    return labels[n - 1] || null;
+  }
+
+  // Makkah-only package mode. Nine items means the optional Haramain component
+  // is present; eight means it is absent.
+  const hasTrain = count >= 9;
+  const labels = hasTrain
+    ? ['Авиабилет', 'Отель в Мекке', 'Виза', 'Питание', 'Трансфер', 'Поезд Haramain', 'Гид', 'Зиярат в Мекке', 'iumrah Care']
+    : ['Авиабилет', 'Отель в Мекке', 'Виза', 'Питание', 'Трансфер', 'Гид', 'Зиярат в Мекке', 'iumrah Care'];
+  return labels[n - 1] || null;
+}
+
+function russianPricingScalarLabel(value) {
+  const key = String(value || '').trim().toLowerCase().replace(/[_-]+/g, '');
+  const map = {
+    suppliercostusd: 'Себестоимость',
+    amountusd: 'Сумма',
+    amount: 'Сумма',
+    priceusd: 'Цена',
+    totalusd: 'Итого',
+    publictotalusd: 'Итого клиенту',
+    publicpriceperpilgrimusd: 'На паломника',
+    markupamountusd: 'Наценка',
+    subtotalaftermarkupusd: 'После наценки',
+    paymentfeeamountusd: 'Комиссия оплаты',
+    calculatedsellingpriceusd: 'Расчётная цена',
+    roundingdifferenceusd: 'Округление',
+    estimatedprofitusd: 'Расчётная прибыль',
+    markuprate: 'Ставка наценки',
+    paymentfeerate: 'Ставка комиссии'
+  };
+  return map[key] || humanizeFieldKey(value);
+}
+
+function russianPricingGroup(pathValue) {
+  const raw = String(pathValue || '');
+  const lower = raw.toLowerCase();
+  if (/components(?:\.|$)/.test(lower)) return 'Компоненты';
+  if (/selectedpricinginputs.*journeyfare/.test(lower)) return 'Выбранная цена · Авиабилет';
+  if (/selectedpricinginputs.*outbound/.test(lower)) return 'Выбранная цена · Перелёт туда';
+  if (/selectedpricinginputs.*inbound/.test(lower)) return 'Выбранная цена · Перелёт обратно';
+  if (/selectedpricinginputs.*makkahhotel/.test(lower)) return 'Выбранная цена · Отель в Мекке';
+  if (/selectedpricinginputs.*madinahhotel/.test(lower)) return 'Выбранная цена · Отель в Медине';
+  if (/totals(?:\.|$)/.test(lower)) return 'Итоги';
+  if (/pricing/.test(lower)) return 'Расчёт пакета';
+  return humanizeFieldKey(raw || 'Расчёт');
+}
+
 function flattenPricingLines(value) {
   const lines = [];
   const currency = deepScalar(value, ['currency','currencyCode']) || 'USD';
+  const rootComponents = Array.isArray(value?.components) ? value.components : [];
+  const hasSeparateMadinahHotel = value?.selectedPricingInputs?.madinahHotel != null;
   const walk = (node, path = [], depth = 0) => {
     if (depth > 5 || lines.length >= 120 || node == null) return;
+
+    // pricingSnapshot.components is an array of named business components. Keep the
+    // component identity instead of recursively flattening it into labels such as
+    // "Components · 1 / Supplier Cost Usd".
+    if (typeof node === 'object' && !Array.isArray(node) && /(?:^|\.)components\.\d+$/.test(path.join('.'))) {
+      const amount = Number(node.supplierCostUsd ?? node.supplier_cost_usd ?? node.costUsd ?? node.amountUsd);
+      if (Number.isFinite(amount)) {
+        const index = Number(path[path.length - 1]) || null;
+        lines.push({
+          id: `${path.join('.')}.supplierCostUsd`,
+          label: russianPricingComponentLabel(node.code, node.label, index)
+            .replace(/^Компонент \d+$/, legacyPricingComponentLabel(index, rootComponents.length, hasSeparateMadinahHotel) || `Компонент ${index}`),
+          group: 'Компоненты',
+          amount,
+          currency
+        });
+        return;
+      }
+    }
+
     if (typeof node === 'number' && Number.isFinite(node)) {
       const key = path.join('.');
-      if (/(price|cost|fee|commission|margin|visa|hotel|flight|air|guide|transfer|transport|sim|support|total|amount|service)/i.test(key) && !/(count|guests|traveler|rooms|nights|days|year)/i.test(key)) {
-        lines.push({ id: key || `value-${lines.length}`, label: humanizeFieldKey(path[path.length - 1] || 'Amount'), group: humanizeFieldKey(path.slice(0, -1).join(' · ') || 'Pricing'), amount: node, currency });
+      if (/(price|cost|fee|commission|margin|visa|hotel|flight|air|guide|transfer|transport|sim|support|total|amount|service|markup|profit)/i.test(key) && !/(count|guests|traveler|rooms|nights|days|year)/i.test(key)) {
+        lines.push({
+          id: key || `value-${lines.length}`,
+          label: russianPricingScalarLabel(path[path.length - 1] || 'Amount'),
+          group: russianPricingGroup(path.slice(0, -1).join('.')),
+          amount: node,
+          currency
+        });
       }
       return;
     }
@@ -4580,6 +4717,31 @@ async function ensureHotelPriceSourceLock(env, hotelID) {
   return { ...row, provider };
 }
 
+function bookingPriceProbeURL(value) {
+  try {
+    const url = new URL(String(value || ''));
+    const host = url.hostname.toLowerCase();
+    if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return url.toString();
+    url.searchParams.set('selected_currency', 'USD');
+    url.searchParams.set('changed_currency', '1');
+    if (!url.searchParams.get('group_adults')) url.searchParams.set('group_adults', '2');
+    if (!url.searchParams.get('group_children')) url.searchParams.set('group_children', '0');
+    if (!url.searchParams.get('no_rooms')) url.searchParams.set('no_rooms', '1');
+    if (!url.searchParams.get('checkin') || !url.searchParams.get('checkout')) {
+      const start = new Date();
+      start.setUTCDate(start.getUTCDate() + 1);
+      const end = new Date(start.getTime());
+      end.setUTCDate(end.getUTCDate() + 1);
+      const isoDate = date => date.toISOString().slice(0, 10);
+      if (!url.searchParams.get('checkin')) url.searchParams.set('checkin', isoDate(start));
+      if (!url.searchParams.get('checkout')) url.searchParams.set('checkout', isoDate(end));
+    }
+    return url.toString();
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
 async function readExactHotelSourcePage(env, sourceURL) {
   const headers = new Headers({
     'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
@@ -4609,7 +4771,8 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   const provider = normalizedHotelPriceProvider(source.provider, sourceURL);
   if (!provider) throw new Error('HOTEL_PRICE_SOURCE_UNSUPPORTED');
 
-  const page = await readExactHotelSourcePage(env, sourceURL);
+  const probeURL = provider === 'Booking' ? bookingPriceProbeURL(sourceURL) : sourceURL;
+  const page = await readExactHotelSourcePage(env, probeURL);
   const response = page.response;
   const html = page.html;
   const finalURL = page.finalURL;
@@ -4698,6 +4861,128 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
     await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
   }
   return readHotelPriceRow(env, hotelID);
+}
+
+function bookingHotelIdentityKey(value) {
+  try {
+    const url = new URL(String(value || ''));
+    const host = url.hostname.toLowerCase();
+    if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return null;
+    const match = url.pathname.match(/^\/hotel\/([^/]+)\/([^/?#]+?)(?:\.html)?\/?$/i);
+    if (!match) return null;
+    return `${match[1]}|${match[2]}`.toLowerCase();
+  } catch (_) {
+    return null;
+  }
+}
+
+async function saveBrowserHotelPrice(request, env, hotelID) {
+  const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  if (!hotel) return json({ ok: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
+
+  let payload;
+  try { payload = await request.json(); }
+  catch { return json({ ok: false, price: null, error: 'INVALID_JSON' }, 400); }
+
+  const snapshot = payload?.price;
+  const normalized = normalizeImportedHotelPriceSnapshot(snapshot);
+  if (!normalized) return json({ ok: false, price: null, error: 'HOTEL_BROWSER_PRICE_INVALID' }, 422);
+
+  const source = await ensureHotelPriceSourceLock(env, hotelID);
+  if (!source?.source_url) return json({ ok: false, price: null, error: 'HOTEL_PRICE_SOURCE_MISSING' }, 409);
+  const provider = normalizedHotelPriceProvider(source.provider, source.source_url);
+  if (provider !== 'Booking') return json({ ok: false, price: null, error: 'HOTEL_BROWSER_PRICE_BOOKING_ONLY' }, 409);
+
+  const browserSourceURL = cleanURL(payload?.sourceURL);
+  if (!browserSourceURL) return json({ ok: false, price: null, error: 'HOTEL_BROWSER_SOURCE_INVALID' }, 422);
+  let parsedBrowserSource;
+  try { parsedBrowserSource = new URL(browserSourceURL); }
+  catch { return json({ ok: false, price: null, error: 'HOTEL_BROWSER_SOURCE_INVALID' }, 422); }
+  if (!providerRoomHostAllowed(parsedBrowserSource, 'Booking')) {
+    return json({ ok: false, price: null, error: 'HOTEL_BROWSER_SOURCE_MISMATCH' }, 422);
+  }
+
+  // When both URLs expose a concrete /hotel/<cc>/<slug> identity they must match.
+  // Share/interstitial URLs intentionally have no identity key and therefore do not
+  // block a verified browser snapshot from the same Booking provider.
+  const lockedKey = bookingHotelIdentityKey(source.source_url);
+  const browserKey = bookingHotelIdentityKey(browserSourceURL);
+  if (lockedKey && browserKey && lockedKey !== browserKey) {
+    return json({ ok: false, price: null, error: 'HOTEL_BROWSER_PROPERTY_MISMATCH' }, 409);
+  }
+
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  const expiresAt = new Date(nowDate.getTime() + HOTEL_PRICE_TTL_MS).toISOString();
+  const method = cleanText(normalized.method, 160) || 'booking-browser-live-price';
+
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_cache (
+      hotel_id, source_id, provider, source_url, resolved_url,
+      amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+      quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+      confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
+      last_http_status, error, pending_nightly_price_usd, pending_seen_count,
+      pending_first_seen_at, pending_last_seen_at, created_at, updated_at
+    ) VALUES (?, ?, 'Booking', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=excluded.source_id,
+      provider='Booking',
+      source_url=excluded.source_url,
+      resolved_url=excluded.resolved_url,
+      amount_original=excluded.amount_original,
+      currency_original=excluded.currency_original,
+      price_basis=excluded.price_basis,
+      nightly_price_usd=excluded.nightly_price_usd,
+      quote_total_usd=excluded.quote_total_usd,
+      quote_check_in=excluded.quote_check_in,
+      quote_check_out=excluded.quote_check_out,
+      quote_nights=excluded.quote_nights,
+      quote_adults=excluded.quote_adults,
+      quote_rooms=excluded.quote_rooms,
+      confidence=excluded.confidence,
+      method=excluded.method,
+      status='fresh',
+      fetched_at=excluded.fetched_at,
+      expires_at=excluded.expires_at,
+      last_attempt_at=excluded.last_attempt_at,
+      next_retry_at=NULL,
+      last_http_status=200,
+      error=NULL,
+      pending_nightly_price_usd=NULL,
+      pending_seen_count=0,
+      pending_first_seen_at=NULL,
+      pending_last_seen_at=NULL,
+      updated_at=excluded.updated_at
+  `).bind(
+    hotelID,
+    source.source_id || null,
+    source.source_url,
+    browserSourceURL,
+    normalized.amountOriginal,
+    normalized.currencyOriginal,
+    normalized.priceBasis,
+    normalized.nightlyUSD,
+    normalized.stayTotalUSD,
+    normalized.checkIn,
+    normalized.checkOut,
+    normalized.nights,
+    normalized.adults,
+    normalized.rooms,
+    normalized.confidence,
+    method,
+    now,
+    expiresAt,
+    now,
+    now,
+    now
+  ).run();
+
+  // "Update from source" is an explicit admin action: a successful live Booking
+  // snapshot replaces any manual override, matching the existing refresh contract.
+  await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+  const row = await readHotelPriceRow(env, hotelID);
+  return json({ ok: true, price: hotelPriceFromRow(row), error: null });
 }
 
 async function refreshHotelPriceResponse(env, hotelID) {

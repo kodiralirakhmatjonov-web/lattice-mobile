@@ -568,7 +568,7 @@ struct BookingDetailView: View {
             Text("СЕБЕСТОИМОСТЬ КОМПОНЕНТОВ").font(.caption2.bold()).tracking(1.2).foregroundStyle(.secondary)
             ForEach(report.components) { component in
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(component.label).font(.subheadline)
+                    Text(russianPricingComponentLabel(code: component.code, fallback: component.label)).font(.subheadline)
                     Spacer(minLength: 10)
                     Text(component.supplierCostUsd, format: .currency(code: report.currency).precision(.fractionLength(0...2))).font(.subheadline.bold()).monospacedDigit()
                 }
@@ -634,6 +634,25 @@ struct BookingDetailView: View {
         }
         .padding(12)
         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func russianPricingComponentLabel(code: String, fallback: String) -> String {
+        let value = code.lowercased()
+        if value.hasPrefix("flight_") || value.contains("airfare") { return "Авиабилет" }
+        if value == "makkah_hotel" { return "Отель в Мекке" }
+        if value == "madinah_hotel" { return "Отель в Медине" }
+        if value == "hotel" || value.contains("hotel") { return "Отель" }
+        if value.contains("transfer") || value.contains("transport") { return "Трансфер" }
+        if value.contains("accompaniment") || value.contains("guide") { return "Гид" }
+        if value.contains("visa") { return "Виза" }
+        if value.contains("meal") || value.contains("food") { return "Питание" }
+        if value.contains("haramain") || value.contains("train") { return "Поезд Haramain" }
+        if value == "ziyarat_makkah" { return "Зиярат в Мекке" }
+        if value == "ziyarat_madinah" { return "Зиярат в Медине" }
+        if value.contains("ziyarat") { return "Зиярат" }
+        if value.contains("care") || value.contains("support") { return "iumrah Care" }
+        if value.contains("esim") || value == "sim" { return "eSIM" }
+        return fallback.isEmpty ? "Компонент" : fallback
     }
 
     private func pricingSelectionRow(icon: String, title: String, name: String, subtitle: String) -> some View {
