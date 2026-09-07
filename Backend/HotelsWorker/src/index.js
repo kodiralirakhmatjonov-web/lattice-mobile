@@ -112,6 +112,7 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
 
   if (parts.length === 1) {
     if (request.method === 'GET') return hotelDetail(env, hotelID, true, url);
+    if (request.method === 'PATCH') return updateHotelAdmin(request, env, hotelID);
     if (request.method === 'DELETE') return deleteHotel(env, hotelID);
     return methodNotAllowed();
   }
@@ -3996,6 +3997,33 @@ async function listHotels(env, url, publishedOnly) {
   const result = await env.HOTELS_DB.prepare(sql).bind(...values).all();
   const hotels = (result.results || []).map(row => hotelSummary(row));
   return json({ hotels }, 200, publishedOnly ? PUBLIC_CACHE_HEADERS : undefined);
+}
+
+async function updateHotelAdmin(request, env, hotelID) {
+  const payload = await readJSON(request, 100_000);
+  if (!payload.ok) return payload.response;
+
+  const existing = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
+  if (!existing) return json({ ok: false, error: 'HOTEL_NOT_FOUND' }, 404);
+
+  const body = payload.value && typeof payload.value === 'object' ? payload.value : {};
+  if (!Object.prototype.hasOwnProperty.call(body, 'stars')) {
+    return json({ ok: false, error: 'HOTEL_STARS_REQUIRED' }, 400);
+  }
+
+  const stars = Number(body.stars);
+  if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+    return json({ ok: false, error: 'INVALID_HOTEL_STARS' }, 400);
+  }
+
+  await env.HOTELS_DB.prepare('UPDATE hotels SET stars=?, updated_at=? WHERE id=?')
+    .bind(stars, new Date().toISOString(), hotelID)
+    .run();
+
+  // Only the canonical hotel row changes. Source snapshots remain untouched so
+  // provider-import evidence is preserved. Public catalog endpoints read h.stars,
+  // therefore the client application receives the updated value from the same D1 row.
+  return hotelDetail(env, hotelID, true);
 }
 
 async function hotelDetail(env, hotelID, admin, url = null) {

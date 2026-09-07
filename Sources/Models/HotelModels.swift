@@ -492,6 +492,53 @@ struct HotelListItem: Codable, Identifiable {
 struct HotelsResponse: Codable { let hotels: [HotelListItem] }
 struct HotelSaveResponse: Codable { let ok: Bool; let hotel: HotelListItem? }
 
+struct HotelAdminDetailImage: Codable, Identifiable, Hashable {
+    let id: String
+    let category: String?
+    let isCover: Bool
+    let url: String
+}
+
+struct HotelAdminDetailSource: Codable, Identifiable, Hashable {
+    let id: String
+    let provider: String
+    let sourceURL: String
+    let name: String?
+}
+
+struct HotelAdminDetailRoom: Codable, Identifiable, Hashable {
+    let id: String
+    let name: String
+}
+
+struct HotelAdminDetail: Codable, Identifiable {
+    let id: String
+    let name: String
+    let city: String
+    let country: String
+    let stars: Int?
+    let rating: Double?
+    let reviewCount: Int?
+    let address: String
+    let description: String
+    let status: String
+    let lifecycleState: String?
+    let images: [HotelAdminDetailImage]
+    let rooms: [HotelAdminDetailRoom]
+    let price: HotelCachedPrice?
+    let sources: [HotelAdminDetailSource]
+    let updatedAt: String
+}
+
+struct HotelAdminDetailResponse: Codable {
+    let ok: Bool
+    let hotel: HotelAdminDetail
+}
+
+struct HotelStarsUpdatePayload: Codable {
+    let stars: Int
+}
+
 struct HotelDuplicate: Codable, Identifiable {
     let id: String
     let name: String

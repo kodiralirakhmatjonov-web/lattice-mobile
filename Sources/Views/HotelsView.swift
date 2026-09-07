@@ -10,10 +10,8 @@ struct HotelsView: View {
     @State private var backendMessage: String?
     @State private var importJobs: [HotelImportJob] = []
     @State private var importJobsError: String?
-    @State private var hotelPendingDeletion: HotelListItem?
-    @State private var deletingHotelID: String?
     @State private var jobActionID: String?
-    @State private var refreshingPriceHotelID: String?
+    @State private var selectedCatalogCity = "Makkah"
 
     var body: some View {
         ScrollView {
@@ -36,21 +34,6 @@ struct HotelsView: View {
         .toolbar { ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() } }
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) {
             AddHotelView()
-        }
-        .alert("Удалить отель?", isPresented: Binding(
-            get: { hotelPendingDeletion != nil },
-            set: { if !$0 { hotelPendingDeletion = nil } }
-        )) {
-            Button("Отмена", role: .cancel) { hotelPendingDeletion = nil }
-            Button("Удалить", role: .destructive) {
-                guard let hotel = hotelPendingDeletion else { return }
-                hotelPendingDeletion = nil
-                Task { await deleteHotel(hotel) }
-            }
-        } message: {
-            if let hotelPendingDeletion {
-                Text("\(hotelPendingDeletion.name) будет удалён из D1 вместе с его импортами. Его фотографии также будут удалены из R2. Активный Workflow сначала будет остановлен.")
-            }
         }
         .task {
             await BusinessNotifications.prepare()
@@ -175,23 +158,36 @@ struct HotelsView: View {
         }
     }
 
+    private var filteredHotels: [HotelListItem] {
+        hotels.filter { hotel in
+            let city = hotel.city.lowercased()
+            return selectedCatalogCity == "Makkah" ? city.contains("makk") : city.contains("mad")
+        }
+    }
+
     private var hotelCatalog: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("Город", selection: $selectedCatalogCity) {
+                Text("Мекка").tag("Makkah")
+                Text("Медина").tag("Madinah")
+            }
+            .pickerStyle(.segmented)
+
             HStack {
                 Text("База отелей").font(.title2.bold())
                 Spacer()
-                Text("\(hotels.count)").foregroundStyle(.secondary)
+                Text("\(filteredHotels.count)").foregroundStyle(.secondary)
             }
 
-            if hotels.isEmpty && !loading {
+            if filteredHotels.isEmpty && !loading {
                 ContentUnavailableView(
-                    "Отелей пока нет",
+                    selectedCatalogCity == "Makkah" ? "В Мекке отелей пока нет" : "В Медине отелей пока нет",
                     systemImage: "building.2",
                     description: Text("Добавьте отель по прямой ссылке Booking или Expedia.")
                 )
             }
 
-            ForEach(hotels) { hotel in
+            ForEach(filteredHotels) { hotel in
                 hotelRow(hotel)
             }
         }
@@ -200,113 +196,73 @@ struct HotelsView: View {
     }
 
     private func hotelRow(_ hotel: HotelListItem) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Group {
-                if let imageURL = AppConfig.absoluteURL(hotel.coverImageURL) {
-                    AsyncImage(url: imageURL) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else {
-                            placeholder
-                        }
-                    }
-                } else {
-                    placeholder
-                }
+        NavigationLink {
+            HotelAdminDetailView(hotelID: hotel.id) {
+                Task { await load() }
             }
-            .frame(width: 72, height: 72)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(hotel.name)
-                    .font(.subheadline.bold())
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-
-                HStack(spacing: 6) {
-                    Text(hotel.city)
-                    Text("·")
-                    Label("\(hotel.imageCount)", systemImage: "photo")
-                    Text("·")
-                    Label("\(hotel.roomCount)", systemImage: "bed.double")
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                Group {
+                    if let imageURL = AppConfig.absoluteURL(hotel.coverImageURL) {
+                        AsyncImage(url: imageURL) { phase in
+                            if let image = phase.image {
+                                image.resizable().scaledToFill()
+                            } else {
+                                placeholder
+                            }
+                        }
+                    } else {
+                        placeholder
+                    }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.82)
+                .frame(width: 72, height: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                hotelPriceLine(hotel)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(hotel.name)
+                        .font(.subheadline.bold())
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
 
-                if let rawSource = hotel.sourceURL, let sourceURL = URL(string: rawSource) {
-                    Link(destination: sourceURL) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "arrow.up.right.square")
-                                .font(.caption2.weight(.bold))
-                            Text(sourceOpenLabel(hotel))
+                    HStack(spacing: 6) {
+                        if let stars = hotel.stars {
+                            Text("\(stars)★")
+                        }
+                        Text(hotel.city)
+                        Text("·")
+                        Label("\(hotel.imageCount)", systemImage: "photo")
+                        Text("·")
+                        Label("\(hotel.roomCount)", systemImage: "bed.double")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+
+                    hotelPriceLine(hotel)
+
+                    HStack(spacing: 7) {
+                        if let rating = hotel.rating {
+                            Label(rating.formatted(.number.precision(.fractionLength(1))), systemImage: "star.fill")
                                 .font(.caption2.weight(.semibold))
-                                .lineLimit(1)
+                                .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .contentShape(Capsule())
-                        .businessGlass(in: Capsule(), interactive: true)
+                        statusPill(hotel)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Открыть исходную страницу отеля")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
 
-                HStack(spacing: 7) {
-                    if let rating = hotel.rating {
-                        Label(rating.formatted(.number.precision(.fractionLength(1))), systemImage: "star.fill")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    statusPill(hotel)
-                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(.tertiary)
             }
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .layoutPriority(1)
-
-            Menu {
-                Button { Task { await refreshHotelPrice(hotel) } } label: {
-                    Label("Обновить цену", systemImage: "arrow.clockwise")
-                }
-                .disabled(refreshingPriceHotelID == hotel.id)
-
-                if let rawSource = hotel.sourceURL, let sourceURL = URL(string: rawSource) {
-                    Link(destination: sourceURL) {
-                        Label(sourceOpenLabel(hotel), systemImage: "arrow.up.right.square")
-                    }
-                }
-
-                Divider()
-
-                Button(role: .destructive) { hotelPendingDeletion = hotel } label: {
-                    Label("Удалить отель", systemImage: "trash")
-                }
-            } label: {
-                if deletingHotelID == hotel.id || refreshingPriceHotelID == hotel.id {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "ellipsis")
-                        .font(.headline)
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
-                }
-            }
-            .buttonStyle(.plain)
+            .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-    }
-
-    private func sourceOpenLabel(_ hotel: HotelListItem) -> String {
-        switch hotel.sourceProvider?.lowercased() {
-        case "expedia": return "Открыть Expedia"
-        case "booking": return "Открыть Booking"
-        default: return "Открыть источник"
-        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
     }
 
     @ViewBuilder
@@ -595,31 +551,6 @@ struct HotelsView: View {
         } catch { importJobsError = error.localizedDescription }
     }
 
-    @MainActor private func refreshHotelPrice(_ hotel: HotelListItem) async {
-        refreshingPriceHotelID = hotel.id
-        defer { refreshingPriceHotelID = nil }
-        do {
-            _ = try await APIClient.shared.refreshHotelPrice(id: hotel.id)
-            hotels = try await APIClient.shared.hotels()
-            backendMessage = nil
-        } catch {
-            backendMessage = "Не удалось обновить цену \(hotel.name): \(error.localizedDescription)"
-            if let refreshed = try? await APIClient.shared.hotels() { hotels = refreshed }
-        }
-    }
-
-    @MainActor private func deleteHotel(_ hotel: HotelListItem) async {
-        deletingHotelID = hotel.id
-        defer { deletingHotelID = nil }
-        do {
-            try await APIClient.shared.deleteHotel(id: hotel.id)
-            hotels.removeAll { $0.id == hotel.id }
-            importJobs.removeAll { $0.hotelID == hotel.id }
-            cloudHealth = try? await APIClient.shared.hotelCloudHealth()
-        } catch {
-            backendMessage = "Не удалось удалить отель: \(error.localizedDescription)"
-        }
-    }
 }
 
 private struct HotelCountCard: View {

@@ -34,14 +34,16 @@ struct FlightCurationView: View {
         case manual
         case bulk
         case charter
+        case published
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .manual: return "Один поиск"
+            case .manual: return "Поиск"
             case .bulk: return "Массовый"
             case .charter: return "Чартеры"
+            case .published: return "Опубликованные"
             }
         }
     }
@@ -300,14 +302,14 @@ struct FlightCurationView: View {
                         batchProgressSection
                         batchResultsSection
                     }
-                } else {
+                } else if workspace == .charter {
                     charterImportCard
                     if !charterResults.isEmpty {
                         charterResultsSection
                     }
+                } else {
+                    publishedSection
                 }
-
-                publishedSection
             }
             .padding(.horizontal, 18)
             .padding(.bottom, 36)
@@ -349,7 +351,7 @@ struct FlightCurationView: View {
             Text("Поиск и публикация рейсов")
                 .font(.system(size: 26, weight: .bold))
                 .tracking(-0.6)
-            Text("Три независимых режима: рабочий ручной Ignav-поиск, массовый ONE WAY через тот же Ignav-кэш и отдельный импорт чартеров из JSON без обращения к Ignav. Round-trip остаётся отдельной линейкой внутри ручного поиска.")
+            Text("Поиск, массовый ONE WAY, импорт чартеров и отдельная вкладка опубликованных рейсов. Round-trip остаётся отдельной линейкой внутри ручного поиска.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -358,12 +360,29 @@ struct FlightCurationView: View {
     }
 
     private var workspacePicker: some View {
-        Picker("Режим работы", selection: $workspace) {
+        HStack(spacing: 0) {
             ForEach(SearchWorkspace.allCases) { item in
-                Text(item.title).tag(item)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { workspace = item }
+                } label: {
+                    Text(item.title)
+                        .font(.system(size: 13, weight: workspace == item ? .semibold : .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.68)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 38)
+                        .background(
+                            workspace == item ? BusinessDesign.card : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
-        .pickerStyle(.segmented)
+        .padding(4)
+        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line, lineWidth: 0.8))
     }
 
     private var bulkSearchCard: some View {

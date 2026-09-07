@@ -58,7 +58,14 @@ struct BusinessAirlineLogoView: View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
                 .fill(Color.white)
-            if let logoURL {
+            if code == "C6" {
+                Image("CentrumAirLogo")
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .scaleEffect(1.22)
+                    .padding(size * 0.04)
+            } else if let logoURL {
                 AsyncImage(url: logoURL) { phase in
                     if case .success(let image) = phase {
                         image.resizable().scaledToFit().padding(size * 0.14)
@@ -71,6 +78,7 @@ struct BusinessAirlineLogoView: View {
             }
         }
         .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.28, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
                 .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.7)
