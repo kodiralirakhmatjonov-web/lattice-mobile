@@ -6936,10 +6936,18 @@ function cleanText(value, maxLength = 1000) {
 }
 
 function canonicalCity(value) {
-  const text = String(value || '').trim().toLowerCase();
-  if (['makkah', 'mecca', 'makkah al mukarramah'].includes(text)) return 'Makkah';
-  if (['madinah', 'medina', 'al madinah'].includes(text)) return 'Madinah';
-  return cleanText(value, 80);
+  const original = String(value || '').trim();
+  const text = original
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Providers do not use one stable spelling. Normalize all common variants
+  // at the server boundary so the admin and client catalogs see one city key.
+  if (/\b(?:makkah|mecca)\b/.test(text) || text.includes('مكة')) return 'Makkah';
+  if (/\b(?:madinah|medina)\b/.test(text) || text.includes('المدينة')) return 'Madinah';
+  return cleanText(original, 80);
 }
 
 function cleanURL(value) {

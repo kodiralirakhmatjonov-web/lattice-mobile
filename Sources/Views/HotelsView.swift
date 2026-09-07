@@ -97,8 +97,8 @@ struct HotelsView: View {
 
     private var cityCounters: some View {
         HStack(spacing: 10) {
-            HotelCountCard(title: "Makkah", count: hotels.filter { $0.city.lowercased().contains("makk") }.count)
-            HotelCountCard(title: "Madinah", count: hotels.filter { $0.city.lowercased().contains("mad") }.count)
+            HotelCountCard(title: "Makkah", count: hotels.filter { catalogCity(for: $0.city) == "Makkah" }.count)
+            HotelCountCard(title: "Madinah", count: hotels.filter { catalogCity(for: $0.city) == "Madinah" }.count)
         }
     }
 
@@ -159,10 +159,27 @@ struct HotelsView: View {
     }
 
     private var filteredHotels: [HotelListItem] {
-        hotels.filter { hotel in
-            let city = hotel.city.lowercased()
-            return selectedCatalogCity == "Makkah" ? city.contains("makk") : city.contains("mad")
+        hotels.filter { catalogCity(for: $0.city) == selectedCatalogCity }
+    }
+
+    /// D1 historically contains a few provider/legacy spellings such as
+    /// "Mecca" / "Medina".  Never classify the catalog by fragile substring
+    /// checks ("makk" / "mad"), because those aliases silently disappear
+    /// from both counters and the list.
+    private func catalogCity(for rawCity: String) -> String? {
+        let city = rawCity
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+
+        if city.contains("makkah") || city.contains("mecca") || city.contains("مكة") {
+            return "Makkah"
         }
+        if city.contains("madinah") || city.contains("medina") || city.contains("المدينة") {
+            return "Madinah"
+        }
+        return nil
     }
 
     private var hotelCatalog: some View {
