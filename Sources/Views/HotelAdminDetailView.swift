@@ -18,6 +18,7 @@ struct HotelAdminDetailView: View {
     @State private var showDeleteConfirmation = false
     @State private var errorMessage: String?
     @State private var savedMessage: String?
+    @State private var priceNotice: String?
 
     var body: some View {
         ScrollView {
@@ -213,6 +214,14 @@ struct HotelAdminDetailView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
+
+            if let priceNotice {
+                Label(priceNotice, systemImage: "clock.arrow.circlepath")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+            }
 
             Button {
                 Task { await refreshPrice() }
@@ -441,12 +450,25 @@ struct HotelAdminDetailView: View {
         refreshingPrice = true
         defer { refreshingPrice = false }
         do {
-            _ = try await APIClient.shared.refreshHotelPrice(id: hotelID)
+            let response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
             let latest = try await APIClient.shared.hotelDetail(id: hotelID)
             hotel = latest
             manualPriceText = editablePrice(latest.price?.nightlyUSD)
             editingManualPrice = false
-            savedMessage = "Цена обновлена из источника"
+            if let warning = response.error, !warning.isEmpty {
+                savedMessage = nil
+                switch warning {
+                case "HOTEL_PRICE_SOURCE_HTTP_429":
+                    priceNotice = "Источник временно ограничил запросы. Последняя сохранённая цена остаётся активной; система повторит обновление автоматически."
+                case "HOTEL_PRICE_SOURCE_CHALLENGE":
+                    priceNotice = "Источник запросил браузерную проверку. Последняя сохранённая цена остаётся активной; система повторит обновление автоматически."
+                default:
+                    priceNotice = "Источник сейчас не обновился. Последняя сохранённая цена остаётся активной; система повторит обновление автоматически."
+                }
+            } else {
+                priceNotice = nil
+                savedMessage = "Цена обновлена из источника"
+            }
             onChanged()
             errorMessage = nil
         } catch {

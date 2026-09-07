@@ -22,6 +22,9 @@ struct HotelsView: View {
                 cloudStatus
                 importsSection
                 hotelCatalog
+                if !unclassifiedHotels.isEmpty {
+                    unclassifiedCatalog
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 14)
@@ -162,6 +165,10 @@ struct HotelsView: View {
         hotels.filter { catalogCity(for: $0.city) == selectedCatalogCity }
     }
 
+    private var unclassifiedHotels: [HotelListItem] {
+        hotels.filter { catalogCity(for: $0.city) == nil }
+    }
+
     /// D1 historically contains a few provider/legacy spellings such as
     /// "Mecca" / "Medina".  Never classify the catalog by fragile substring
     /// checks ("makk" / "mad"), because those aliases silently disappear
@@ -212,6 +219,31 @@ struct HotelsView: View {
         .businessCard(radius: 28)
     }
 
+    private var unclassifiedCatalog: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Нужно определить город")
+                        .font(.title3.bold())
+                    Text("Эти записи есть в D1, но их city не распознан как Makkah или Madinah. Они больше не скрываются из интерфейса.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                Text("\(unclassifiedHotels.count)")
+                    .font(.headline.monospacedDigit())
+                    .foregroundStyle(.orange)
+            }
+
+            ForEach(unclassifiedHotels) { hotel in
+                hotelRow(hotel)
+            }
+        }
+        .padding(16)
+        .businessCard(radius: 28)
+    }
+
     private func hotelRow(_ hotel: HotelListItem) -> some View {
         NavigationLink {
             HotelAdminDetailView(hotelID: hotel.id) {
@@ -219,21 +251,30 @@ struct HotelsView: View {
             }
         } label: {
             HStack(alignment: .center, spacing: 12) {
-                Group {
+                ZStack {
+                    BusinessDesign.secondarySurface
                     if let imageURL = AppConfig.absoluteURL(hotel.coverImageURL) {
                         AsyncImage(url: imageURL) { phase in
                             if let image = phase.image {
-                                image.resizable().scaledToFill()
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 76, height: 82)
+                                    .clipped()
                             } else {
-                                placeholder
+                                Image(systemName: "building.2.fill")
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     } else {
-                        placeholder
+                        Image(systemName: "building.2.fill")
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .frame(width: 72, height: 72)
+                .frame(width: 76, height: 82)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .layoutPriority(0)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(hotel.name)

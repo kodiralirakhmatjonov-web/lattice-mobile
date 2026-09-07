@@ -743,6 +743,7 @@ enum APIError: LocalizedError {
             case "HOTEL_PRICE_SOURCE_CHALLENGE": return "Источник запросил проверку браузера. Ручная цена сохранится; попробуйте обновить из источника позже."
             case "HOTEL_PRICE_NOT_FOUND_ON_SOURCE": return "Источник открылся, но актуальную цену на странице определить не удалось."
             case "HOTEL_PRICE_SOURCE_FETCH_FAILED": return "Не удалось открыть источник цены. Попробуйте ещё раз позже."
+            case "HOTEL_PRICE_SOURCE_HTTP_429": return "Источник временно ограничил запросы. Последняя сохранённая цена остаётся активной; автоматическое обновление повторится позже."
             default: return value
             }
         }

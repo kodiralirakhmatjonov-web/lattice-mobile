@@ -1312,7 +1312,7 @@ async function updateBookingAssignments(request, env, bookingID) {
     if (!id) continue;
     const hotel = await env.HOTELS_DB.prepare("SELECT id, city, status FROM hotels WHERE id=? AND status='published' LIMIT 1").bind(id).first();
     if (!hotel) return json({ ok: false, error: 'HOTEL_NOT_AVAILABLE', hotelID: id }, 409);
-    if (hotel.city && String(hotel.city).toLowerCase() !== city.toLowerCase()) return json({ ok: false, error: 'HOTEL_CITY_MISMATCH', hotelID: id, expectedCity: city }, 409);
+    if (canonicalCity(hotel.city) !== city) return json({ ok: false, error: 'HOTEL_CITY_MISMATCH', hotelID: id, expectedCity: city }, 409);
   }
   if (guideID) {
     const guide = await env.HOTELS_DB.prepare("SELECT id FROM team_members WHERE id=? AND role_kind='guide' AND active=1 LIMIT 1").bind(guideID).first();
@@ -3478,25 +3478,36 @@ async function pilgrimDetail(env, publicID) {
 }
 
 async function adminPrimaryHotels(env, url) {
-  const city = cleanText(url.searchParams.get('city'), 80);
+  const city = canonicalCity(url.searchParams.get('city'));
   const values = [];
   const where = [];
   if (city) { where.push('LOWER(p.city)=LOWER(?)'); values.push(city); }
   const result = await env.HOTELS_DB.prepare(`
-    SELECT p.city, p.star_category, p.position, h.id, h.name, h.stars, h.rating, h.review_count, h.status, h.lifecycle_state, h.updated_at,
+    SELECT p.city AS primary_city, p.star_category, p.position,
+      h.id, h.name, h.city, h.address, h.latitude, h.longitude, h.stars, h.rating, h.review_count, h.status, h.lifecycle_state, h.updated_at,
+      hps.provider AS locked_source_provider, hps.source_url AS locked_source_url,
+      ${HOTEL_PRICE_SELECT},
+      (SELECT hs.city FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.city IS NOT NULL AND hs.city!='' ORDER BY hs.checked_at DESC LIMIT 1) AS source_city_hint,
+      (SELECT hs.address FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.address IS NOT NULL AND hs.address!='' ORDER BY hs.checked_at DESC LIMIT 1) AS source_address_hint,
+      (SELECT hs.latitude FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.latitude IS NOT NULL ORDER BY hs.checked_at DESC LIMIT 1) AS source_latitude_hint,
+      (SELECT hs.longitude FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.longitude IS NOT NULL ORDER BY hs.checked_at DESC LIMIT 1) AS source_longitude_hint,
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id=h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id=h.id) AS room_count,
       (SELECT hi.id FROM hotel_images hi WHERE hi.hotel_id=h.id ORDER BY hi.is_cover DESC, hi.position ASC LIMIT 1) AS cover_image_id
-    FROM primary_hotels p JOIN hotels h ON h.id=p.hotel_id
+    FROM primary_hotels p
+    JOIN hotels h ON h.id=p.hotel_id
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY p.city, p.star_category, p.position
   `).bind(...values).all();
-  return json({ ok: true, assignments: (result.results || []).map(row => ({ city: row.city, stars: Number(row.star_category), position: Number(row.position), hotel: hotelSummary(row) })) });
+  return json({ ok: true, assignments: (result.results || []).map(row => ({ city: row.primary_city, stars: Number(row.star_category), position: Number(row.position), hotel: hotelSummary(row, true) })) });
 }
 
 async function savePrimaryHotels(request, env) {
   const payload = await request.json().catch(() => null);
-  const city = safeHumanText(payload?.city, 80);
+  const city = canonicalCity(payload?.city);
   const stars = Number(payload?.stars);
   const hotelIDs = Array.isArray(payload?.hotelIDs) ? [...new Set(payload.hotelIDs.map(value => safeID(value)).filter(Boolean))].slice(0,3) : [];
   if (!city || !Number.isInteger(stars) || stars < 1 || stars > 5) return json({ ok: false, error: 'INVALID_PRIMARY_CATEGORY' }, 400);
@@ -3504,7 +3515,7 @@ async function savePrimaryHotels(request, env) {
   for (const id of hotelIDs) {
     const hotel = await env.HOTELS_DB.prepare("SELECT id, city FROM hotels WHERE id=? AND status='published' LIMIT 1").bind(id).first();
     if (!hotel) return json({ ok: false, error: `HOTEL_NOT_PUBLISHED:${id}` }, 409);
-    if (String(hotel.city || '').toLowerCase() !== city.toLowerCase()) return json({ ok: false, error: `HOTEL_CITY_MISMATCH:${id}` }, 409);
+    if (canonicalCity(hotel.city) !== canonicalCity(city)) return json({ ok: false, error: `HOTEL_CITY_MISMATCH:${id}` }, 409);
     valid.push(id);
   }
   const statements = [env.HOTELS_DB.prepare('DELETE FROM primary_hotels WHERE LOWER(city)=LOWER(?) AND star_category=?').bind(city, stars)];
@@ -3515,19 +3526,29 @@ async function savePrimaryHotels(request, env) {
 }
 
 async function publicPrimaryHotels(env, url) {
-  const city = safeHumanText(url.searchParams.get('city'), 80);
+  const city = canonicalCity(url.searchParams.get('city'));
   const stars = Number(url.searchParams.get('stars'));
   if (!city || !Number.isInteger(stars) || stars < 1 || stars > 5) return json({ ok: false, error: 'CITY_AND_STARS_REQUIRED' }, 400);
   const result = await env.HOTELS_DB.prepare(`
-    SELECT p.position, h.id, h.name, h.city, h.stars, h.rating, h.review_count, h.status, h.lifecycle_state, h.updated_at,
+    SELECT p.position, h.id, h.name, h.city, h.address, h.latitude, h.longitude, h.stars, h.rating, h.review_count, h.status, h.lifecycle_state, h.updated_at,
+      hps.provider AS locked_source_provider, hps.source_url AS locked_source_url,
+      ${HOTEL_PRICE_SELECT},
+      (SELECT hs.city FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.city IS NOT NULL AND hs.city!='' ORDER BY hs.checked_at DESC LIMIT 1) AS source_city_hint,
+      (SELECT hs.address FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.address IS NOT NULL AND hs.address!='' ORDER BY hs.checked_at DESC LIMIT 1) AS source_address_hint,
+      (SELECT hs.latitude FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.latitude IS NOT NULL ORDER BY hs.checked_at DESC LIMIT 1) AS source_latitude_hint,
+      (SELECT hs.longitude FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.longitude IS NOT NULL ORDER BY hs.checked_at DESC LIMIT 1) AS source_longitude_hint,
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id=h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id=h.id) AS room_count,
       (SELECT hi.id FROM hotel_images hi WHERE hi.hotel_id=h.id ORDER BY hi.is_cover DESC, hi.position ASC LIMIT 1) AS cover_image_id
-    FROM primary_hotels p JOIN hotels h ON h.id=p.hotel_id
+    FROM primary_hotels p
+    JOIN hotels h ON h.id=p.hotel_id
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
     WHERE LOWER(p.city)=LOWER(?) AND p.star_category=? AND h.status='published'
     ORDER BY p.position ASC
   `).bind(city, stars).all();
-  return json({ ok: true, city, stars, recommendationLabel: 'Рекомендует iumrah', hotels: (result.results || []).map(row => ({ ...hotelSummary(row), primaryPosition: Number(row.position) })) }, 200, PUBLIC_CACHE_HEADERS);
+  return json({ ok: true, city, stars, recommendationLabel: 'Рекомендует iumrah', hotels: (result.results || []).map(row => ({ ...hotelSummary(row, false, { publicUsablePrice: true }), primaryPosition: Number(row.position) })) }, 200, PUBLIC_CACHE_HEADERS);
 }
 
 async function handleClientOperations(request, env, parts) {
@@ -4201,12 +4222,32 @@ async function requireStaff(request, env, options = {}) {
 }
 
 
-function hotelPriceFromRow(row) {
+function hotelPriceFromRow(row, options = {}) {
   if (!row) return null;
   const manualNightly = row.price_manual_nightly_usd == null ? null : Number(row.price_manual_nightly_usd);
   const sourceNightly = row.price_nightly_price_usd == null ? null : Number(row.price_nightly_price_usd);
   const hasManual = Number.isFinite(manualNightly) && manualNightly > 0;
+  const effectiveNightly = hasManual ? manualNightly : sourceNightly;
   if (!hasManual && row.price_status == null) return null;
+
+  const sourceStatus = hasManual ? 'manual' : row.price_status;
+  const sourceExpiresAt = hasManual ? null : (row.price_expires_at || null);
+  const sourceExpired = !!sourceExpiresAt && Number.isFinite(Date.parse(sourceExpiresAt)) && Date.parse(sourceExpiresAt) <= Date.now();
+  const publicUsable = options.publicUsable === true && Number.isFinite(effectiveNightly) && effectiveNightly > 0;
+  const usingFallback = publicUsable && !hasManual && (sourceStatus === 'stale' || sourceExpired);
+
+  // Consumer compatibility contract: a last-known non-zero rate must never make
+  // package generation impossible merely because the provider refresh is late.
+  // Admin responses still expose the real stale/manual state; public catalog
+  // responses expose the same amount as usable while retaining sourceStatus and
+  // sourceExpiresAt for diagnostics.
+  const publicStatus = publicUsable && (hasManual || usingFallback) ? 'fresh' : sourceStatus;
+  const publicExpiresAt = hasManual && publicUsable
+    ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+    : usingFallback
+      ? new Date(Date.now() + HOTEL_PRICE_RETRY_MS).toISOString()
+      : sourceExpiresAt;
+
   return {
     provider: row.price_provider || null,
     sourceURL: row.price_source_url || null,
@@ -4214,7 +4255,7 @@ function hotelPriceFromRow(row) {
     amountOriginal: row.price_amount_original == null ? null : Number(row.price_amount_original),
     currencyOriginal: row.price_currency_original || null,
     priceBasis: row.price_basis || null,
-    nightlyUSD: hasManual ? manualNightly : sourceNightly,
+    nightlyUSD: effectiveNightly,
     sourceNightlyUSD: sourceNightly,
     isManualOverride: hasManual,
     quoteTotalUSD: hasManual ? null : (row.price_quote_total_usd == null ? null : Number(row.price_quote_total_usd)),
@@ -4225,12 +4266,16 @@ function hotelPriceFromRow(row) {
     rooms: row.price_quote_rooms == null ? null : Number(row.price_quote_rooms),
     confidence: row.price_confidence == null ? null : Number(row.price_confidence),
     method: hasManual ? 'admin-manual-override' : (row.price_method || null),
-    status: hasManual ? 'manual' : row.price_status,
+    status: publicStatus,
+    sourceStatus,
+    fallbackPrice: usingFallback,
     fetchedAt: hasManual ? (row.price_manual_updated_at || null) : (row.price_fetched_at || null),
-    expiresAt: hasManual ? null : (row.price_expires_at || null),
+    expiresAt: publicExpiresAt,
+    sourceExpiresAt,
     lastAttemptAt: row.price_last_attempt_at || null,
     nextRetryAt: row.price_next_retry_at || null,
-    error: row.price_error || null
+    error: publicUsable ? null : (row.price_error || null),
+    sourceError: row.price_error || null
   };
 }
 
@@ -4415,13 +4460,53 @@ async function markHotelPriceRefreshFailure(env, hotelID, errorCode) {
 async function runHotelPriceMaintenance(env) {
   if (!env?.HOTELS_DB) return;
   const now = new Date().toISOString();
+
   await env.HOTELS_DB.prepare(`
     UPDATE hotel_price_cache
     SET status='stale', updated_at=?
     WHERE status='fresh' AND expires_at IS NOT NULL AND expires_at<=?
   `).bind(now, now).run().catch(error => {
-    console.error('HOTEL_PRICE_MAINTENANCE_FAILED', String(error?.message || error));
+    console.error('HOTEL_PRICE_MAINTENANCE_MARK_STALE_FAILED', String(error?.message || error));
   });
+
+  // Refresh only a small due batch each hourly cron. With a 48h TTL this is
+  // enough for the full catalog while avoiding a burst of Booking/Expedia
+  // requests. Provider failures never erase nightly_price_usd: mark failure
+  // preserves the last accepted rate as stale and schedules a retry.
+  let due = { results: [] };
+  try {
+    due = await env.HOTELS_DB.prepare(`
+      SELECT h.id
+      FROM hotels h
+      JOIN hotel_price_sources hps ON hps.hotel_id=h.id
+      LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+      WHERE h.status='published'
+        AND hps.source_url IS NOT NULL AND hps.source_url!=''
+        AND (
+          hp.hotel_id IS NULL
+          OR (hp.status IN ('stale','failed','pending') AND (hp.next_retry_at IS NULL OR hp.next_retry_at<=?))
+        )
+      ORDER BY
+        CASE WHEN hp.nightly_price_usd IS NULL THEN 0 ELSE 1 END,
+        COALESCE(hp.next_retry_at, hp.expires_at, hp.updated_at, h.updated_at) ASC
+      LIMIT 3
+    `).bind(now).all();
+  } catch (error) {
+    console.error('HOTEL_PRICE_MAINTENANCE_QUEUE_FAILED', String(error?.message || error));
+    return;
+  }
+
+  for (const row of due.results || []) {
+    const hotelID = safeID(row?.id);
+    if (!hotelID) continue;
+    try {
+      await fetchExactHotelSourcePrice(env, hotelID, { clearManualOverride: false });
+    } catch (error) {
+      const code = cleanText(error?.message, 220) || 'HOTEL_PRICE_REFRESH_FAILED';
+      console.warn('HOTEL_PRICE_BACKGROUND_REFRESH_FAILED', hotelID, code);
+      await markHotelPriceRefreshFailure(env, hotelID, code).catch(() => {});
+    }
+  }
 }
 
 async function setManualHotelPrice(request, env, hotelID, user) {
@@ -4513,7 +4598,7 @@ async function readExactHotelSourcePage(env, sourceURL) {
   return { response, html, finalURL: response.url || sourceURL };
 }
 
-async function fetchExactHotelSourcePrice(env, hotelID) {
+async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   const source = await ensureHotelPriceSourceLock(env, hotelID);
   if (!source?.source_url) throw new Error('HOTEL_PRICE_SOURCE_MISSING');
   const sourceURL = cleanURL(source.source_url);
@@ -4603,9 +4688,12 @@ async function fetchExactHotelSourcePrice(env, hotelID) {
     now
   ).run();
 
-  // A successful explicit provider refresh means the administrator wants the
-  // canonical source price again, so the temporary manual override is removed.
-  await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+  // Only an explicit admin action is allowed to remove a manual override.
+  // Scheduled source refreshes keep the manual value active while refreshing
+  // the underlying source snapshot in the background.
+  if (options.clearManualOverride === true) {
+    await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+  }
   return readHotelPriceRow(env, hotelID);
 }
 
@@ -4614,7 +4702,7 @@ async function refreshHotelPriceResponse(env, hotelID) {
   if (!hotel) return json({ ok: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
 
   try {
-    const row = await fetchExactHotelSourcePrice(env, hotelID);
+    const row = await fetchExactHotelSourcePrice(env, hotelID, { clearManualOverride: true });
     return json({ ok: true, price: hotelPriceFromRow(row), error: null });
   } catch (error) {
     const code = cleanText(error?.message, 220) || 'HOTEL_PRICE_REFRESH_FAILED';
@@ -4623,7 +4711,13 @@ async function refreshHotelPriceResponse(env, hotelID) {
     const status = code === 'HOTEL_PRICE_SOURCE_MISSING' ? 409
       : code === 'HOTEL_PRICE_NOT_FOUND_ON_SOURCE' || code === 'HOTEL_PRICE_SOURCE_CHALLENGE' ? 422
       : 502;
-    return json({ ok: false, price: hotelPriceFromRow(await readHotelPriceRow(env, hotelID)), error: code }, status);
+    const fallback = hotelPriceFromRow(await readHotelPriceRow(env, hotelID));
+    // If a previously accepted price exists, a provider 429/challenge/network
+    // error is a refresh warning, not a reason to make the hotel unusable.
+    if (fallback?.nightlyUSD != null && Number(fallback.nightlyUSD) > 0) {
+      return json({ ok: true, price: fallback, error: code }, 200);
+    }
+    return json({ ok: false, price: fallback, error: code }, status);
   }
 }
 
@@ -4657,7 +4751,7 @@ async function health(env, admin) {
 }
 
 async function listHotels(env, url, publishedOnly) {
-  const city = cleanText(url.searchParams.get('city'), 80);
+  const city = canonicalCity(url.searchParams.get('city'));
   const values = [];
   const where = [];
 
@@ -4672,6 +4766,9 @@ async function listHotels(env, url, publishedOnly) {
       h.id,
       h.name,
       h.city,
+      h.address,
+      h.latitude,
+      h.longitude,
       h.stars,
       h.rating,
       h.review_count,
@@ -4680,6 +4777,10 @@ async function listHotels(env, url, publishedOnly) {
       h.updated_at,
       hps.provider AS locked_source_provider,
       hps.source_url AS locked_source_url,
+      (SELECT hs.city FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.city IS NOT NULL AND hs.city!='' ORDER BY hs.checked_at DESC LIMIT 1) AS source_city_hint,
+      (SELECT hs.address FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.address IS NOT NULL AND hs.address!='' ORDER BY hs.checked_at DESC LIMIT 1) AS source_address_hint,
+      (SELECT hs.latitude FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.latitude IS NOT NULL ORDER BY hs.checked_at DESC LIMIT 1) AS source_latitude_hint,
+      (SELECT hs.longitude FROM hotel_sources hs WHERE hs.hotel_id=h.id AND hs.longitude IS NOT NULL ORDER BY hs.checked_at DESC LIMIT 1) AS source_longitude_hint,
       ${HOTEL_PRICE_SELECT},
       (SELECT COUNT(*) FROM hotel_images hi WHERE hi.hotel_id = h.id) AS image_count,
       (SELECT COUNT(*) FROM hotel_rooms hr WHERE hr.hotel_id = h.id) AS room_count,
@@ -4702,7 +4803,7 @@ async function listHotels(env, url, publishedOnly) {
   `;
 
   const result = await env.HOTELS_DB.prepare(sql).bind(...values).all();
-  const hotels = (result.results || []).map(row => hotelSummary(row, !publishedOnly));
+  const hotels = (result.results || []).map(row => hotelSummary(row, !publishedOnly, { publicUsablePrice: publishedOnly }));
   return json({ hotels }, 200, publishedOnly ? PUBLIC_CACHE_HEADERS : undefined);
 }
 
@@ -4818,7 +4919,7 @@ async function hotelDetail(env, hotelID, admin, url = null) {
       bathroom: parseJSONArray(row.bathroom_json)
     })),
     images,
-    price: hotelPriceFromRow(priceRow),
+    price: hotelPriceFromRow(priceRow, { publicUsable: !admin }),
     sources: admin ? (sourcesResult.results || []).map(sourceRow) : [],
     createdAt: hotel.created_at,
     updatedAt: hotel.updated_at
@@ -4881,7 +4982,7 @@ async function saveHotel(request, env, user) {
 async function persistHotelDraft(draft, env, user, options = {}) {
   const id = safeID(draft?.id);
   const name = cleanText(draft?.name, 180);
-  const city = canonicalCity(draft?.city);
+  const city = resolveHotelCityDraft(draft);
 
   if (!id || !name || !city) {
     return { ok: false, response: json({ ok: false, error: 'INVALID_HOTEL_PAYLOAD' }, 400) };
@@ -5181,7 +5282,7 @@ async function findDuplicateHotel(env, draft, excludeID = null) {
   }
 
   const name = cleanText(draft?.name, 180);
-  const city = canonicalCity(draft?.city);
+  const city = resolveHotelCityDraft(draft);
   if (!name || !city) return null;
 
   const latitude = nullableNumber(draft?.latitude, -90, 90);
@@ -6838,12 +6939,12 @@ async function summaryRow(env, hotelID) {
   `).bind(hotelID).first();
 }
 
-function hotelSummary(row, includeSource = true) {
+function hotelSummary(row, includeSource = true, options = {}) {
   if (!row) return null;
   return {
     id: row.id,
     name: row.name,
-    city: row.city,
+    city: resolveHotelCityRow(row),
     stars: row.stars == null ? null : Number(row.stars),
     rating: row.rating == null ? null : Number(row.rating),
     reviewCount: row.review_count == null ? null : Number(row.review_count),
@@ -6852,7 +6953,7 @@ function hotelSummary(row, includeSource = true) {
     coverImageURL: row.cover_image_id ? publicImagePath(row.id, row.cover_image_id) : null,
     imageCount: Number(row.image_count || 0),
     roomCount: Number(row.room_count || 0),
-    price: hotelPriceFromRow(row),
+    price: hotelPriceFromRow(row, { publicUsable: options.publicUsablePrice === true }),
     sourceProvider: includeSource ? (row.locked_source_provider || row.price_provider || null) : null,
     sourceURL: includeSource ? (row.locked_source_url || row.price_source_url || null) : null,
     updatedAt: row.updated_at
@@ -6935,19 +7036,66 @@ function cleanText(value, maxLength = 1000) {
   return text.slice(0, maxLength);
 }
 
+function detectUmrahCity(...values) {
+  for (const value of values.flat(Infinity)) {
+    if (value == null) continue;
+    const text = String(value)
+      .toLowerCase()
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) continue;
+    if (/\b(?:makkah|mecca|makkah al mukarramah|makkah almukarramah)\b/.test(text) || text.includes('مكة')) return 'Makkah';
+    if (/\b(?:madinah|medina|al madinah|madinah al munawwarah|medina al munawwarah)\b/.test(text) || text.includes('المدينة')) return 'Madinah';
+  }
+  return null;
+}
+
+function cityFromCoordinates(latitude, longitude) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const makkahDistance = (lat - 21.4225) * (lat - 21.4225) + (lon - 39.8262) * (lon - 39.8262);
+  const madinahDistance = (lat - 24.4672) * (lat - 24.4672) + (lon - 39.6111) * (lon - 39.6111);
+  if (makkahDistance <= 0.20 && makkahDistance < madinahDistance) return 'Makkah';
+  if (madinahDistance <= 0.20 && madinahDistance < makkahDistance) return 'Madinah';
+  return null;
+}
+
+function resolveHotelCityRow(row) {
+  return detectUmrahCity(
+    row?.city,
+    row?.name,
+    row?.address,
+    row?.source_city_hint,
+    row?.source_address_hint,
+    row?.locked_source_url,
+    row?.price_source_url
+  ) || cityFromCoordinates(row?.latitude, row?.longitude)
+    || cityFromCoordinates(row?.source_latitude_hint, row?.source_longitude_hint)
+    || cleanText(row?.city, 80) || 'Unknown';
+}
+
+function resolveHotelCityDraft(draft) {
+  const sources = Array.isArray(draft?.sources) ? draft.sources.slice(0, 10) : [];
+  const textualHints = [
+    draft?.city, draft?.name, draft?.address, draft?.googleMapsURL,
+    ...sources.flatMap(source => [source?.city, source?.name, source?.address, source?.sourceURL, source?.canonicalURL, source?.googleMapsURL])
+  ];
+  const textual = detectUmrahCity(textualHints);
+  if (textual) return textual;
+  const directCoordinates = cityFromCoordinates(draft?.latitude, draft?.longitude);
+  if (directCoordinates) return directCoordinates;
+  for (const source of sources) {
+    const sourceCoordinates = cityFromCoordinates(source?.latitude, source?.longitude);
+    if (sourceCoordinates) return sourceCoordinates;
+  }
+  return canonicalCity(draft?.city);
+}
+
 function canonicalCity(value) {
   const original = String(value || '').trim();
-  const text = original
-    .toLowerCase()
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // Providers do not use one stable spelling. Normalize all common variants
-  // at the server boundary so the admin and client catalogs see one city key.
-  if (/\b(?:makkah|mecca)\b/.test(text) || text.includes('مكة')) return 'Makkah';
-  if (/\b(?:madinah|medina)\b/.test(text) || text.includes('المدينة')) return 'Madinah';
-  return cleanText(original, 80);
+  return detectUmrahCity(original) || cleanText(original, 80);
 }
 
 function cleanURL(value) {

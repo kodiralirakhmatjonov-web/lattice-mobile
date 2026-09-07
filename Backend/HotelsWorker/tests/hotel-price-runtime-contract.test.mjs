@@ -65,8 +65,9 @@ test('hotel list exposes locked source URL only to Business admin summaries', ()
 
 test('manual hotel price override is returned by both admin and client hotel summaries', () => {
   assert.match(worker, /LEFT JOIN hotel_price_overrides hpo ON hpo\.hotel_id = h\.id/);
-  assert.match(worker, /nightlyUSD:\s*hasManual \? manualNightly : sourceNightly/);
-  assert.match(worker, /status:\s*hasManual \? 'manual' : row\.price_status/);
+  assert.match(worker, /const effectiveNightly = hasManual \? manualNightly : sourceNightly/);
+  assert.match(worker, /nightlyUSD:\s*effectiveNightly/);
+  assert.match(worker, /const sourceStatus = hasManual \? 'manual' : row\.price_status/);
 });
 
 test('successful source refresh removes the manual hotel price override only after a real source price is persisted', () => {
@@ -77,6 +78,34 @@ test('successful source refresh removes the manual hotel price override only aft
   const clearAt = implementation.indexOf("DELETE FROM hotel_price_overrides WHERE hotel_id=?");
   assert.ok(persistAt >= 0, 'source price cache write is missing');
   assert.ok(clearAt > persistAt, 'manual override must only be cleared after a successful source cache write');
+});
+
+
+test('scheduled maintenance actively refreshes due published hotel prices and preserves manual overrides', () => {
+  const start = worker.indexOf('async function runHotelPriceMaintenance');
+  const end = worker.indexOf('async function setManualHotelPrice', start);
+  const implementation = worker.slice(start, end);
+  assert.match(implementation, /JOIN hotel_price_sources hps ON hps\.hotel_id=h\.id/);
+  assert.match(implementation, /LIMIT 3/);
+  assert.match(implementation, /fetchExactHotelSourcePrice\(env, hotelID, \{ clearManualOverride: false \}\)/);
+  assert.match(implementation, /markHotelPriceRefreshFailure\(env, hotelID, code\)/);
+});
+
+test('public catalog keeps a last-known stale or manual price usable for package generation', () => {
+  assert.match(worker, /options\.publicUsable === true/);
+  assert.match(worker, /publicStatus = publicUsable && \(hasManual \|\| usingFallback\) \? 'fresh' : sourceStatus/);
+  assert.match(worker, /fallbackPrice: usingFallback/);
+  assert.match(worker, /hotelSummary\(row, !publishedOnly, \{ publicUsablePrice: publishedOnly \}\)/);
+});
+
+test('public Primary Hotels include the same price cache and manual override as the main catalog', () => {
+  const start = worker.indexOf('async function publicPrimaryHotels');
+  const end = worker.indexOf('async function handleClientOperations', start);
+  const implementation = worker.slice(start, end);
+  assert.match(implementation, /LEFT JOIN hotel_price_cache hp ON hp\.hotel_id=h\.id/);
+  assert.match(implementation, /LEFT JOIN hotel_price_overrides hpo ON hpo\.hotel_id=h\.id/);
+  assert.match(implementation, /HOTEL_PRICE_SELECT/);
+  assert.match(implementation, /publicUsablePrice: true/);
 });
 
 test('Business team photo endpoint supports authenticated read, upload and delete', () => {
