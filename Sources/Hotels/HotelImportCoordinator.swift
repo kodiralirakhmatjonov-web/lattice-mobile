@@ -154,17 +154,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 : "Открываем карточку \(provider.rawValue)…"
             progress = 0.08
 
-            let navigationURL = provider == .booking ? Self.bookingOperationalURL(normalized) : normalized
-            var request = URLRequest(url: navigationURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
+            // IMPORTANT: always open the exact URL the user pasted first. Booking Share-*
+            // links are signed redirect entry points; mutating them with dates/currency before
+            // the redirect can land on an app/interstitial shell that has no property title.
+            // We resolve the Share link first and run the USD quote in an isolated probe later.
+            var request = URLRequest(url: normalized, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 45)
             request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
             request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-            // Booking often remembers the device-local currency (for example UZS) and may
-            // omit a stable room rate when no dates are present. For the internal importer
-            // only, request a deterministic 1-night / 2-adult USD quote. Expedia is left
-            // completely untouched.
-            if provider == .booking {
-                request.setValue("selected_currency=USD", forHTTPHeaderField: "Cookie")
-            }
             webView.load(request)
         }
     }
@@ -360,7 +356,22 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             guard let json = raw as? String, let data = json.data(using: .utf8) else {
                 throw APIError.server("EMPTY_HOTEL_EXTRACT")
             }
-            let snapshot = try JSONDecoder().decode(ProviderSnapshot.self, from: data)
+            var snapshot = try JSONDecoder().decode(ProviderSnapshot.self, from: data)
+
+            // Booking metadata/media must come from the untouched property page. Price is the
+            // only thing that may need a deterministic quote context. Run that in a separate
+            // hidden WebView so dates/currency can never break Share-link resolution or hotel
+            // identity extraction. Expedia deliberately keeps its existing working path.
+            if provider == .booking {
+                let supportedCurrency = snapshot.price.map { ["USD", "SAR", "AED"].contains($0.currency.uppercased()) } ?? false
+                if snapshot.price == nil || !supportedCurrency {
+                    status = "Уточняем актуальную цену Booking…"
+                    progress = max(progress, 0.82)
+                    if let quote = await recoverBookingPriceInBrowser(propertyURL: currentURL) {
+                        snapshot.price = quote
+                    }
+                }
+            }
 
             // URL identity is authoritative. Expedia embeds recommendation hotels in the same
             // page/application state, so a mismatching property ID must fail closed rather
@@ -447,6 +458,60 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
     private func captureBookingEmbeddedMedia() async {
         _ = try? await webView.evaluateJavaScript(Self.captureBookingEmbeddedMediaScript())
+    }
+
+    private func recoverBookingPriceInBrowser(propertyURL: URL) async -> ProviderPriceSnapshot? {
+        guard Provider.booking.isLikelyHotelDetailURL(propertyURL) else { return nil }
+
+        let quoteURL = Self.bookingOperationalURL(propertyURL)
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        config.defaultWebpagePreferences.allowsContentJavaScript = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        config.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.networkCaptureBootstrapScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+        )
+
+        let priceWebView = WKWebView(frame: .zero, configuration: config)
+        priceWebView.customUserAgent = Self.userAgent(for: .booking)
+
+        var request = URLRequest(url: quoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        priceWebView.load(request)
+
+        guard await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 20),
+              !(await detectVerification(in: priceWebView)) else {
+            priceWebView.stopLoading()
+            return nil
+        }
+
+        // Booking often mounts availability/prices after the initial document finished.
+        _ = try? await priceWebView.evaluateJavaScript(Self.revealRoomsScript())
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        for fraction in [0.18, 0.42, 0.68, 0.86] {
+            _ = try? await priceWebView.evaluateJavaScript("window.scrollTo(0, Math.max(0, (document.documentElement.scrollHeight - window.innerHeight) * \(fraction)));" )
+            try? await Task.sleep(nanoseconds: 220_000_000)
+        }
+
+        defer { priceWebView.stopLoading() }
+        guard let pageURL = priceWebView.url,
+              Provider.booking.isLikelyHotelDetailURL(pageURL),
+              !(await detectVerification(in: priceWebView)),
+              let raw = try? await priceWebView.evaluateJavaScript(Self.extractionScript(provider: .booking, sourceURL: quoteURL.absoluteString)),
+              let json = raw as? String,
+              let data = json.data(using: .utf8),
+              let quoteSnapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
+              let price = quoteSnapshot.price,
+              price.isUsable,
+              ["USD", "SAR", "AED"].contains(price.currency.uppercased()) else {
+            return nil
+        }
+        return price
     }
 
     private static func mergeRooms(_ primary: [HotelRoomDraft], _ recovered: [HotelRoomDraft]) -> [HotelRoomDraft] {
@@ -1587,6 +1652,13 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           const titleCandidates = provider === 'Booking'
             ? [
                 document.querySelector('[data-testid="title"]')?.innerText,
+                document.querySelector('[data-testid="property-name"]')?.innerText,
+                document.querySelector('#hp_hotel_name')?.innerText,
+                document.querySelector('.pp-header__title')?.innerText,
+                document.querySelector('[data-testid="property-header"] h1')?.innerText,
+                document.querySelector('[data-testid="property-header"] h2')?.innerText,
+                document.querySelector('[data-capla-component*="PropertyHeaderName"] h1')?.innerText,
+                document.querySelector('[data-capla-component*="PropertyHeaderName"] h2')?.innerText,
                 hotel.name,
                 meta('og:title','property'),
                 visibleH1,
