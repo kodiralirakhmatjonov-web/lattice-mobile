@@ -502,14 +502,23 @@ struct BookingDetailView: View {
                     Button {
                         showPricingEditor = true
                     } label: {
-                        HStack {
-                            Label("Изменить цены", systemImage: "slider.horizontal.3")
+                        HStack(spacing: 12) {
+                            Image(systemName: "slider.horizontal.3")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Изменить стоимости компонентов")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Проценты фиксированы · итог пересчитается автоматически")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer()
                             Image(systemName: "chevron.right")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
                         }
-                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
                         .padding(.horizontal, 14)
-                        .frame(height: 48)
+                        .frame(minHeight: 56)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     }
                     .buttonStyle(.plain)

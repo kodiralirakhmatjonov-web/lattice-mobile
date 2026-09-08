@@ -43,7 +43,7 @@ test('large hotel price jumps are staged instead of replacing the accepted price
 
 test('price refresh is exact-source only and has no alternate URL or static fallback', () => {
   assert.match(worker, /ensureHotelPriceSourceLock\(env, hotelID\)/);
-  assert.match(worker, /readExactHotelSourcePage\(env, sourceURL\)/);
+  assert.match(worker, /readExactHotelSourcePage\(env, probeURL, provider\)/);
 
   // Scope the negative contract to price refresh. Room recovery is a separate
   // admin utility and may probe availability dates without being used for price.
@@ -86,7 +86,7 @@ test('scheduled maintenance actively refreshes due published hotel prices and pr
   const end = worker.indexOf('async function setManualHotelPrice', start);
   const implementation = worker.slice(start, end);
   assert.match(implementation, /JOIN hotel_price_sources hps ON hps\.hotel_id=h\.id/);
-  assert.match(implementation, /LIMIT 3/);
+  assert.match(implementation, /LIMIT 12/);
   assert.match(implementation, /fetchExactHotelSourcePrice\(env, hotelID, \{ clearManualOverride: false \}\)/);
   assert.match(implementation, /markHotelPriceRefreshFailure\(env, hotelID, code\)/);
 });

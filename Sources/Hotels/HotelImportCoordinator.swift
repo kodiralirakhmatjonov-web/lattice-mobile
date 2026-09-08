@@ -363,13 +363,17 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             // hidden WebView so dates/currency can never break Share-link resolution or hotel
             // identity extraction. Expedia deliberately keeps its existing working path.
             if provider == .booking {
-                let supportedCurrency = snapshot.price.map { ["USD", "SAR", "AED"].contains($0.currency.uppercased()) } ?? false
-                if snapshot.price == nil || !supportedCurrency {
-                    status = "Уточняем актуальную цену Booking…"
-                    progress = max(progress, 0.82)
-                    if let quote = await recoverBookingPriceInBrowser(propertyURL: currentURL) {
-                        snapshot.price = quote
-                    }
+                // Booking's untouched property page may inherit the device/account currency
+                // (for example UZS) or expose unrelated SAR/AED values in embedded widgets.
+                // Never treat those as the generator price. The Booking quote probe below is
+                // authoritative and must return a real USD room rate. Expedia stays untouched.
+                let propertyPageUSD = snapshot.price?.currency.uppercased() == "USD" ? snapshot.price : nil
+                status = "Проверяем актуальную цену Booking в USD…"
+                progress = max(progress, 0.82)
+                if let quote = await recoverBookingPriceInBrowser(propertyURL: currentURL) {
+                    snapshot.price = quote
+                } else {
+                    snapshot.price = propertyPageUSD
                 }
             }
 
@@ -465,7 +469,8 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         let quoteURL = Self.bookingOperationalURL(propertyURL)
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
+        let bookingDataStore = WKWebsiteDataStore.default()
+        config.websiteDataStore = bookingDataStore
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         config.userContentController.addUserScript(
@@ -476,12 +481,15 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             )
         )
 
+        await Self.primeBookingUSDCurrency(in: bookingDataStore)
+
         let priceWebView = WKWebView(frame: .zero, configuration: config)
         priceWebView.customUserAgent = Self.userAgent(for: .booking)
 
         var request = URLRequest(url: quoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("selected_currency=USD; currency=USD", forHTTPHeaderField: "Cookie")
         priceWebView.load(request)
 
         guard await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 20),
@@ -508,10 +516,31 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
               let quoteSnapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
               let price = quoteSnapshot.price,
               price.isUsable,
-              ["USD", "SAR", "AED"].contains(price.currency.uppercased()) else {
+              price.currency.uppercased() == "USD" else {
             return nil
         }
         return price
+    }
+
+    private static func primeBookingUSDCurrency(in dataStore: WKWebsiteDataStore) async {
+        let expiry = Date().addingTimeInterval(30 * 24 * 60 * 60)
+        let cookieDefinitions: [(String, String)] = [
+            ("selected_currency", "USD"),
+            ("currency", "USD")
+        ]
+        for (name, value) in cookieDefinitions {
+            guard let cookie = HTTPCookie(properties: [
+                .domain: ".booking.com",
+                .path: "/",
+                .name: name,
+                .value: value,
+                .secure: "TRUE",
+                .expires: expiry
+            ]) else { continue }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                dataStore.httpCookieStore.setCookie(cookie) { continuation.resume() }
+            }
+        }
     }
 
     private static func mergeRooms(_ primary: [HotelRoomDraft], _ recovered: [HotelRoomDraft]) -> [HotelRoomDraft] {
@@ -1001,6 +1030,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         set("selected_currency", "USD")
         set("changed_currency", "1")
+        set("lang", "en-us")
         set("group_adults", "2", onlyIfMissing: true)
         set("group_children", "0", onlyIfMissing: true)
         set("no_rooms", "1", onlyIfMissing: true)
@@ -2222,7 +2252,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             }
             if (!context || context.length > 900 || !/(SAR|SR|ر\\.?س\\.?|AED|د\\.?إ\\.?|USD|US\\$|\\$)/i.test(context)) return;
             if (/(deposit|parking|breakfast fee|airport shuttle|taxi|damage deposit)/i.test(context) && !/(room|suite|night|total|reserve|select)/i.test(context)) return;
-            const money = moneyValues(context).filter(item => item.amount >= 15 && item.amount <= 100000);
+            const money = moneyValues(context).filter(item =>
+              item.amount >= 15 && item.amount <= 100000 && (provider !== 'Booking' || item.currency === 'USD')
+            );
             if (!money.length) return;
             const totalIndex = context.toLowerCase().indexOf('total');
             let baseValues = money;

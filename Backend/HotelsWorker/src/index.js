@@ -2137,6 +2137,10 @@ function flattenPricingLines(value) {
 
     if (typeof node === 'number' && Number.isFinite(node)) {
       const key = path.join('.');
+      // Percentage rates are not money. The old generic fallback rendered 0.50 and
+      // 0.02 as "$0.5 / $0.02", which is misleading. PricingReport shows them as
+      // fixed percentages; the fallback omits them instead of pretending they are USD.
+      if (/(markupRate|paymentFeeRate)$/i.test(key)) return;
       if (/(price|cost|fee|commission|margin|visa|hotel|flight|air|guide|transfer|transport|sim|support|total|amount|service|markup|profit)/i.test(key) && !/(count|guests|traveler|rooms|nights|days|year)/i.test(key)) {
         lines.push({
           id: key || `value-${lines.length}`,
@@ -2334,8 +2338,11 @@ async function saveBookingPricingOverride(request, env, bookingID, user) {
 
   const components = normalizedEditablePricingComponents(payload.components, report.components);
   if (!components) return json({ ok: false, error: 'INVALID_PRICING_COMPONENTS' }, 400);
-  const markupRate = Number(payload.markupRate);
-  const paymentFeeRate = Number(payload.paymentFeeRate);
+  // Percentages are part of the package pricing contract and are not operator-editable.
+  // Business may edit every monetary component, but the server always reuses the
+  // original snapshot rates even if an old/new client sends different values.
+  const markupRate = Number(report?.totals?.markupRate);
+  const paymentFeeRate = Number(report?.totals?.paymentFeeRate);
   if (!Number.isFinite(markupRate) || markupRate < 0 || markupRate > 5) return json({ ok: false, error: 'INVALID_MARKUP_RATE' }, 400);
   if (!Number.isFinite(paymentFeeRate) || paymentFeeRate < 0 || paymentFeeRate >= 0.5) return json({ ok: false, error: 'INVALID_PAYMENT_FEE_RATE' }, 400);
 
@@ -2405,7 +2412,10 @@ async function generatorPricingReportForBooking(env, bookingID, raw) {
       : null;
   const pricingCandidates = [persistedPricing, embeddedPricing].filter(item => item && typeof item === 'object');
   const directPricing = pricingCandidates.find(item =>
-    cleanText(item?.quoteId, 180) && Array.isArray(item?.components) && item.components.length > 0 && item?.totals && typeof item.totals === 'object'
+    Array.isArray(item?.components) && item.components.length > 0 &&
+    item?.totals && typeof item.totals === 'object' &&
+    item?.context && typeof item.context === 'object' &&
+    item?.selectedPricingInputs && typeof item.selectedPricingInputs === 'object'
   ) || null;
   const trace = rawObject?.generatorTrace && typeof rawObject.generatorTrace === 'object'
     ? rawObject.generatorTrace
@@ -2419,10 +2429,15 @@ async function generatorPricingReportForBooking(env, bookingID, raw) {
   // unavailable, or has already been cleaned up. Keep the quote-audit fallback for
   // older bookings that only contain generatorTrace.quoteId.
   if (directPricing && typeof directPricing === 'object' &&
-      cleanText(directPricing.quoteId, 180) &&
       Array.isArray(directPricing.components) && directPricing.components.length > 0 &&
       directPricing.totals && typeof directPricing.totals === 'object') {
-    return { ...directPricing, selection: trace };
+    return {
+      ...directPricing,
+      quoteId: cleanText(directPricing.quoteId, 180) || `booking-${bookingID}`,
+      pricingVersion: cleanText(directPricing.pricingVersion, 120) || 'persisted-booking-pricing-v1',
+      currency: cleanText(directPricing.currency, 12) || 'USD',
+      selection: trace
+    };
   }
 
   return generatorPricingReport(env, { ...snapshot, ...rawObject });
@@ -2750,7 +2765,7 @@ async function operationsBookingDetail(request, env, bookingID) {
     operation: tripMap(trip),
     pilgrim: pilgrim ? { id: pilgrimPublicID(pilgrim.id), displayName: pilgrim.display_name || '', firstName: pilgrim.first_name || '', lastName: pilgrim.last_name || '', phone: pilgrim.phone || '', email: pilgrim.email || '', totalTrips: Number(pilgrim.total_trips || 0) } : null,
     pricingLines,
-    pricingReport: reportWithPricingOverride(await generatorPricingReport(env, pricingReportSource), await bookingPricingOverride(env, bookingID)),
+    pricingReport: reportWithPricingOverride(await generatorPricingReportForBooking(env, bookingID, pricingReportSource), await bookingPricingOverride(env, bookingID)),
     pricingOverride: await bookingPricingOverride(env, bookingID),
     requestFields: flattenRequestFields(resolved.raw),
     statusHistory: (history.results || []).map(row => ({ oldStatus: row.old_status || null, newStatus: row.new_status, changedBy: row.changed_by || null, createdAt: row.created_at })),
@@ -4464,6 +4479,10 @@ function importedHotelPriceCandidates(sources) {
     const provider = cleanText(source?.provider, 80);
     const sourceURL = cleanURL(source?.sourceURL);
     if (!normalized || !provider || !sourceURL) return null;
+    // Booking prices must arrive from a USD-configured Booking page. Do not accept
+    // SAR/AED/UZS and silently convert it: that can validate the wrong DOM amount.
+    // Expedia keeps its existing normalization behavior.
+    if (normalizedHotelPriceProvider(provider, sourceURL) === 'Booking' && normalized.currencyOriginal !== 'USD') return null;
     return { source, provider, sourceURL, normalized };
   }).filter(Boolean).sort((a, b) => {
     const confidenceDelta = Number(b.normalized.confidence || 0) - Number(a.normalized.confidence || 0);
@@ -4609,9 +4628,9 @@ async function runHotelPriceMaintenance(env) {
     console.error('HOTEL_PRICE_MAINTENANCE_MARK_STALE_FAILED', String(error?.message || error));
   });
 
-  // Refresh only a small due batch each hourly cron. With a 48h TTL this is
-  // enough for the full catalog while avoiding a burst of Booking/Expedia
-  // requests. Provider failures never erase nightly_price_usd: mark failure
+  // Prices expire exactly after 48h. The hourly cron picks up every due row on the
+  // next run; a 12-item batch covers the current catalog quickly without turning
+  // one expiry boundary into an uncontrolled provider burst. Provider failures never erase nightly_price_usd: mark failure
   // preserves the last accepted rate as stale and schedules a retry.
   let due = { results: [] };
   try {
@@ -4624,13 +4643,14 @@ async function runHotelPriceMaintenance(env) {
         AND hps.source_url IS NOT NULL AND hps.source_url!=''
         AND (
           hp.hotel_id IS NULL
+          OR (hp.status='fresh' AND hp.expires_at IS NOT NULL AND hp.expires_at<=?)
           OR (hp.status IN ('stale','failed','pending') AND (hp.next_retry_at IS NULL OR hp.next_retry_at<=?))
         )
       ORDER BY
         CASE WHEN hp.nightly_price_usd IS NULL THEN 0 ELSE 1 END,
         COALESCE(hp.next_retry_at, hp.expires_at, hp.updated_at, h.updated_at) ASC
-      LIMIT 3
-    `).bind(now).all();
+      LIMIT 12
+    `).bind(now, now).all();
   } catch (error) {
     console.error('HOTEL_PRICE_MAINTENANCE_QUEUE_FAILED', String(error?.message || error));
     return;
@@ -4724,6 +4744,7 @@ function bookingPriceProbeURL(value) {
     if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return url.toString();
     url.searchParams.set('selected_currency', 'USD');
     url.searchParams.set('changed_currency', '1');
+    url.searchParams.set('lang', 'en-us');
     if (!url.searchParams.get('group_adults')) url.searchParams.set('group_adults', '2');
     if (!url.searchParams.get('group_children')) url.searchParams.set('group_children', '0');
     if (!url.searchParams.get('no_rooms')) url.searchParams.set('no_rooms', '1');
@@ -4742,13 +4763,14 @@ function bookingPriceProbeURL(value) {
   }
 }
 
-async function readExactHotelSourcePage(env, sourceURL) {
+async function readExactHotelSourcePage(env, sourceURL, provider = null) {
   const headers = new Headers({
     'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'accept-language': 'en-US,en;q=0.9',
     'cache-control': 'no-cache'
   });
+  if (provider === 'Booking') headers.set('cookie', 'selected_currency=USD; currency=USD');
   let response;
   try {
     response = await fetch(sourceURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
@@ -4772,7 +4794,7 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   if (!provider) throw new Error('HOTEL_PRICE_SOURCE_UNSUPPORTED');
 
   const probeURL = provider === 'Booking' ? bookingPriceProbeURL(sourceURL) : sourceURL;
-  const page = await readExactHotelSourcePage(env, probeURL);
+  const page = await readExactHotelSourcePage(env, probeURL, provider);
   const response = page.response;
   const html = page.html;
   const finalURL = page.finalURL;
@@ -4786,6 +4808,9 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   const quote = quoteContextFromProbeURL(finalURL, provider);
   const extracted = extractHotelPriceFromHTML(html, provider, quote.nights);
   if (!extracted?.nightlyUSD) throw new Error('HOTEL_PRICE_NOT_FOUND_ON_SOURCE');
+  if (provider === 'Booking' && extracted.currency !== 'USD') {
+    throw new Error('HOTEL_PRICE_BOOKING_USD_NOT_CONFIRMED');
+  }
 
   const nowDate = new Date();
   const now = nowDate.toISOString();
@@ -4892,6 +4917,9 @@ async function saveBrowserHotelPrice(request, env, hotelID) {
   if (!source?.source_url) return json({ ok: false, price: null, error: 'HOTEL_PRICE_SOURCE_MISSING' }, 409);
   const provider = normalizedHotelPriceProvider(source.provider, source.source_url);
   if (provider !== 'Booking') return json({ ok: false, price: null, error: 'HOTEL_BROWSER_PRICE_BOOKING_ONLY' }, 409);
+  if (normalized.currencyOriginal !== 'USD') {
+    return json({ ok: false, price: null, error: 'HOTEL_BROWSER_PRICE_USD_REQUIRED' }, 422);
+  }
 
   const browserSourceURL = cleanURL(payload?.sourceURL);
   if (!browserSourceURL) return json({ ok: false, price: null, error: 'HOTEL_BROWSER_SOURCE_INVALID' }, 422);

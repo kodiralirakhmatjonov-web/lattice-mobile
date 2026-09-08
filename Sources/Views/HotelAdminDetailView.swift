@@ -23,6 +23,7 @@ struct HotelAdminDetailView: View {
     @State private var savedMessage: String?
     @State private var citySavedMessage: String?
     @State private var priceNotice: String?
+    @State private var priceSuccessMessage: String?
 
     var body: some View {
         ScrollView {
@@ -283,6 +284,14 @@ struct HotelAdminDetailView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
 
+            if let priceSuccessMessage {
+                Label(priceSuccessMessage, systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+            }
+
             if let priceNotice {
                 Label(priceNotice, systemImage: "clock.arrow.circlepath")
                     .font(.caption.weight(.semibold))
@@ -517,6 +526,13 @@ struct HotelAdminDetailView: View {
     @MainActor
     private func refreshPrice() async {
         refreshingPrice = true
+        priceNotice = nil
+        priceSuccessMessage = nil
+        errorMessage = nil
+
+        let previousSourceNightly = hotel?.price?.sourceNightlyUSD
+            ?? (hotel?.price?.isManualOverride == true ? nil : hotel?.price?.nightlyUSD)
+
         defer { refreshingPrice = false }
         do {
             let response: HotelPriceResponse
@@ -524,10 +540,9 @@ struct HotelAdminDetailView: View {
                source.provider.lowercased().contains("booking"),
                let sourceURL = URL(string: source.url) {
                 do {
-                    // Booking blocks server-side datacenter refreshes with HTTP 429. Read the
-                    // live rate in a private WKWebView on this iPhone, then persist only that
-                    // verified price snapshot back to the existing D1 price cache. Expedia
-                    // keeps its current server refresh path unchanged.
+                    // Booking manual refresh is read in a USD-only browser session on this
+                    // iPhone. A SAR/AED/UZS value is never converted or accepted as the
+                    // operator-requested Booking quote. Expedia keeps its server path.
                     let reader = BookingLivePriceReader()
                     let live = try await reader.read(sourceURL: sourceURL)
                     response = try await APIClient.shared.saveBrowserHotelPrice(
@@ -536,9 +551,8 @@ struct HotelAdminDetailView: View {
                         price: live.price
                     )
                 } catch {
-                    // Keep the existing server fallback as a safety net for Booking. The
-                    // backend preserves the last accepted price if Booking is temporarily
-                    // unavailable, so a refresh failure never makes the hotel unusable.
+                    // Server refresh remains a fallback. It preserves the last accepted D1
+                    // price on provider rate limits/challenges instead of invalidating it.
                     response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
                 }
             } else {
@@ -549,17 +563,24 @@ struct HotelAdminDetailView: View {
             hotel = latest
             manualPriceText = editablePrice(latest.price?.nightlyUSD)
             editingManualPrice = false
+
             if let warning = response.error, !warning.isEmpty {
-                savedMessage = nil
-                // Do not interrupt the operator with a raw provider error. The last good
-                // D1 price remains active and the scheduled retry continues in background.
                 priceNotice = latest.price?.hasUsablePrice == true
-                    ? "Последняя рабочая цена сохранена. Автообновление повторится позже."
-                    : "Booking пока не вернул новую цену. Повторите обновление чуть позже."
+                    ? "Источник сейчас не подтвердил новую цену. Последняя рабочая цена сохранена; система повторит автообновление."
+                    : "Источник пока не вернул цену. Повторите проверку немного позже."
+            } else if let currentSourceNightly = latest.price?.sourceNightlyUSD ?? latest.price?.nightlyUSD,
+                      currentSourceNightly > 0 {
+                if let previousSourceNightly, abs(previousSourceNightly - currentSourceNightly) < 0.01 {
+                    priceSuccessMessage = "Цена проверена в источнике и подтверждена: \(priceText(currentSourceNightly)) / ночь. Цена не изменилась."
+                } else if let previousSourceNightly, previousSourceNightly > 0 {
+                    priceSuccessMessage = "Цена обновлена из источника: \(priceText(previousSourceNightly)) → \(priceText(currentSourceNightly)) / ночь."
+                } else {
+                    priceSuccessMessage = "Цена проверена и сохранена из источника: \(priceText(currentSourceNightly)) / ночь."
+                }
             } else {
-                priceNotice = nil
-                savedMessage = "Цена обновлена из источника"
+                priceSuccessMessage = "Источник проверен. Цена в базе обновлена."
             }
+
             onChanged()
             errorMessage = nil
         } catch {
@@ -567,13 +588,10 @@ struct HotelAdminDetailView: View {
                 hotel = latest
                 manualPriceText = editablePrice(latest.price?.nightlyUSD)
                 if preferredSource(latest)?.provider.lowercased().contains("booking") == true {
-                    // Booking may rate-limit both the device browser and the server on a
-                    // particular attempt. Never expose transport/provider codes to the
-                    // operator and never invalidate the last accepted D1 price.
                     errorMessage = nil
                     priceNotice = latest.price?.hasUsablePrice == true
-                        ? "Booking временно не отдал новую цену. Последняя рабочая цена остаётся активной; автообновление повторится позже."
-                        : "Booking временно не отдал цену. Повторите обновление чуть позже."
+                        ? "Booking временно не подтвердил новую USD-цену. Последняя рабочая цена остаётся активной; автообновление повторится."
+                        : "Booking временно не отдал USD-цену. Повторите проверку немного позже."
                 } else {
                     errorMessage = error.localizedDescription
                 }
@@ -581,6 +599,10 @@ struct HotelAdminDetailView: View {
                 errorMessage = "Не удалось обновить цену. Повторите попытку чуть позже."
             }
         }
+    }
+
+    private func priceText(_ value: Double) -> String {
+        value.formatted(.currency(code: "USD").precision(.fractionLength(0...2)))
     }
 
     private var parsedManualPrice: Double? {
@@ -608,7 +630,8 @@ struct HotelAdminDetailView: View {
             hotel = latest
             manualPriceText = editablePrice(latest.price?.nightlyUSD)
             editingManualPrice = false
-            savedMessage = "Ручная цена сохранена в базе"
+            priceNotice = nil
+            priceSuccessMessage = "Ручная цена сохранена в D1 и сразу используется клиентским каталогом."
             onChanged()
             errorMessage = nil
         } catch {
@@ -691,8 +714,10 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         }
 
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
+        let bookingDataStore = WKWebsiteDataStore.default()
+        config.websiteDataStore = bookingDataStore
         config.defaultWebpagePreferences.allowsContentJavaScript = true
+        await Self.primeUSDCurrency(in: bookingDataStore)
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
@@ -702,7 +727,7 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         var request = URLRequest(url: preparedURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        request.setValue("selected_currency=USD", forHTTPHeaderField: "Cookie")
+        request.setValue("selected_currency=USD; currency=USD", forHTTPHeaderField: "Cookie")
 
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
@@ -773,6 +798,7 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
               let data = raw.data(using: .utf8),
               let price = try? JSONDecoder().decode(ProviderPriceSnapshot.self, from: data),
               price.isUsable,
+              price.currency.uppercased() == "USD",
               let resolvedURL = webView.url else { return nil }
         return BookingLivePriceResult(sourceURL: resolvedURL, price: price)
     }
@@ -789,6 +815,23 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         continuation.resume(with: result)
     }
 
+    private static func primeUSDCurrency(in dataStore: WKWebsiteDataStore) async {
+        let expiry = Date().addingTimeInterval(30 * 24 * 60 * 60)
+        for (name, value) in [("selected_currency", "USD"), ("currency", "USD")] {
+            guard let cookie = HTTPCookie(properties: [
+                .domain: ".booking.com",
+                .path: "/",
+                .name: name,
+                .value: value,
+                .secure: "TRUE",
+                .expires: expiry
+            ]) else { continue }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                dataStore.httpCookieStore.setCookie(cookie) { continuation.resume() }
+            }
+        }
+    }
+
     private static func preparedURL(_ url: URL) -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
         var items = components.queryItems ?? []
@@ -803,6 +846,7 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
 
         set("selected_currency", "USD")
         set("changed_currency", "1")
+        set("lang", "en-us")
         set("group_adults", "2", onlyIfMissing: true)
         set("group_children", "0", onlyIfMissing: true)
         set("no_rooms", "1", onlyIfMissing: true)
@@ -905,7 +949,7 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
           if (hidden(el) || el.closest('s,del')) continue;
           const context = clean(el.innerText || el.textContent || '');
           const money = moneyFrom(context);
-          if (!money || money.amount < 10) continue;
+          if (!money || money.amount < 10 || money.currency !== 'USD') continue;
           let roomName = null;
           let node = el;
           for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
