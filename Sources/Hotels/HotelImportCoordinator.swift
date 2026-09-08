@@ -485,50 +485,81 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         let priceWebView = WKWebView(frame: .zero, configuration: config)
         priceWebView.customUserAgent = Self.userAgent(for: .booking)
-
-        var request = URLRequest(url: quoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        request.setValue("selected_currency=USD; currency=USD", forHTTPHeaderField: "Cookie")
-        priceWebView.load(request)
-
-        guard await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 20),
-              !(await detectVerification(in: priceWebView)) else {
-            priceWebView.stopLoading()
-            return nil
-        }
-
-        // Booking often mounts availability/prices after the initial document finished.
-        _ = try? await priceWebView.evaluateJavaScript(Self.revealRoomsScript())
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        for fraction in [0.18, 0.42, 0.68, 0.86] {
-            _ = try? await priceWebView.evaluateJavaScript("window.scrollTo(0, Math.max(0, (document.documentElement.scrollHeight - window.innerHeight) * \(fraction)));" )
-            try? await Task.sleep(nanoseconds: 220_000_000)
-        }
-
         defer { priceWebView.stopLoading() }
-        guard let pageURL = priceWebView.url,
-              Provider.booking.isLikelyHotelDetailURL(pageURL),
-              !(await detectVerification(in: priceWebView)),
-              let raw = try? await priceWebView.evaluateJavaScript(Self.extractionScript(provider: .booking, sourceURL: quoteURL.absoluteString)),
-              let json = raw as? String,
-              let data = json.data(using: .utf8),
-              let quoteSnapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
-              let price = quoteSnapshot.price,
-              price.isUsable,
-              price.currency.uppercased() == "USD" else {
-            return nil
+
+        // The user's normal Booking session can be pinned to UZS by Booking's cur_curr
+        // cookie. selected_currency=USD alone does not reliably override that preference.
+        // Keep the existing authenticated/WAF session, but reset only Booking currency
+        // cookies and, if needed, run Booking's own currency switch once before retrying.
+        for attempt in 0..<2 {
+            if attempt == 1 {
+                var switchRequest = URLRequest(url: Self.bookingUSDCurrencyBootstrapURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+                switchRequest.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+                switchRequest.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+                switchRequest.setValue(Self.bookingUSDCookieHeader, forHTTPHeaderField: "Cookie")
+                priceWebView.load(switchRequest)
+                _ = await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 10)
+                await Self.primeBookingUSDCurrency(in: bookingDataStore)
+            }
+
+            var request = URLRequest(url: quoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            request.setValue(Self.bookingUSDCookieHeader, forHTTPHeaderField: "Cookie")
+            priceWebView.load(request)
+
+            guard await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 20),
+                  !(await detectVerification(in: priceWebView)) else {
+                continue
+            }
+
+            // Booking often mounts availability/prices after the initial document finished.
+            _ = try? await priceWebView.evaluateJavaScript(Self.revealRoomsScript())
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            for fraction in [0.18, 0.42, 0.68, 0.86] {
+                _ = try? await priceWebView.evaluateJavaScript("window.scrollTo(0, Math.max(0, (document.documentElement.scrollHeight - window.innerHeight) * \(fraction)));" )
+                try? await Task.sleep(nanoseconds: 220_000_000)
+            }
+
+            guard let pageURL = priceWebView.url,
+                  Provider.booking.isLikelyHotelDetailURL(pageURL),
+                  !(await detectVerification(in: priceWebView)),
+                  let raw = try? await priceWebView.evaluateJavaScript(Self.extractionScript(provider: .booking, sourceURL: quoteURL.absoluteString)),
+                  let json = raw as? String,
+                  let data = json.data(using: .utf8),
+                  let quoteSnapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
+                  let price = quoteSnapshot.price,
+                  price.isUsable,
+                  price.currency.uppercased() == "USD" else {
+                continue
+            }
+            return price
         }
-        return price
+        return nil
     }
 
+    private static let bookingUSDCookieNames = Set(["selected_currency", "currency", "cur_curr", "b_selected_currency"])
+    private static let bookingUSDCookieHeader = "selected_currency=USD; currency=USD; cur_curr=USD; b_selected_currency=USD"
+    private static let bookingUSDCurrencyBootstrapURL = URL(string: "https://www.booking.com/?change_currency=1&selected_currency=USD&top_currency=1")!
+
     private static func primeBookingUSDCurrency(in dataStore: WKWebsiteDataStore) async {
+        let cookieStore = dataStore.httpCookieStore
+        let existingCookies: [HTTPCookie] = await withCheckedContinuation { continuation in
+            cookieStore.getAllCookies { continuation.resume(returning: $0) }
+        }
+        for cookie in existingCookies where cookie.domain.lowercased().contains("booking.com") && bookingUSDCookieNames.contains(cookie.name) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                cookieStore.delete(cookie) { continuation.resume() }
+            }
+        }
+
         let expiry = Date().addingTimeInterval(30 * 24 * 60 * 60)
-        let cookieDefinitions: [(String, String)] = [
+        for (name, value) in [
             ("selected_currency", "USD"),
-            ("currency", "USD")
-        ]
-        for (name, value) in cookieDefinitions {
+            ("currency", "USD"),
+            ("cur_curr", "USD"),
+            ("b_selected_currency", "USD")
+        ] {
             guard let cookie = HTTPCookie(properties: [
                 .domain: ".booking.com",
                 .path: "/",
@@ -538,7 +569,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 .expires: expiry
             ]) else { continue }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                dataStore.httpCookieStore.setCookie(cookie) { continuation.resume() }
+                cookieStore.setCookie(cookie) { continuation.resume() }
             }
         }
     }
@@ -1029,11 +1060,15 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         }
 
         set("selected_currency", "USD")
+        set("cur_currency", "USD")
         set("changed_currency", "1")
+        set("top_currency", "1")
         set("lang", "en-us")
         set("group_adults", "2", onlyIfMissing: true)
+        set("req_adults", "2", onlyIfMissing: true)
         set("group_children", "0", onlyIfMissing: true)
         set("no_rooms", "1", onlyIfMissing: true)
+        set("room1", "A,A", onlyIfMissing: true)
 
         let hasCheckIn = items.contains { $0.name.caseInsensitiveCompare("checkin") == .orderedSame && !($0.value ?? "").isEmpty }
         let hasCheckOut = items.contains { $0.name.caseInsensitiveCompare("checkout") == .orderedSame && !($0.value ?? "").isEmpty }

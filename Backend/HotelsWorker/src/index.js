@@ -4743,11 +4743,15 @@ function bookingPriceProbeURL(value) {
     const host = url.hostname.toLowerCase();
     if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return url.toString();
     url.searchParams.set('selected_currency', 'USD');
+    url.searchParams.set('cur_currency', 'USD');
     url.searchParams.set('changed_currency', '1');
+    url.searchParams.set('top_currency', '1');
     url.searchParams.set('lang', 'en-us');
     if (!url.searchParams.get('group_adults')) url.searchParams.set('group_adults', '2');
+    if (!url.searchParams.get('req_adults')) url.searchParams.set('req_adults', '2');
     if (!url.searchParams.get('group_children')) url.searchParams.set('group_children', '0');
     if (!url.searchParams.get('no_rooms')) url.searchParams.set('no_rooms', '1');
+    if (!url.searchParams.get('room1')) url.searchParams.set('room1', 'A,A');
     if (!url.searchParams.get('checkin') || !url.searchParams.get('checkout')) {
       const start = new Date();
       start.setUTCDate(start.getUTCDate() + 1);
@@ -4770,7 +4774,7 @@ async function readExactHotelSourcePage(env, sourceURL, provider = null) {
     'accept-language': 'en-US,en;q=0.9',
     'cache-control': 'no-cache'
   });
-  if (provider === 'Booking') headers.set('cookie', 'selected_currency=USD; currency=USD');
+  if (provider === 'Booking') headers.set('cookie', 'selected_currency=USD; currency=USD; cur_curr=USD; b_selected_currency=USD');
   let response;
   try {
     response = await fetch(sourceURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });

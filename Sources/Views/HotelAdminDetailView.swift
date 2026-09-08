@@ -707,6 +707,9 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
     private var webView: WKWebView?
     private var timeoutTask: Task<Void, Never>?
     private var evaluating = false
+    private var preparedSourceURL: URL?
+    private var currencyBootstrapTried = false
+    private var loadingCurrencyBootstrap = false
 
     func read(sourceURL: URL) async throws -> BookingLivePriceResult {
         guard continuation == nil else {
@@ -724,15 +727,15 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         self.webView = webView
 
         let preparedURL = Self.preparedURL(sourceURL)
-        var request = URLRequest(url: preparedURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        request.setValue("selected_currency=USD; currency=USD", forHTTPHeaderField: "Cookie")
+        preparedSourceURL = preparedURL
+        currencyBootstrapTried = false
+        loadingCurrencyBootstrap = false
+        let request = Self.bookingRequest(url: preparedURL)
 
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
             self.timeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 28_000_000_000)
+                try? await Task.sleep(nanoseconds: 42_000_000_000)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     self?.finish(.failure(NSError(
@@ -747,7 +750,20 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard continuation != nil, !evaluating else { return }
+        guard continuation != nil else { return }
+
+        if loadingCurrencyBootstrap {
+            loadingCurrencyBootstrap = false
+            evaluating = false
+            Task { [weak self, weak webView] in
+                guard let self, let webView, let preparedSourceURL = self.preparedSourceURL else { return }
+                await Self.primeUSDCurrency(in: webView.configuration.websiteDataStore)
+                webView.load(Self.bookingRequest(url: preparedSourceURL))
+            }
+            return
+        }
+
+        guard !evaluating else { return }
         evaluating = true
         Task { [weak self, weak webView] in
             guard let self, let webView else { return }
@@ -774,13 +790,23 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
 
             if let result = await self.extract(from: webView) {
                 self.finish(.success(result))
-            } else {
-                self.finish(.failure(NSError(
-                    domain: "iumrah.booking-price",
-                    code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "BOOKING_LIVE_PRICE_NOT_FOUND"]
-                )))
+                return
             }
+
+            if !self.currencyBootstrapTried {
+                self.currencyBootstrapTried = true
+                self.loadingCurrencyBootstrap = true
+                self.evaluating = false
+                await Self.primeUSDCurrency(in: webView.configuration.websiteDataStore)
+                webView.load(Self.bookingRequest(url: Self.bookingUSDCurrencyBootstrapURL))
+                return
+            }
+
+            self.finish(.failure(NSError(
+                domain: "iumrah.booking-price",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "BOOKING_LIVE_PRICE_NOT_FOUND"]
+            )))
         }
     }
 
@@ -809,15 +835,37 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         evaluating = false
         timeoutTask?.cancel()
         timeoutTask = nil
+        preparedSourceURL = nil
+        currencyBootstrapTried = false
+        loadingCurrencyBootstrap = false
         webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView = nil
         continuation.resume(with: result)
     }
 
+    private static let bookingUSDCookieNames = Set(["selected_currency", "currency", "cur_curr", "b_selected_currency"])
+    private static let bookingUSDCookieHeader = "selected_currency=USD; currency=USD; cur_curr=USD; b_selected_currency=USD"
+    private static let bookingUSDCurrencyBootstrapURL = URL(string: "https://www.booking.com/?change_currency=1&selected_currency=USD&top_currency=1")!
+
     private static func primeUSDCurrency(in dataStore: WKWebsiteDataStore) async {
+        let cookieStore = dataStore.httpCookieStore
+        let existingCookies: [HTTPCookie] = await withCheckedContinuation { continuation in
+            cookieStore.getAllCookies { continuation.resume(returning: $0) }
+        }
+        for cookie in existingCookies where cookie.domain.lowercased().contains("booking.com") && bookingUSDCookieNames.contains(cookie.name) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                cookieStore.delete(cookie) { continuation.resume() }
+            }
+        }
+
         let expiry = Date().addingTimeInterval(30 * 24 * 60 * 60)
-        for (name, value) in [("selected_currency", "USD"), ("currency", "USD")] {
+        for (name, value) in [
+            ("selected_currency", "USD"),
+            ("currency", "USD"),
+            ("cur_curr", "USD"),
+            ("b_selected_currency", "USD")
+        ] {
             guard let cookie = HTTPCookie(properties: [
                 .domain: ".booking.com",
                 .path: "/",
@@ -827,9 +875,17 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
                 .expires: expiry
             ]) else { continue }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                dataStore.httpCookieStore.setCookie(cookie) { continuation.resume() }
+                cookieStore.setCookie(cookie) { continuation.resume() }
             }
         }
+    }
+
+    private static func bookingRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue(bookingUSDCookieHeader, forHTTPHeaderField: "Cookie")
+        return request
     }
 
     private static func preparedURL(_ url: URL) -> URL {
@@ -845,11 +901,15 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         }
 
         set("selected_currency", "USD")
+        set("cur_currency", "USD")
         set("changed_currency", "1")
+        set("top_currency", "1")
         set("lang", "en-us")
         set("group_adults", "2", onlyIfMissing: true)
+        set("req_adults", "2", onlyIfMissing: true)
         set("group_children", "0", onlyIfMissing: true)
         set("no_rooms", "1", onlyIfMissing: true)
+        set("room1", "A,A", onlyIfMissing: true)
 
         let hasCheckIn = items.contains { $0.name.caseInsensitiveCompare("checkin") == .orderedSame && !($0.value ?? "").isEmpty }
         let hasCheckOut = items.contains { $0.name.caseInsensitiveCompare("checkout") == .orderedSame && !($0.value ?? "").isEmpty }

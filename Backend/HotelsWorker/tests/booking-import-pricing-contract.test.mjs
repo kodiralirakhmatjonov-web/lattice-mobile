@@ -15,7 +15,10 @@ test('Booking importer resolves Share first and obtains price only from USD quot
   assert.match(importer, /recoverBookingPriceInBrowser\(propertyURL: currentURL\)/);
   assert.match(importer, /price\.currency\.uppercased\(\) == "USD"/);
   assert.match(importer, /primeBookingUSDCurrency/);
+  assert.match(importer, /cur_curr/);
+  assert.match(importer, /bookingUSDCurrencyBootstrapURL/);
   assert.match(importer, /set\("selected_currency", "USD"\)/);
+  assert.match(importer, /set\("cur_currency", "USD"\)/);
   assert.match(importer, /set\("lang", "en-us"\)/);
   assert.match(importer, /if provider == \.booking \{ await captureBookingEmbeddedMedia\(\) \}/);
   assert.match(importer, /structuredPropertyImages/);
@@ -40,6 +43,8 @@ test('Booking server refresh probes stable USD availability context without chan
   assert.match(worker, /function bookingPriceProbeURL/);
   assert.match(worker, /provider === 'Booking' \? bookingPriceProbeURL\(sourceURL\) : sourceURL/);
   assert.match(worker, /selected_currency/);
+  assert.match(worker, /cur_currency/);
+  assert.match(worker, /cur_curr=USD/);
   assert.match(worker, /currency=USD/);
   assert.match(worker, /group_adults/);
   assert.match(worker, /HOTEL_PRICE_BOOKING_USD_NOT_CONFIRMED/);
