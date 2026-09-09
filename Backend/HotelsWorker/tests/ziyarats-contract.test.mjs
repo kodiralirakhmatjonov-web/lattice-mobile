@@ -5,6 +5,7 @@ import fs from 'node:fs';
 const worker = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
 const ziyarats = fs.readFileSync(new URL('../src/ziyarats.js', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../migrations/0029_ziyarats.sql', import.meta.url), 'utf8');
+const translationsMigration = fs.readFileSync(new URL('../migrations/0030_ziyarat_translations.sql', import.meta.url), 'utf8');
 const renderer = fs.readFileSync(new URL('../scripts/render-config.mjs', import.meta.url), 'utf8');
 
 test('Ziyarats exposes authenticated admin and public catalog routes', () => {
@@ -31,11 +32,24 @@ test('Quba Mosque is the first published Madinah seed with five deterministic me
   assert.equal(imageRows.length, 5);
 });
 
-test('Ziyarat images are optimized before R2 storage and the root ZIP deploy path seeds Quba media', () => {
+test('Ziyarat images are optimized before R2 storage and the root ZIP deploy path seeds bundled media', () => {
   assert.match(ziyarats, /quality: 92/);
   assert.match(ziyarats, /format: 'image\/webp'/);
   assert.match(ziyarats, /fit: 'scale-down'/);
   assert.match(renderer, /seedZiyaratMedia/);
   assert.match(renderer, /wrangler', 'r2', 'object', 'put'/);
-  assert.match(renderer, /Quba seed rows are not present in D1/);
+  assert.match(renderer, /Ziyarats R2 seed complete/);
+  assert.match(renderer, /readdirSync\(seedRoot, \{ withFileTypes: true \}\)/);
+});
+
+
+test('Ziyarat content is persisted independently for all four client languages', () => {
+  assert.match(translationsMigration, /ziyarat_place_translations/);
+  assert.match(translationsMigration, /'ru'/);
+  assert.match(translationsMigration, /'uz'/);
+  assert.match(translationsMigration, /'uz-cyrl'/);
+  assert.match(translationsMigration, /'en'/);
+  assert.match(ziyarats, /ZIYARAT_LOCALES = \['ru', 'uz', 'uz-cyrl', 'en'\]/);
+  assert.match(ziyarats, /upsertPlaceTranslations/);
+  assert.match(ziyarats, /translations,/);
 });

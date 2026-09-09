@@ -1,4 +1,5 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
+import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
 const JSON_HEADERS = {
@@ -20,6 +21,16 @@ export default {
           status: 204,
           headers: corsHeaders(request)
         });
+      }
+
+      if (url.pathname.startsWith('/api/admin/ziyarats')) {
+        const staff = await requireStaff(request, env);
+        if (!staff.ok) return staff.response;
+        return withCors(await handleZiyaratAdmin(request, env, url, staff.user), request);
+      }
+
+      if (url.pathname.startsWith('/api/catalog/ziyarats')) {
+        return withCors(await handleZiyaratCatalog(request, env, url), request);
       }
 
       if (url.pathname.startsWith('/api/admin/hotels')) {

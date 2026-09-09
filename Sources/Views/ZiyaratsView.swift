@@ -16,7 +16,13 @@ struct ZiyaratsView: View {
     private var places: [BusinessZiyaratPlace] {
         routes.flatMap(\.places)
             .filter { selectedCity == "All" || $0.city == selectedCity }
-            .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || $0.titleArabic.localizedCaseInsensitiveContains(search) }
+            .filter { place in
+                guard !search.isEmpty else { return true }
+                if place.titleArabic.localizedCaseInsensitiveContains(search) { return true }
+                return BusinessZiyaratContentLanguage.allCases.contains {
+                    place.translation(for: $0).title.localizedCaseInsensitiveContains(search)
+                }
+            }
             .sorted { $0.routeOrder < $1.routeOrder }
     }
 
@@ -117,7 +123,7 @@ struct ZiyaratsView: View {
                         .frame(width: 25, height: 25)
                         .background(BusinessDesign.ink, in: Circle())
                         .foregroundStyle(BusinessDesign.onAccent)
-                    Text(place.title).font(.headline).lineLimit(1)
+                    Text(place.translation(for: .russian).title.isEmpty ? place.title : place.translation(for: .russian).title).font(.headline).lineLimit(1)
                 }
                 if !place.titleArabic.isEmpty { Text(place.titleArabic).font(.caption).foregroundStyle(.secondary) }
                 HStack(spacing: 9) {
@@ -175,13 +181,10 @@ private struct ZiyaratEditorView: View {
     let onSaved: () -> Void
 
     @State private var city: String
-    @State private var title: String
     @State private var titleArabic: String
     @State private var category: BusinessZiyaratCategory
-    @State private var shortDescription: String
-    @State private var longDescription: String
-    @State private var factsText: String
-    @State private var visitNotes: String
+    @State private var selectedContentLanguage: BusinessZiyaratContentLanguage = .russian
+    @State private var localizedContent: [BusinessZiyaratContentLanguage: ZiyaratLocalizedDraft]
     @State private var visitType: BusinessZiyaratVisitType
     @State private var durationMinutes: Int
     @State private var latitudeText: String
@@ -205,13 +208,20 @@ private struct ZiyaratEditorView: View {
         let lat = place?.latitude ?? 24.4672
         let lon = place?.longitude ?? 39.6111
         _city = State(initialValue: place?.city ?? initialCity)
-        _title = State(initialValue: place?.title ?? "")
         _titleArabic = State(initialValue: place?.titleArabic ?? "")
         _category = State(initialValue: BusinessZiyaratCategory(rawValue: place?.category ?? "historical") ?? .historical)
-        _shortDescription = State(initialValue: place?.shortDescription ?? "")
-        _longDescription = State(initialValue: place?.longDescription ?? "")
-        _factsText = State(initialValue: place?.interestingFacts.joined(separator: "\n") ?? "")
-        _visitNotes = State(initialValue: place?.visitNotes ?? "")
+        var drafts: [BusinessZiyaratContentLanguage: ZiyaratLocalizedDraft] = [:]
+        for language in BusinessZiyaratContentLanguage.allCases {
+            let translation = place?.translation(for: language) ?? .empty
+            drafts[language] = ZiyaratLocalizedDraft(
+                title: translation.title,
+                shortDescription: translation.shortDescription,
+                longDescription: translation.longDescription,
+                factsText: translation.interestingFacts.joined(separator: "\n"),
+                visitNotes: translation.visitNotes
+            )
+        }
+        _localizedContent = State(initialValue: drafts)
         _visitType = State(initialValue: BusinessZiyaratVisitType(rawValue: place?.visitType ?? "stop") ?? .stop)
         _durationMinutes = State(initialValue: place?.durationMinutes ?? 30)
         _latitudeText = State(initialValue: String(format: "%.6f", lat))
@@ -250,7 +260,7 @@ private struct ZiyaratEditorView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }
             ToolbarItem(placement: .topBarTrailing) {
-                Button(saving ? "Сохраняю…" : "Сохранить") { Task { await save() } }.disabled(saving || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || coordinate == nil)
+                Button(saving ? "Сохраняю…" : "Сохранить") { Task { await save() } }.disabled(saving || canonicalTitle.isEmpty || coordinate == nil)
             }
         }
         .onChange(of: photoItems) { _, items in Task { await loadPending(items) } }
@@ -272,8 +282,10 @@ private struct ZiyaratEditorView: View {
         VStack(alignment: .leading, spacing: 14) {
             cardTitle("Основное", "mappin.and.ellipse")
             Picker("Город", selection: $city) { Text("Медина").tag("Madinah"); Text("Мекка").tag("Makkah"); Text("Джидда").tag("Jeddah") }.pickerStyle(.segmented)
-            field("Название", text: $title, prompt: "Quba Mosque")
             field("Название на арабском", text: $titleArabic, prompt: "مسجد قباء")
+            Text("Название для клиента заполняется ниже отдельно на каждом из 4 языков.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Picker("Категория", selection: $category) { ForEach(BusinessZiyaratCategory.allCases) { Text($0.title).tag($0) } }
             Stepper("Порядок в маршруте: \(routeOrder)", value: $routeOrder, in: 1...99)
         }.padding(17).businessCard(radius: 28)
@@ -338,11 +350,33 @@ private struct ZiyaratEditorView: View {
 
     private var contentCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            cardTitle("Информация", "text.alignleft")
-            textArea("Короткое описание", text: $shortDescription, minHeight: 86)
-            textArea("Подробное описание", text: $longDescription, minHeight: 160)
-            textArea("Что интересно здесь", text: $factsText, minHeight: 126)
-            Text("Каждая новая строка в последнем поле станет отдельным фактом в клиентском приложении.").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                cardTitle("Информация", "text.alignleft")
+                Spacer()
+                Text(selectedContentLanguage.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Picker("Язык контента", selection: $selectedContentLanguage) {
+                ForEach(BusinessZiyaratContentLanguage.allCases) { language in
+                    Text(language.shortTitle).tag(language)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("Все поля ниже сохраняются в базе отдельно для RU, UZ, ЎЗ и EN. Клиентское приложение автоматически показывает версию выбранного пользователем языка.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            field("Название", text: localizedBinding(\.title), prompt: titlePrompt)
+            textArea("Короткое описание", text: localizedBinding(\.shortDescription), minHeight: 86)
+            textArea("Подробное описание", text: localizedBinding(\.longDescription), minHeight: 160)
+            textArea("Что интересно здесь", text: localizedBinding(\.factsText), minHeight: 126)
+            Text("Каждая новая строка в поле «Что интересно здесь» станет отдельным фактом на выбранном языке.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }.padding(17).businessCard(radius: 28)
     }
 
@@ -351,7 +385,18 @@ private struct ZiyaratEditorView: View {
             cardTitle("Посещение", "figure.walk")
             Picker("Тип", selection: $visitType) { ForEach(BusinessZiyaratVisitType.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented)
             Stepper("Обычно \(durationMinutes) минут", value: $durationMinutes, in: 5...180, step: 5)
-            textArea("Заметки для посещения", text: $visitNotes, minHeight: 90)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Заметки для посещения").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(selectedContentLanguage.shortTitle).font(.caption2.bold()).foregroundStyle(.secondary)
+                }
+                TextEditor(text: localizedBinding(\.visitNotes))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 90)
+                    .padding(10)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
         }.padding(17).businessCard(radius: 28)
     }
 
@@ -395,11 +440,80 @@ private struct ZiyaratEditorView: View {
         pendingPhotos = loaded
     }
 
+    private var titlePrompt: String {
+        switch selectedContentLanguage {
+        case .russian: return "Мечеть Куба"
+        case .uzbek: return "Qubo masjidi"
+        case .uzbekCyrillic: return "Қубо масжиди"
+        case .english: return "Quba Mosque"
+        }
+    }
+
+    private var canonicalTitle: String {
+        let candidates: [BusinessZiyaratContentLanguage] = [.english, .russian, .uzbek, .uzbekCyrillic]
+        for language in candidates {
+            let value = localizedContent[language]?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !value.isEmpty { return value }
+        }
+        return ""
+    }
+
+    private var translationPayloads: [String: BusinessZiyaratTranslation] {
+        Dictionary(uniqueKeysWithValues: BusinessZiyaratContentLanguage.allCases.map { language in
+            let draft = localizedContent[language] ?? .empty
+            let facts = draft.factsText
+                .split(whereSeparator: \.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return (language.rawValue, BusinessZiyaratTranslation(
+                title: draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                shortDescription: draft.shortDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+                longDescription: draft.longDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+                interestingFacts: Array(facts.prefix(8)),
+                visitNotes: draft.visitNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
+        })
+    }
+
+    private func localizedBinding(_ keyPath: WritableKeyPath<ZiyaratLocalizedDraft, String>) -> Binding<String> {
+        Binding(
+            get: { localizedContent[selectedContentLanguage]?[keyPath: keyPath] ?? "" },
+            set: { newValue in
+                var draft = localizedContent[selectedContentLanguage] ?? .empty
+                draft[keyPath: keyPath] = newValue
+                localizedContent[selectedContentLanguage] = draft
+            }
+        )
+    }
+
     @MainActor private func save() async {
         guard let coordinate else { errorMessage = "Укажите корректные координаты."; return }
         saving = true; defer { saving = false }
-        let facts = factsText.split(whereSeparator: \.isNewline).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        let payload = BusinessZiyaratPlacePayload(city: city, title: title.trimmingCharacters(in: .whitespacesAndNewlines), titleArabic: titleArabic, category: category.rawValue, shortDescription: shortDescription, longDescription: longDescription, interestingFacts: Array(facts.prefix(8)), visitNotes: visitNotes, visitType: visitType.rawValue, durationMinutes: durationMinutes, latitude: coordinate.latitude, longitude: coordinate.longitude, address: address, mapLabel: mapLabel, routeOrder: routeOrder, status: isPublished ? "published" : "draft")
+        let translations = translationPayloads
+        let canonical = translations[BusinessZiyaratContentLanguage.english.rawValue]
+            ?? translations[BusinessZiyaratContentLanguage.russian.rawValue]
+            ?? translations[BusinessZiyaratContentLanguage.uzbek.rawValue]
+            ?? translations[BusinessZiyaratContentLanguage.uzbekCyrillic.rawValue]
+            ?? .empty
+        let payload = BusinessZiyaratPlacePayload(
+            city: city,
+            title: canonical.title,
+            titleArabic: titleArabic,
+            category: category.rawValue,
+            shortDescription: canonical.shortDescription,
+            longDescription: canonical.longDescription,
+            interestingFacts: canonical.interestingFacts,
+            visitNotes: canonical.visitNotes,
+            visitType: visitType.rawValue,
+            durationMinutes: durationMinutes,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            address: address,
+            mapLabel: mapLabel,
+            routeOrder: routeOrder,
+            status: isPublished ? "published" : "draft",
+            translations: translations
+        )
         do {
             let saved = place == nil ? try await APIClient.shared.createZiyarat(payload) : try await APIClient.shared.updateZiyarat(id: place!.id, payload: payload)
             for imageID in removedImageIDs { try await APIClient.shared.deleteZiyaratImage(placeID: saved.id, imageID: imageID) }
@@ -415,6 +529,16 @@ private struct ZiyaratEditorView: View {
         do { try await APIClient.shared.deleteZiyarat(id: place.id); onSaved(); dismiss() }
         catch { errorMessage = error.localizedDescription }
     }
+}
+
+private struct ZiyaratLocalizedDraft {
+    var title: String = ""
+    var shortDescription: String = ""
+    var longDescription: String = ""
+    var factsText: String = ""
+    var visitNotes: String = ""
+
+    static let empty = ZiyaratLocalizedDraft()
 }
 
 private struct ZiyaratAdminImage: View {

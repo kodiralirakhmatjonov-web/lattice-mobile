@@ -237,61 +237,58 @@ fs.writeFileSync(generatedConfigURL, rendered);
 console.log('Generated wrangler.generated.jsonc with HOTELS_DB + verified BOOKINGS_DB bindings');
 
 async function seedZiyaratMedia() {
-  // The repository ZIP updater intentionally protects .github/workflows. Keep the
-  // initial bundled Ziyarats media bootstrap here so a normal root-level
-  // iumrah-business-*.zip patch is sufficient: the existing deployment workflow
-  // already runs this renderer after the R2 bucket has been resolved/created.
+  // Ziyarat seed objects are deterministic repository assets. We can safely PUT
+  // them on every authenticated deploy: D1 rows control gallery visibility, so
+  // an object that is no longer referenced can never reappear in the client.
+  // This also lets later migrations add new places (Qiblatayn, Uhud, etc.) even
+  // though this renderer runs before `wrangler d1 migrations apply`.
   if (!process.env.CI || !process.env.CLOUDFLARE_API_TOKEN || !process.env.CLOUDFLARE_ACCOUNT_ID) {
     console.log('Skipping Ziyarats R2 seed outside authenticated CI.');
     return;
   }
 
   const workerRoot = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
-  const seedRoot = path.join(workerRoot, 'seed', 'ziyarats', 'quba-mosque');
+  const seedRoot = path.join(workerRoot, 'seed', 'ziyarats');
   if (!fs.existsSync(seedRoot)) {
     console.log('No bundled Ziyarats seed media found.');
     return;
   }
 
-  const allSeedNames = fs.readdirSync(seedRoot)
-    .filter(name => /^quba-[1-5]\.jpg$/i.test(name))
-    .sort();
-  let namesToSeed = allSeedNames;
-
-  // Before migration 0029 is applied the table does not exist, which is the
-  // first-install signal. On later deploys, upload only seed objects that are
-  // still referenced in D1; this avoids resurrecting media an admin deleted.
-  try {
-    const referenced = await d1Query(
-      hotelDatabaseID,
-      `SELECT object_key FROM ziyarat_images
-       WHERE place_id='quba-mosque' AND object_key LIKE 'ziyarats/quba-mosque/quba-%.jpg'
-       ORDER BY position ASC`,
-    );
-    const wanted = new Set(referenced.map(row => path.basename(String(row?.object_key || ''))).filter(Boolean));
-    namesToSeed = allSeedNames.filter(name => wanted.has(name));
-    if (!namesToSeed.length) {
-      console.log('Quba seed rows are not present in D1; preserving the current admin-managed gallery.');
-      return;
-    }
-  } catch {
-    console.log('Ziyarats schema not present yet; seeding first-install Quba media.');
-  }
-
   const bucket = String(process.env.R2_NAME || 'iumrah-hotels-media').trim();
   const configPath = fileURLToPath(generatedConfigURL);
   const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const contentTypes = new Map([
+    ['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'], ['.png', 'image/png'],
+    ['.webp', 'image/webp'], ['.avif', 'image/avif'],
+  ]);
 
-  for (const name of namesToSeed) {
-    const filePath = path.join(seedRoot, name);
-    const objectKey = `ziyarats/quba-mosque/${name}`;
-    console.log(`Seeding R2 object ${objectKey}`);
-    execFileSync(
-      npx,
-      ['wrangler', 'r2', 'object', 'put', `${bucket}/${objectKey}`, `--file=${filePath}`, '--content-type=image/jpeg', '--remote', `--config=${configPath}`],
-      { cwd: workerRoot, stdio: 'inherit', env: process.env },
-    );
+  const placeDirs = fs.readdirSync(seedRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9._-]+$/.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  let uploaded = 0;
+  for (const placeDir of placeDirs) {
+    const placeID = placeDir.name;
+    const directory = path.join(seedRoot, placeID);
+    const names = fs.readdirSync(directory)
+      .filter(name => contentTypes.has(path.extname(name).toLowerCase()))
+      .sort();
+
+    for (const name of names) {
+      const filePath = path.join(directory, name);
+      const objectKey = `ziyarats/${placeID}/${name}`;
+      const contentType = contentTypes.get(path.extname(name).toLowerCase());
+      console.log(`Seeding R2 object ${objectKey}`);
+      execFileSync(
+        npx,
+        ['wrangler', 'r2', 'object', 'put', `${bucket}/${objectKey}`, `--file=${filePath}`, `--content-type=${contentType}`, '--remote', `--config=${configPath}`],
+        { cwd: workerRoot, stdio: 'inherit', env: process.env },
+      );
+      uploaded += 1;
+    }
   }
+
+  console.log(`Ziyarats R2 seed complete: ${uploaded} bundled objects.`);
 }
 
 await seedZiyaratMedia();

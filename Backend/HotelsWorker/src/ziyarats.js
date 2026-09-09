@@ -10,6 +10,7 @@ const PUBLIC_CACHE_HEADERS = {
 const CITIES = new Set(['Madinah', 'Makkah', 'Jeddah']);
 const CATEGORIES = new Set(['mosque', 'mountain', 'cemetery', 'historical', 'garden', 'beach', 'restaurant', 'picnic', 'museum', 'landmark', 'other']);
 const VISIT_TYPES = new Set(['enter', 'stop', 'view', 'pass']);
+const ZIYARAT_LOCALES = ['ru', 'uz', 'uz-cyrl', 'en'];
 
 export async function handleZiyaratAdmin(request, env, url, user) {
   const parts = pathParts(url.pathname, '/api/admin/ziyarats');
@@ -140,6 +141,7 @@ async function mapPlace(env, row, publicMode) {
     SELECT id, content_type, byte_size, width, height, position
     FROM ziyarat_images WHERE place_id=? ORDER BY position ASC, created_at ASC LIMIT 5
   `).bind(row.id).all();
+  const translations = await loadPlaceTranslations(env, row.id, row);
   return {
     id: row.id,
     routeID: row.route_id,
@@ -161,6 +163,7 @@ async function mapPlace(env, row, publicMode) {
     mapLabel: row.map_label || '',
     routeOrder: Number(row.route_order || 0),
     status: row.status,
+    translations,
     images: (images.results || []).map(image => ({
       id: image.id,
       url: `${publicMode ? '/api/catalog/ziyarats' : '/api/admin/ziyarats'}/places/${encodeURIComponent(row.id)}/images/${encodeURIComponent(image.id)}`,
@@ -193,6 +196,7 @@ async function createPlace(request, env, user) {
     value.durationMinutes, value.latitude, value.longitude, value.address, value.mapLabel,
     value.routeOrder, value.status, cleanText(user?.login, 180), now, now
   ).run();
+  await upsertPlaceTranslations(env, id, value.translations, now);
   return adminPlace(env, id);
 }
 
@@ -203,6 +207,7 @@ async function updatePlace(request, env, placeID, user) {
   if (!existing) return json({ ok: false, error: 'ZIYARAT_NOT_FOUND' }, 404);
   const payload = await request.json().catch(() => null);
   if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const existingTranslations = await loadPlaceTranslations(env, placeID, existing);
   const merged = {
     city: payload.city ?? existing.city,
     title: payload.title ?? existing.title,
@@ -219,7 +224,8 @@ async function updatePlace(request, env, placeID, user) {
     address: payload.address ?? existing.address,
     mapLabel: payload.mapLabel ?? existing.map_label,
     routeOrder: payload.routeOrder ?? existing.route_order,
-    status: payload.status ?? existing.status
+    status: payload.status ?? existing.status,
+    translations: payload.translations ?? existingTranslations
   };
   const normalized = normalizePlacePayload(merged, true);
   if (!normalized.ok) return json({ ok: false, error: normalized.error }, 400);
@@ -236,6 +242,7 @@ async function updatePlace(request, env, placeID, user) {
     value.latitude, value.longitude, value.address, value.mapLabel, value.routeOrder, value.status,
     cleanText(user?.login, 180), now, placeID
   ).run();
+  await upsertPlaceTranslations(env, placeID, value.translations, now);
   return adminPlace(env, placeID);
 }
 
@@ -332,8 +339,26 @@ async function ensureCityRoute(env, city) {
 function normalizePlacePayload(payload) {
   const city = normalizeCity(payload.city);
   if (!city) return { ok: false, error: 'INVALID_ZIYARAT_CITY' };
-  const title = cleanText(payload.title, 180);
+
+  const translations = normalizePlaceTranslations(payload.translations, {
+    title: payload.title,
+    shortDescription: payload.shortDescription,
+    longDescription: payload.longDescription,
+    interestingFacts: payload.interestingFacts,
+    visitNotes: payload.visitNotes
+  });
+  const canonical = firstPopulatedTranslation(translations) || {
+    title: cleanText(payload.title, 180) || '',
+    shortDescription: cleanText(payload.shortDescription, 700) || '',
+    longDescription: cleanText(payload.longDescription, 8000) || '',
+    interestingFacts: Array.isArray(payload.interestingFacts)
+      ? payload.interestingFacts.map(value => cleanText(value, 300)).filter(Boolean).slice(0, 8)
+      : [],
+    visitNotes: cleanText(payload.visitNotes, 1200) || ''
+  };
+  const title = cleanText(canonical.title || payload.title, 180);
   if (!title) return { ok: false, error: 'ZIYARAT_TITLE_REQUIRED' };
+
   const latitude = Number(payload.latitude);
   const longitude = Number(payload.longitude);
   if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
@@ -342,18 +367,16 @@ function normalizePlacePayload(payload) {
   const category = CATEGORIES.has(String(payload.category || '').toLowerCase()) ? String(payload.category).toLowerCase() : 'historical';
   const visitType = VISIT_TYPES.has(String(payload.visitType || '').toLowerCase()) ? String(payload.visitType).toLowerCase() : 'stop';
   const status = String(payload.status || '').toLowerCase() === 'published' ? 'published' : 'draft';
-  const interestingFacts = Array.isArray(payload.interestingFacts)
-    ? payload.interestingFacts.map(value => cleanText(value, 300)).filter(Boolean).slice(0, 8)
-    : [];
+
   return { ok: true, value: {
     city,
     title,
     titleArabic: cleanText(payload.titleArabic, 180) || '',
     category,
-    shortDescription: cleanText(payload.shortDescription, 700) || '',
-    longDescription: cleanText(payload.longDescription, 8000) || '',
-    interestingFacts,
-    visitNotes: cleanText(payload.visitNotes, 1200) || '',
+    shortDescription: canonical.shortDescription,
+    longDescription: canonical.longDescription,
+    interestingFacts: canonical.interestingFacts,
+    visitNotes: canonical.visitNotes,
     visitType,
     durationMinutes: boundedInteger(payload.durationMinutes, 5, 480, 30),
     latitude,
@@ -361,8 +384,104 @@ function normalizePlacePayload(payload) {
     address: cleanText(payload.address, 600) || '',
     mapLabel: cleanText(payload.mapLabel, 220) || '',
     routeOrder: boundedInteger(payload.routeOrder, 1, 999, 1),
-    status
+    status,
+    translations
   }};
+}
+
+function normalizePlaceTranslations(value, fallback = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const fallbackFacts = Array.isArray(fallback.interestingFacts)
+    ? fallback.interestingFacts.map(item => cleanText(item, 300)).filter(Boolean).slice(0, 8)
+    : [];
+  const result = {};
+  for (const locale of ZIYARAT_LOCALES) {
+    const raw = source[locale] && typeof source[locale] === 'object' && !Array.isArray(source[locale]) ? source[locale] : {};
+    const useFallback = locale === 'en' && !source[locale];
+    const facts = Array.isArray(raw.interestingFacts)
+      ? raw.interestingFacts.map(item => cleanText(item, 300)).filter(Boolean).slice(0, 8)
+      : (useFallback ? fallbackFacts : []);
+    result[locale] = {
+      title: cleanText(raw.title ?? (useFallback ? fallback.title : ''), 180) || '',
+      shortDescription: cleanText(raw.shortDescription ?? (useFallback ? fallback.shortDescription : ''), 700) || '',
+      longDescription: cleanText(raw.longDescription ?? (useFallback ? fallback.longDescription : ''), 8000) || '',
+      interestingFacts: facts,
+      visitNotes: cleanText(raw.visitNotes ?? (useFallback ? fallback.visitNotes : ''), 1200) || ''
+    };
+  }
+  return result;
+}
+
+function firstPopulatedTranslation(translations) {
+  for (const locale of ['en', 'ru', 'uz', 'uz-cyrl']) {
+    const value = translations?.[locale];
+    if (value?.title) return value;
+  }
+  return null;
+}
+
+async function loadPlaceTranslations(env, placeID, fallbackRow = null) {
+  let rows = [];
+  try {
+    const result = await env.HOTELS_DB.prepare(`
+      SELECT locale,title,short_description,long_description,interesting_facts_json,visit_notes
+      FROM ziyarat_place_translations
+      WHERE place_id=?
+    `).bind(placeID).all();
+    rows = result.results || [];
+  } catch {
+    rows = [];
+  }
+
+  const byLocale = new Map(rows.map(row => [String(row.locale), row]));
+  const output = {};
+  for (const locale of ZIYARAT_LOCALES) {
+    const row = byLocale.get(locale);
+    if (row) {
+      output[locale] = {
+        title: row.title || '',
+        shortDescription: row.short_description || '',
+        longDescription: row.long_description || '',
+        interestingFacts: parseStringArray(row.interesting_facts_json),
+        visitNotes: row.visit_notes || ''
+      };
+      continue;
+    }
+    if (locale === 'en' && fallbackRow) {
+      output[locale] = {
+        title: fallbackRow.title || '',
+        shortDescription: fallbackRow.short_description || '',
+        longDescription: fallbackRow.long_description || '',
+        interestingFacts: parseStringArray(fallbackRow.interesting_facts_json),
+        visitNotes: fallbackRow.visit_notes || ''
+      };
+    } else {
+      output[locale] = { title: '', shortDescription: '', longDescription: '', interestingFacts: [], visitNotes: '' };
+    }
+  }
+  return output;
+}
+
+async function upsertPlaceTranslations(env, placeID, translations, now) {
+  const normalized = normalizePlaceTranslations(translations);
+  for (const locale of ZIYARAT_LOCALES) {
+    const value = normalized[locale];
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO ziyarat_place_translations(
+        place_id,locale,title,short_description,long_description,interesting_facts_json,visit_notes,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(place_id,locale) DO UPDATE SET
+        title=excluded.title,
+        short_description=excluded.short_description,
+        long_description=excluded.long_description,
+        interesting_facts_json=excluded.interesting_facts_json,
+        visit_notes=excluded.visit_notes,
+        updated_at=excluded.updated_at
+    `).bind(
+      placeID, locale, value.title, value.shortDescription, value.longDescription,
+      JSON.stringify(value.interestingFacts), value.visitNotes, now, now
+    ).run();
+  }
 }
 
 function normalizeCity(value) {

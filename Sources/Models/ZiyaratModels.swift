@@ -9,6 +9,22 @@ struct BusinessZiyaratImage: Codable, Identifiable, Hashable {
     let height: Int?
 }
 
+struct BusinessZiyaratTranslation: Codable, Hashable {
+    let title: String
+    let shortDescription: String
+    let longDescription: String
+    let interestingFacts: [String]
+    let visitNotes: String
+
+    static let empty = BusinessZiyaratTranslation(
+        title: "",
+        shortDescription: "",
+        longDescription: "",
+        interestingFacts: [],
+        visitNotes: ""
+    )
+}
+
 struct BusinessZiyaratPlace: Codable, Identifiable, Hashable {
     let id: String
     let routeID: String
@@ -31,6 +47,21 @@ struct BusinessZiyaratPlace: Codable, Identifiable, Hashable {
     let routeOrder: Int
     let status: String
     let images: [BusinessZiyaratImage]
+    let translations: [String: BusinessZiyaratTranslation]?
+
+    func translation(for language: BusinessZiyaratContentLanguage) -> BusinessZiyaratTranslation {
+        if let value = translations?[language.rawValue] { return value }
+        if language == .english {
+            return BusinessZiyaratTranslation(
+                title: title,
+                shortDescription: shortDescription,
+                longDescription: longDescription,
+                interestingFacts: interestingFacts,
+                visitNotes: visitNotes
+            )
+        }
+        return .empty
+    }
 }
 
 struct BusinessZiyaratRoute: Codable, Identifiable, Hashable {
@@ -93,6 +124,34 @@ struct BusinessZiyaratPlacePayload: Codable {
     let mapLabel: String
     let routeOrder: Int
     let status: String
+    let translations: [String: BusinessZiyaratTranslation]
+}
+
+enum BusinessZiyaratContentLanguage: String, CaseIterable, Identifiable {
+    case russian = "ru"
+    case uzbek = "uz"
+    case uzbekCyrillic = "uz-cyrl"
+    case english = "en"
+
+    var id: String { rawValue }
+
+    var shortTitle: String {
+        switch self {
+        case .russian: return "RU"
+        case .uzbek: return "UZ"
+        case .uzbekCyrillic: return "ЎЗ"
+        case .english: return "EN"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .russian: return "Русский"
+        case .uzbek: return "O‘zbek"
+        case .uzbekCyrillic: return "Ўзбек"
+        case .english: return "English"
+        }
+    }
 }
 
 enum BusinessZiyaratCategory: String, CaseIterable, Identifiable {
