@@ -24,6 +24,7 @@ struct HotelAdminDetailView: View {
     @State private var citySavedMessage: String?
     @State private var priceNotice: String?
     @State private var priceSuccessMessage: String?
+    @State private var bookingVerificationReader: BookingLivePriceReader?
 
     var body: some View {
         ScrollView {
@@ -62,6 +63,23 @@ struct HotelAdminDetailView: View {
         .refreshable { await load() }
         .onChange(of: selectedStars) { _, value in
             if hotel?.stars != value { savedMessage = nil }
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { bookingVerificationReader != nil },
+            set: { presented in
+                if !presented, let reader = bookingVerificationReader {
+                    reader.cancelHumanVerification()
+                    bookingVerificationReader = nil
+                }
+            }
+        )) {
+            if let reader = bookingVerificationReader {
+                BookingVerificationView(reader: reader) {
+                    reader.cancelHumanVerification()
+                    bookingVerificationReader = nil
+                }
+                .interactiveDismissDisabled()
+            }
         }
         .alert("Удалить отель?", isPresented: $showDeleteConfirmation) {
             Button("Отмена", role: .cancel) { }
@@ -545,7 +563,19 @@ struct HotelAdminDetailView: View {
             editingManualPrice = false
 
             if let warning = response.error, !warning.isEmpty {
-                if warning == "PRICE_CHANGE_AWAITING_CONFIRMATION" {
+                if preferredSource(latest)?.provider.lowercased().contains("booking") == true,
+                   let deviceLatest = await refreshBookingPriceOnDevice(from: latest) {
+                    hotel = deviceLatest
+                    manualPriceText = editablePrice(deviceLatest.price?.nightlyUSD)
+                    if let current = deviceLatest.price?.sourceNightlyUSD ?? deviceLatest.price?.nightlyUSD, current > 0 {
+                        priceSuccessMessage = sourceRefreshSuccessMessage(previous: previousSourceNightly, current: current)
+                    } else {
+                        priceSuccessMessage = "Booking проверен на устройстве. Цена в базе обновлена."
+                    }
+                    onChanged()
+                    errorMessage = nil
+                    return
+                } else if warning == "PRICE_CHANGE_AWAITING_CONFIRMATION" {
                     priceNotice = "Цена источника сильно изменилась. Нажмите обновление ещё раз для повторной проверки; до подтверждения сохранена прежняя цена."
                 } else if warning == "HOTEL_PRICE_BROWSER_UNAVAILABLE" {
                     priceNotice = "Облачный браузер цен недоступен. Проверьте развёртывание Hotels Cloud; сохранённая цена остаётся активной."
@@ -556,13 +586,7 @@ struct HotelAdminDetailView: View {
                 }
             } else if let currentSourceNightly = latest.price?.sourceNightlyUSD ?? latest.price?.nightlyUSD,
                       currentSourceNightly > 0 {
-                if let previousSourceNightly, abs(previousSourceNightly - currentSourceNightly) < 0.01 {
-                    priceSuccessMessage = "Цена проверена в источнике и подтверждена: \(priceText(currentSourceNightly)) / ночь. Цена не изменилась."
-                } else if let previousSourceNightly, previousSourceNightly > 0 {
-                    priceSuccessMessage = "Цена обновлена из источника: \(priceText(previousSourceNightly)) → \(priceText(currentSourceNightly)) / ночь."
-                } else {
-                    priceSuccessMessage = "Цена проверена и сохранена из источника: \(priceText(currentSourceNightly)) / ночь."
-                }
+                priceSuccessMessage = sourceRefreshSuccessMessage(previous: previousSourceNightly, current: currentSourceNightly)
             } else {
                 priceSuccessMessage = "Источник проверен. Цена в базе обновлена."
             }
@@ -574,10 +598,22 @@ struct HotelAdminDetailView: View {
                 hotel = latest
                 manualPriceText = editablePrice(latest.price?.nightlyUSD)
                 if preferredSource(latest)?.provider.lowercased().contains("booking") == true {
-                    errorMessage = nil
-                    priceNotice = latest.price?.hasUsablePrice == true
-                        ? "Booking временно не подтвердил новую USD-цену. Последняя рабочая цена остаётся активной; автообновление повторится."
-                        : "Booking временно не отдал USD-цену. Повторите проверку немного позже."
+                    if let deviceLatest = await refreshBookingPriceOnDevice(from: latest) {
+                        hotel = deviceLatest
+                        manualPriceText = editablePrice(deviceLatest.price?.nightlyUSD)
+                        if let current = deviceLatest.price?.sourceNightlyUSD ?? deviceLatest.price?.nightlyUSD, current > 0 {
+                            priceSuccessMessage = sourceRefreshSuccessMessage(previous: previousSourceNightly, current: current)
+                        } else {
+                            priceSuccessMessage = "Booking проверен на устройстве. Цена в базе обновлена."
+                        }
+                        onChanged()
+                        errorMessage = nil
+                    } else {
+                        errorMessage = nil
+                        priceNotice = latest.price?.hasUsablePrice == true
+                            ? "Booking сейчас не подтвердил новую USD-цену ни в облаке, ни через браузер приложения. Последняя рабочая цена остаётся активной; автообновление повторится."
+                            : "Booking сейчас не отдал подтверждённую USD-цену. Повторите проверку немного позже."
+                    }
                 } else {
                     errorMessage = error.localizedDescription
                 }
@@ -585,6 +621,58 @@ struct HotelAdminDetailView: View {
                 errorMessage = "Не удалось обновить цену. Повторите попытку чуть позже."
             }
         }
+    }
+
+    private func sourceRefreshSuccessMessage(previous: Double?, current: Double) -> String {
+        if let previous, abs(previous - current) < 0.01 {
+            return "Цена проверена в источнике и подтверждена: \(priceText(current)) / ночь. Цена не изменилась."
+        }
+        if let previous, previous > 0 {
+            return "Цена обновлена из источника: \(priceText(previous)) → \(priceText(current)) / ночь."
+        }
+        return "Цена проверена и сохранена из источника: \(priceText(current)) / ночь."
+    }
+
+    @MainActor
+    private func refreshBookingPriceOnDevice(from detail: HotelAdminDetail) async -> HotelAdminDetail? {
+        let bookingSource = detail.sources.first { $0.provider.lowercased().contains("booking") }
+        let providerIsBooking = detail.price?.provider?.lowercased().contains("booking") == true || bookingSource != nil
+        guard providerIsBooking else { return nil }
+
+        let candidates = [
+            detail.price?.resolvedURL,
+            bookingSource?.canonicalURL,
+            detail.price?.sourceURL,
+            bookingSource?.sourceURL
+        ]
+        guard let sourceURL = candidates.compactMap({ raw -> URL? in
+            guard let raw, let url = URL(string: raw), Self.isBookingSourceURL(url) else { return nil }
+            return url
+        }).first else { return nil }
+
+        let reader = BookingLivePriceReader { reader in
+            bookingVerificationReader = reader
+            priceNotice = "Booking просит подтвердить, что Вы человек. Пройдите проверку в открывшемся окне — после этого обновление цены продолжится автоматически."
+        }
+
+        do {
+            let live = try await reader.read(sourceURL: sourceURL)
+            if bookingVerificationReader === reader { bookingVerificationReader = nil }
+            _ = try await APIClient.shared.saveBrowserHotelPrice(
+                id: hotelID,
+                sourceURL: live.sourceURL.absoluteString,
+                price: live.price
+            )
+            return try await APIClient.shared.hotelDetail(id: hotelID)
+        } catch {
+            if bookingVerificationReader === reader { bookingVerificationReader = nil }
+            return nil
+        }
+    }
+
+    private static func isBookingSourceURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else { return false }
+        return host == "booking.com" || host.hasSuffix(".booking.com")
     }
 
     private func priceText(_ value: Double) -> String {
@@ -682,6 +770,56 @@ struct HotelAdminDetailView: View {
     }
 }
 
+private struct BookingVerificationView: View {
+    let reader: BookingLivePriceReader
+    let onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Проверка Booking", systemImage: "person.badge.shield.checkmark")
+                        .font(.headline)
+                    Text("Это настоящая страница Booking. Пройдите CAPTCHA или другую проверку вручную. Cookies и browser session сохраняются, а после подтверждения система продолжит чтение цены автоматически.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.bar)
+
+                BookingVerificationWebView(reader: reader)
+                    .ignoresSafeArea(edges: .bottom)
+            }
+            .navigationTitle("Booking")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Отмена", action: onCancel)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Продолжить") {
+                        reader.continueAfterHumanVerification()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+}
+
+private struct BookingVerificationWebView: UIViewRepresentable {
+    let reader: BookingLivePriceReader
+
+    func makeUIView(context: Context) -> WKWebView {
+        reader.verificationWebView ?? WKWebView(frame: .zero)
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) { }
+}
+
 private struct BookingLivePriceResult {
     let sourceURL: URL
     let price: ProviderPriceSnapshot
@@ -692,14 +830,29 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<BookingLivePriceResult, Error>?
     private var webView: WKWebView?
     private var timeoutTask: Task<Void, Never>?
+    private var verificationPollTask: Task<Void, Never>?
     private var evaluating = false
     private var preparedSourceURL: URL?
     private var currencyBootstrapTried = false
     private var loadingCurrencyBootstrap = false
+    private var waitingForHumanVerification = false
+    private let onVerificationRequired: (BookingLivePriceReader) -> Void
+
+    init(onVerificationRequired: @escaping (BookingLivePriceReader) -> Void = { _ in }) {
+        self.onVerificationRequired = onVerificationRequired
+        super.init()
+    }
+
+    var verificationWebView: WKWebView? { webView }
 
     func read(sourceURL: URL) async throws -> BookingLivePriceResult {
         guard continuation == nil else {
             throw NSError(domain: "iumrah.booking-price", code: 1, userInfo: [NSLocalizedDescriptionKey: "BOOKING_PRICE_READER_BUSY"])
+        }
+
+        let resolvedSourceURL = await Self.resolveBookingPropertyURL(sourceURL) ?? sourceURL
+        guard Self.bookingPropertyKey(resolvedSourceURL) != nil else {
+            throw NSError(domain: "iumrah.booking-price", code: 4, userInfo: [NSLocalizedDescriptionKey: "BOOKING_PROPERTY_URL_NOT_RESOLVED"])
         }
 
         let config = WKWebViewConfiguration()
@@ -707,12 +860,12 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         config.websiteDataStore = bookingDataStore
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         await Self.primeUSDCurrency(in: bookingDataStore)
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1366, height: 900), configuration: config)
         webView.navigationDelegate = self
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
         self.webView = webView
 
-        let preparedURL = Self.preparedURL(sourceURL)
+        let preparedURL = Self.preparedURL(resolvedSourceURL)
         preparedSourceURL = preparedURL
         currencyBootstrapTried = false
         loadingCurrencyBootstrap = false
@@ -749,50 +902,9 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
             return
         }
 
-        guard !evaluating else { return }
-        evaluating = true
         Task { [weak self, weak webView] in
             guard let self, let webView else { return }
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            _ = try? await webView.evaluateJavaScript(Self.preparePageScript)
-            try? await Task.sleep(nanoseconds: 950_000_000)
-
-            if let result = await self.extract(from: webView) {
-                self.finish(.success(result))
-                return
-            }
-
-            _ = try? await webView.evaluateJavaScript("""
-            (() => {
-              const target = document.querySelector('#hprt-table')
-                || document.querySelector('[data-testid="availability-table"]')
-                || document.querySelector('[data-testid*="availability"]');
-              if (target) target.scrollIntoView({ block: 'start' });
-              else window.scrollTo(0, document.documentElement.scrollHeight * 0.55);
-              return !!target;
-            })();
-            """)
-            try? await Task.sleep(nanoseconds: 1_250_000_000)
-
-            if let result = await self.extract(from: webView) {
-                self.finish(.success(result))
-                return
-            }
-
-            if !self.currencyBootstrapTried {
-                self.currencyBootstrapTried = true
-                self.loadingCurrencyBootstrap = true
-                self.evaluating = false
-                await Self.primeUSDCurrency(in: webView.configuration.websiteDataStore)
-                webView.load(Self.bookingRequest(url: Self.bookingUSDCurrencyBootstrapURL))
-                return
-            }
-
-            self.finish(.failure(NSError(
-                domain: "iumrah.booking-price",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "BOOKING_LIVE_PRICE_NOT_FOUND"]
-            )))
+            await self.processCurrentPage(webView)
         }
     }
 
@@ -804,6 +916,147 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         finish(.failure(error))
     }
 
+    func continueAfterHumanVerification() {
+        guard continuation != nil, let webView else { return }
+        Task { [weak self, weak webView] in
+            guard let self, let webView else { return }
+            if await self.pageShowsChallenge(webView) {
+                self.enterHumanVerification()
+                return
+            }
+            self.waitingForHumanVerification = false
+            self.verificationPollTask?.cancel()
+            self.verificationPollTask = nil
+            self.restartTimeout(seconds: 45)
+            self.evaluating = false
+            await self.processCurrentPage(webView)
+        }
+    }
+
+    func cancelHumanVerification() {
+        guard continuation != nil else { return }
+        finish(.failure(NSError(
+            domain: "iumrah.booking-price",
+            code: 5,
+            userInfo: [NSLocalizedDescriptionKey: "BOOKING_HUMAN_VERIFICATION_CANCELLED"]
+        )))
+    }
+
+    private func processCurrentPage(_ webView: WKWebView) async {
+        guard continuation != nil else { return }
+        try? await Task.sleep(nanoseconds: 650_000_000)
+
+        if await pageShowsChallenge(webView) {
+            enterHumanVerification()
+            return
+        }
+
+        if waitingForHumanVerification {
+            waitingForHumanVerification = false
+            verificationPollTask?.cancel()
+            verificationPollTask = nil
+            restartTimeout(seconds: 45)
+        }
+
+        guard !evaluating else { return }
+        evaluating = true
+        _ = try? await webView.evaluateJavaScript(Self.preparePageScript)
+        try? await Task.sleep(nanoseconds: 950_000_000)
+
+        if await pageShowsChallenge(webView) {
+            evaluating = false
+            enterHumanVerification()
+            return
+        }
+
+        if let result = await extract(from: webView) {
+            finish(.success(result))
+            return
+        }
+
+        _ = try? await webView.evaluateJavaScript("""
+        (() => {
+          const target = document.querySelector('#hprt-table')
+            || document.querySelector('[data-testid="availability-table"]')
+            || document.querySelector('[data-testid*="availability"]');
+          if (target) target.scrollIntoView({ block: 'start' });
+          else window.scrollTo(0, document.documentElement.scrollHeight * 0.55);
+          return !!target;
+        })();
+        """)
+        try? await Task.sleep(nanoseconds: 1_250_000_000)
+
+        if await pageShowsChallenge(webView) {
+            evaluating = false
+            enterHumanVerification()
+            return
+        }
+
+        if let result = await extract(from: webView) {
+            finish(.success(result))
+            return
+        }
+
+        if !currencyBootstrapTried {
+            currencyBootstrapTried = true
+            loadingCurrencyBootstrap = true
+            evaluating = false
+            await Self.primeUSDCurrency(in: webView.configuration.websiteDataStore)
+            webView.load(Self.bookingRequest(url: Self.bookingUSDCurrencyBootstrapURL))
+            return
+        }
+
+        finish(.failure(NSError(
+            domain: "iumrah.booking-price",
+            code: 3,
+            userInfo: [NSLocalizedDescriptionKey: "BOOKING_LIVE_PRICE_NOT_FOUND"]
+        )))
+    }
+
+    private func pageShowsChallenge(_ webView: WKWebView) async -> Bool {
+        guard let value = try? await webView.evaluateJavaScript(Self.detectChallengeScript) else { return false }
+        return (value as? Bool) == true
+    }
+
+    private func enterHumanVerification() {
+        guard continuation != nil else { return }
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        evaluating = false
+
+        if !waitingForHumanVerification {
+            waitingForHumanVerification = true
+            onVerificationRequired(self)
+        }
+
+        guard verificationPollTask == nil else { return }
+        verificationPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                guard !Task.isCancelled, let self, self.waitingForHumanVerification, let webView = self.webView else { return }
+                if !(await self.pageShowsChallenge(webView)) {
+                    self.continueAfterHumanVerification()
+                    return
+                }
+            }
+        }
+    }
+
+    private func restartTimeout(seconds: UInt64) {
+        timeoutTask?.cancel()
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.finish(.failure(NSError(
+                    domain: "iumrah.booking-price",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "BOOKING_PRICE_TIMEOUT"]
+                )))
+            }
+        }
+    }
+
     private func extract(from webView: WKWebView) async -> BookingLivePriceResult? {
         let javascriptValue = try? await webView.evaluateJavaScript(Self.extractPriceScript)
         guard let raw = javascriptValue as? String,
@@ -812,6 +1065,11 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
               price.isUsable,
               price.currency.uppercased() == "USD",
               let resolvedURL = webView.url else { return nil }
+        if let expected = preparedSourceURL.flatMap(Self.bookingPropertyKey),
+           let actual = Self.bookingPropertyKey(resolvedURL),
+           expected != actual {
+            return nil
+        }
         return BookingLivePriceResult(sourceURL: resolvedURL, price: price)
     }
 
@@ -821,9 +1079,12 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         evaluating = false
         timeoutTask?.cancel()
         timeoutTask = nil
+        verificationPollTask?.cancel()
+        verificationPollTask = nil
         preparedSourceURL = nil
         currencyBootstrapTried = false
         loadingCurrencyBootstrap = false
+        waitingForHumanVerification = false
         webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView = nil
@@ -874,6 +1135,36 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         return request
     }
 
+    private static func bookingPropertyKey(_ url: URL) -> String? {
+        guard let host = url.host?.lowercased(), host == "booking.com" || host.hasSuffix(".booking.com") else { return nil }
+        let path = url.path
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^/hotel/([^/]+)/([^/?#]+?)(?:\.[a-z]{2}(?:-[a-z]{2})?)?\.html/?$"#,
+            options: [.caseInsensitive]
+        ), let match = regex.firstMatch(in: path, range: NSRange(path.startIndex..., in: path)),
+              match.numberOfRanges >= 3,
+              let countryRange = Range(match.range(at: 1), in: path),
+              let slugRange = Range(match.range(at: 2), in: path) else { return nil }
+        return "\(path[countryRange])/\(path[slugRange])".lowercased()
+    }
+
+    private static func resolveBookingPropertyURL(_ sourceURL: URL) async -> URL? {
+        if bookingPropertyKey(sourceURL) != nil { return sourceURL }
+        guard let host = sourceURL.host?.lowercased(), host == "booking.com" || host.hasSuffix(".booking.com") else { return nil }
+
+        var request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 18)
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue(bookingUSDCookieHeader, forHTTPHeaderField: "Cookie")
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let finalURL = response.url, bookingPropertyKey(finalURL) != nil else { return nil }
+            return finalURL
+        } catch {
+            return nil
+        }
+    }
+
     private static func preparedURL(_ url: URL) -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
         var items = components.queryItems ?? []
@@ -916,6 +1207,19 @@ private final class BookingLivePriceReader: NSObject, WKNavigationDelegate {
         components.queryItems = items
         return components.url ?? url
     }
+
+    private static let detectChallengeScript = #"""
+    (() => {
+      const clean = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const text = clean(document.body?.innerText || '');
+      const title = clean(document.title || '');
+      const heading = clean(document.querySelector('h1,h2,[role="heading"]')?.innerText || '');
+      const joined = `${title} ${heading} ${text.slice(0, 12000)}`;
+      const challengeText = /verify you are human|are you a robot|robot check|captcha|security check|press and hold|complete the security check|unusual traffic|we need to verify|verification required/.test(joined);
+      const challengeNode = !!document.querySelector('[id*="captcha" i],[class*="captcha" i],iframe[src*="captcha" i],iframe[title*="challenge" i],[data-testid*="captcha" i]');
+      return challengeText || challengeNode;
+    })();
+    """#
 
     private static let preparePageScript = #"""
     (() => {

@@ -67,6 +67,23 @@ test('JavaScript-only source invokes browser and extracts rendered price', async
   assert.equal(result.extracted.nightlyUSD, 120);
 });
 
+test('trusted browser renderer accepts Booking SPA canonicalization after verified quote navigation', async () => {
+  const result = await obtainHotelPrice({}, booking, 'Booking', { now,
+    fetcher: async () => new Response(html('Loading availability')),
+    render: async (env, url) => ({
+      html: bookingHTML,
+      finalURL: booking,
+      quoteURL: url,
+      httpStatus: 200,
+      transport: 'browser',
+      contextVerified: true
+    })
+  });
+  assert.equal(result.quote.checkIn, '2026-09-10');
+  assert.equal(result.quote.checkOut, '2026-09-11');
+  assert.equal(result.extracted.nightlyUSD, 120);
+});
+
 test('browser challenge does not become a successful quote', async () => {
   await assert.rejects(obtainHotelPrice({}, booking, 'Booking', { now,
     fetcher: async () => new Response('', { status: 403 }),

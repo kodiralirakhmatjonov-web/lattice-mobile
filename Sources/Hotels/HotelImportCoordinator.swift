@@ -1248,7 +1248,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             const amount = Number(text);
             return Number.isFinite(amount) && amount > 0 ? amount : null;
           };
-          const params = new URL(location.href).searchParams;
+          // Quote semantics belong to the URL we intentionally opened. Booking's SPA may
+          // canonicalize location.href and drop dates/currency after the room table renders.
+          const params = new URL(sourceURL).searchParams;
           const checkIn = params.get('checkin');
           const checkOut = params.get('checkout');
           const dateDays = (() => {
@@ -1261,7 +1263,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
           const bodyText = compact(document.body?.innerText || '');
           const usdContext = /prices? converted to usd|currency\s*[:\-]?\s*usd|\bUSD\b|US\$/i.test(bodyText)
-            || /selected_currency=USD/i.test(location.href);
+            || /selected_currency=USD/i.test(sourceURL);
           if (!usdContext) return null;
 
           const roots = [
@@ -1303,6 +1305,46 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             if ((match = perNight.exec(text)) !== null) push(parseAmount(match[1]), 'nightly', 'booking-usd-room-row', 160, roomName || null);
             totalForNights.lastIndex = 0;
             if ((match = totalForNights.exec(text)) !== null) push(parseAmount(match[1]), 'stay_total', 'booking-usd-room-row-total', 135, roomName || null, Number(match[2]) || dateDays);
+          }
+
+          // Booking often renders a one-night room price as a bare money token with no
+          // literal "per night" suffix. For our controlled one-night quote that token is
+          // unambiguously nightly, provided it comes from an availability/room-price node.
+          if (dateDays === 1) {
+            const priceSelectors = [
+              '#hprt-table [data-testid="price-and-discounted-price"]',
+              '[data-testid="availability-table"] [data-testid="price-and-discounted-price"]',
+              '#hprt-table [data-testid="price-for-x-nights"]',
+              '[data-testid="availability-table"] [data-testid="price-for-x-nights"]',
+              '#hprt-table .prco-valign-middle-helper',
+              '[data-testid="availability-table"] .prco-valign-middle-helper',
+              '#hprt-table .bui-price-display__value'
+            ];
+            const simpleUSD = /(?:US\$|USD|\$)\s*([0-9][0-9.,\s]*)/ig;
+            for (const selector of priceSelectors) {
+              for (const el of document.querySelectorAll(selector)) {
+                const style = window.getComputedStyle?.(el);
+                const rect = el.getBoundingClientRect?.();
+                if (el.closest('s,del') || style?.display === 'none' || style?.visibility === 'hidden' || (rect && rect.width === 0 && rect.height === 0)) continue;
+                const text = compact(el.innerText || el.textContent || '');
+                if (!text || !/(US\$|USD|\$)/i.test(text)) continue;
+                const amounts = [];
+                simpleUSD.lastIndex = 0;
+                let token;
+                while ((token = simpleUSD.exec(text)) !== null) {
+                  const amount = parseAmount(token[1]);
+                  if (amount && amount >= 5 && amount <= 100000) amounts.push(amount);
+                }
+                if (!amounts.length) continue;
+                let roomName = null;
+                let node = el;
+                for (let depth = 0; node && depth < 7; depth += 1, node = node.parentElement) {
+                  const heading = clean(node.querySelector?.('[data-testid="room-name"],h2,h3,h4,[role="heading"]')?.innerText || '');
+                  if (heading && heading.length <= 180) { roomName = heading; break; }
+                }
+                push(Math.min(...amounts), 'nightly', 'booking-usd-one-night-element', 190, roomName, 1);
+              }
+            }
           }
 
           if (!candidates.length) return null;

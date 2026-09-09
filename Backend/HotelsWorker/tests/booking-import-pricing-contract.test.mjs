@@ -23,6 +23,8 @@ test('Booking importer resolves Share first and obtains price only from USD quot
   assert.match(importer, /if provider == \.booking \{ await captureBookingEmbeddedMedia\(\) \}/);
   assert.match(importer, /structuredPropertyImages/);
   assert.match(importer, /provider === 'Booking'/);
+  assert.match(importer, /const params = new URL\(sourceURL\)\.searchParams/);
+  assert.match(importer, /booking-usd-one-night-element/);
 });
 
 test('Booking source refresh persists only a device-verified USD price into the existing D1 cache', () => {
@@ -34,6 +36,10 @@ test('Booking source refresh persists only a device-verified USD price into the 
   assert.match(worker, /INSERT INTO hotel_price_cache/);
   assert.match(worker, /DELETE FROM hotel_price_overrides WHERE hotel_id=\?/);
   assert.match(hotelDetail, /BookingLivePriceReader/);
+  assert.match(hotelDetail, /WKWebView\(frame: CGRect\(x: 0, y: 0, width: 1366, height: 900\)/);
+  assert.match(hotelDetail, /refreshBookingPriceOnDevice/);
+  assert.match(hotelDetail, /saveBrowserHotelPrice/);
+  assert.match(hotelDetail, /canonicalURL/);
   assert.match(hotelDetail, /price\.currency\.uppercased\(\) == "USD"/);
   assert.match(hotelDetail, /APIClient.shared.refreshHotelPrice/);
   assert.match(hotelDetail, /Цена проверена в источнике и подтверждена/);

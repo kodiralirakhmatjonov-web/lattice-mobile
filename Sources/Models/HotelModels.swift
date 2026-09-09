@@ -510,6 +510,7 @@ struct HotelAdminDetailSource: Codable, Identifiable, Hashable {
     let id: String
     let provider: String
     let sourceURL: String
+    let canonicalURL: String?
     let name: String?
 }
 
