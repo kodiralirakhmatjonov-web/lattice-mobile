@@ -765,11 +765,69 @@ actor APIClient {
         return try decoder.decode(BusinessClientNotificationSendResponse.self, from: data)
     }
 
+    func ziyarats(city: String? = nil) async throws -> [BusinessZiyaratRoute] {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats"), resolvingAgainstBaseURL: false)!
+        if let city, !city.isEmpty {
+            components.queryItems = [URLQueryItem(name: "city", value: city)]
+        }
+        let (data, response) = try await perform(from: components.url!)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessZiyaratCatalogResponse.self, from: data).routes
+    }
+
+    func createZiyarat(_ payload: BusinessZiyaratPlacePayload) async throws -> BusinessZiyaratPlace {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessZiyaratPlaceResponse.self, from: data).place
+    }
+
+    func updateZiyarat(id: String, payload: BusinessZiyaratPlacePayload) async throws -> BusinessZiyaratPlace {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(id)"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessZiyaratPlaceResponse.self, from: data).place
+    }
+
+    func deleteZiyarat(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(id)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        _ = try? decoder.decode(BusinessZiyaratDeleteResponse.self, from: data)
+    }
+
+    func uploadZiyaratImage(placeID: String, imageData: Data, position: Int) async throws {
+        let optimized = try ImageOptimizer.ziyaratJPEGData(from: imageData)
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(placeID)/images"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 90
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        request.setValue(String(position), forHTTPHeaderField: "X-Iumrah-Position")
+        request.httpBody = optimized
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        _ = try decoder.decode(BusinessZiyaratImageUploadResponse.self, from: data)
+    }
+
+    func deleteZiyaratImage(placeID: String, imageID: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(placeID)/images/\(imageID)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+    }
+
     func perform(_ original: URLRequest) async throws -> (Data, URLResponse) {
         var request = original
         if let url = request.url,
            url.host?.lowercased() == AppConfig.apiBaseURL.host?.lowercased(),
-           url.path.hasPrefix("/api/admin/hotels"),
+           url.path.hasPrefix("/api/admin/"),
            let token = BusinessSessionVault.sessionToken {
             request.setValue(token, forHTTPHeaderField: "X-Iumrah-Business-Session")
         }
