@@ -535,29 +535,9 @@ struct HotelAdminDetailView: View {
 
         defer { refreshingPrice = false }
         do {
-            let response: HotelPriceResponse
-            if let currentHotel = hotel, let source = preferredSource(currentHotel),
-               source.provider.lowercased().contains("booking"),
-               let sourceURL = URL(string: source.url) {
-                do {
-                    // Booking manual refresh is read in a USD-only browser session on this
-                    // iPhone. A SAR/AED/UZS value is never converted or accepted as the
-                    // operator-requested Booking quote. Expedia keeps its server path.
-                    let reader = BookingLivePriceReader()
-                    let live = try await reader.read(sourceURL: sourceURL)
-                    response = try await APIClient.shared.saveBrowserHotelPrice(
-                        id: hotelID,
-                        sourceURL: live.sourceURL.absoluteString,
-                        price: live.price
-                    )
-                } catch {
-                    // Server refresh remains a fallback. It preserves the last accepted D1
-                    // price on provider rate limits/challenges instead of invalidating it.
-                    response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
-                }
-            } else {
-                response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
-            }
+            // One server path for the button and scheduled refresh. Always reads
+            // the provider now; the server renders JavaScript when necessary.
+            let response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
 
             let latest = try await APIClient.shared.hotelDetail(id: hotelID)
             hotel = latest
@@ -565,9 +545,15 @@ struct HotelAdminDetailView: View {
             editingManualPrice = false
 
             if let warning = response.error, !warning.isEmpty {
-                priceNotice = latest.price?.hasUsablePrice == true
-                    ? "Источник сейчас не подтвердил новую цену. Последняя рабочая цена сохранена; система повторит автообновление."
-                    : "Источник пока не вернул цену. Повторите проверку немного позже."
+                if warning == "PRICE_CHANGE_AWAITING_CONFIRMATION" {
+                    priceNotice = "Цена источника сильно изменилась. Нажмите обновление ещё раз для повторной проверки; до подтверждения сохранена прежняя цена."
+                } else if warning == "HOTEL_PRICE_BROWSER_UNAVAILABLE" {
+                    priceNotice = "Облачный браузер цен недоступен. Проверьте развёртывание Hotels Cloud; сохранённая цена остаётся активной."
+                } else {
+                    priceNotice = latest.price?.hasUsablePrice == true
+                        ? "Источник сейчас не подтвердил новую цену. Последняя рабочая цена сохранена; система повторит автообновление."
+                        : "Источник пока не вернул цену. Повторите проверку немного позже."
+                }
             } else if let currentSourceNightly = latest.price?.sourceNightlyUSD ?? latest.price?.nightlyUSD,
                       currentSourceNightly > 0 {
                 if let previousSourceNightly, abs(previousSourceNightly - currentSourceNightly) < 0.01 {

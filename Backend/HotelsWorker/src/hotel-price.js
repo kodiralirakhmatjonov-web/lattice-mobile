@@ -134,6 +134,16 @@ export function extractHotelPriceFromHTML(html, provider, nights = HOTEL_PRICE_Q
 }
 
 function collectBookingCandidates(html, readable, out, nights) {
+  // Property availability tables use this class rather than search-card test IDs.
+  // Scope strictly to that table so nearby/recommended hotel prices cannot win.
+  const table = /<(table|div)[^>]+(?:id=["']hprt-table["']|data-testid=["']availability-table["'])[^>]*>/i.exec(html);
+  if (table) {
+    const availability = extractBalancedElement(html, table.index, table[1], 500000);
+    for (const segment of extractClassSegments(availability, ['bui-price-display__value', 'prco-valign-middle-helper'])) {
+      const money = primaryDisplayMoney(segment);
+      if (money && nights === 1) out.push({ ...money, basis: 'nightly', confidence: 0.995, method: 'booking-availability-one-night' });
+    }
+  }
   for (const segment of extractTestIDSegments(html, ['price-for-x-nights'])) {
     const money = primaryDisplayMoney(segment);
     if (money) out.push({ ...money, basis: 'stay_total', confidence: 0.99, method: 'booking-price-for-x-nights' });
@@ -321,13 +331,12 @@ function firstMoney(value) {
 
 function extractTestIDContexts(html, testID) {
   const out = [];
-  const pattern = new RegExp(`<[^>]+data-testid=["']${escapeRegExp(testID)}["'][^>]*>`, 'gi');
+  const pattern = new RegExp(`<([a-z0-9]+)[^>]+data-testid=["']${escapeRegExp(testID)}["'][^>]*>`, 'gi');
   let match;
   while ((match = pattern.exec(html)) !== null && out.length < 100) {
     const start = Math.max(0, match.index - 500);
     const end = Math.min(html.length, match.index + match[0].length + 1200);
-    const elementEnd = Math.min(html.length, match.index + match[0].length + 500);
-    out.push({ element: html.slice(match.index, elementEnd), context: html.slice(start, end) });
+    out.push({ element: extractBalancedElement(html, match.index, match[1], 2400), context: html.slice(start, end) });
   }
   return out;
 }

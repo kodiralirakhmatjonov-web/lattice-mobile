@@ -35,19 +35,12 @@ test('Booking source refresh persists only a device-verified USD price into the 
   assert.match(worker, /DELETE FROM hotel_price_overrides WHERE hotel_id=\?/);
   assert.match(hotelDetail, /BookingLivePriceReader/);
   assert.match(hotelDetail, /price\.currency\.uppercased\(\) == "USD"/);
-  assert.match(hotelDetail, /saveBrowserHotelPrice/);
+  assert.match(hotelDetail, /APIClient.shared.refreshHotelPrice/);
   assert.match(hotelDetail, /Цена проверена в источнике и подтверждена/);
 });
 
-test('Booking server refresh probes stable USD availability context without changing Expedia source URL', () => {
-  assert.match(worker, /function bookingPriceProbeURL/);
-  assert.match(worker, /provider === 'Booking' \? bookingPriceProbeURL\(sourceURL\) : sourceURL/);
-  assert.match(worker, /selected_currency/);
-  assert.match(worker, /cur_currency/);
-  assert.match(worker, /cur_curr=USD/);
-  assert.match(worker, /currency=USD/);
-  assert.match(worker, /group_adults/);
-  assert.match(worker, /HOTEL_PRICE_BOOKING_USD_NOT_CONFIRMED/);
+test('Booking and Expedia source refresh share the server price reader', () => {
+  assert.match(worker, /obtainHotelPrice\(env, priceURL, provider\)/);
 });
 
 test('legacy hood-price component rows use Russian business names instead of JSON paths', () => {

@@ -891,6 +891,8 @@ enum APIError: LocalizedError {
             case "ESIM_ACCESS_PROFILE_ALREADY_ASSIGNED": return "Эта eSIM уже назначена другой поездке."
             case "ESIM_ACCESS_PURCHASE_REQUIRES_REVIEW": return "Предыдущая попытка покупки не получила подтверждение. Проверьте заказ в eSIM Access перед повторной покупкой, чтобы исключить двойное списание."
             case "INVALID_HOTEL_PRICE": return "Введите корректную цену за одну ночь в долларах."
+            case "HOTEL_PRICE_REFRESH_IN_PROGRESS": return "Цена уже обновляется из источника. Дождитесь завершения и откройте отель повторно."
+            case "HOTEL_PRICE_BROWSER_UNAVAILABLE": return "Облачный браузер цен недоступен. Проверьте развёртывание Hotels Cloud."
             case "HOTEL_PRICE_SOURCE_MISSING": return "Для этого отеля не закреплён источник Booking или Expedia."
             case "HOTEL_PRICE_SOURCE_CHALLENGE": return "Источник запросил проверку браузера. Ручная цена сохранится; попробуйте обновить из источника позже."
             case "HOTEL_PRICE_NOT_FOUND_ON_SOURCE": return "Источник открылся, но актуальную цену на странице определить не удалось."

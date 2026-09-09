@@ -1,3 +1,4 @@
+import { obtainHotelPrice, propertyKey } from './hotel-price-source.js';
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
@@ -4825,7 +4826,7 @@ async function runHotelPriceMaintenance(env) {
     console.error('HOTEL_PRICE_MAINTENANCE_MARK_STALE_FAILED', String(error?.message || error));
   });
 
-  // Prices expire exactly after 48h. The hourly cron picks up every due row on the
+  // Prices expire after 48h. The 15-minute cron picks up every due row on the
   // next run; a 12-item batch covers the current catalog quickly without turning
   // one expiry boundary into an uncontrolled provider burst. Provider failures never erase nightly_price_usd: mark failure
   // preserves the last accepted rate as stale and schedules a retry.
@@ -4834,10 +4835,14 @@ async function runHotelPriceMaintenance(env) {
     due = await env.HOTELS_DB.prepare(`
       SELECT h.id
       FROM hotels h
-      JOIN hotel_price_sources hps ON hps.hotel_id=h.id
+      LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
       LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
       WHERE h.status='published'
-        AND hps.source_url IS NOT NULL AND hps.source_url!=''
+        AND ((hps.source_url IS NOT NULL AND hps.source_url!='') OR EXISTS (
+          SELECT 1 FROM hotel_sources hs WHERE hs.hotel_id=h.id
+            AND LOWER(hs.provider) IN ('booking','booking.com','expedia','expedia.com')
+            AND hs.source_url IS NOT NULL AND hs.source_url!=''
+        ))
         AND (
           hp.hotel_id IS NULL
           OR (hp.status='fresh' AND hp.expires_at IS NOT NULL AND hp.expires_at<=?)
@@ -4860,8 +4865,8 @@ async function runHotelPriceMaintenance(env) {
       await fetchExactHotelSourcePrice(env, hotelID, { clearManualOverride: false });
     } catch (error) {
       const code = cleanText(error?.message, 220) || 'HOTEL_PRICE_REFRESH_FAILED';
+      if (code === 'HOTEL_PRICE_REFRESH_IN_PROGRESS') continue;
       console.warn('HOTEL_PRICE_BACKGROUND_REFRESH_FAILED', hotelID, code);
-      await markHotelPriceRefreshFailure(env, hotelID, code).catch(() => {});
     }
   }
 }
@@ -4906,15 +4911,16 @@ function normalizedHotelPriceProvider(value, sourceURL = '') {
 
 async function ensureHotelPriceSourceLock(env, hotelID) {
   let row = await env.HOTELS_DB.prepare(`
-    SELECT hps.source_id, hps.provider, hps.source_url
+    SELECT hps.source_id, hps.provider, hps.source_url, hs.canonical_url
     FROM hotel_price_sources hps
+    LEFT JOIN hotel_sources hs ON hs.id=hps.source_id AND hs.hotel_id=hps.hotel_id
     WHERE hps.hotel_id=?
     LIMIT 1
   `).bind(hotelID).first().catch(() => null);
   if (row?.source_url) return row;
 
   row = await env.HOTELS_DB.prepare(`
-    SELECT hs.id AS source_id, hs.provider, hs.source_url
+    SELECT hs.id AS source_id, hs.provider, hs.source_url, hs.canonical_url
     FROM hotel_sources hs
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id=hs.hotel_id
     WHERE hs.hotel_id=? AND LOWER(hs.provider) IN ('booking','booking.com','expedia','expedia.com')
@@ -4934,59 +4940,29 @@ async function ensureHotelPriceSourceLock(env, hotelID) {
   return { ...row, provider };
 }
 
-function bookingPriceProbeURL(value) {
-  try {
-    const url = new URL(String(value || ''));
-    const host = url.hostname.toLowerCase();
-    if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return url.toString();
-    url.searchParams.set('selected_currency', 'USD');
-    url.searchParams.set('cur_currency', 'USD');
-    url.searchParams.set('changed_currency', '1');
-    url.searchParams.set('top_currency', '1');
-    url.searchParams.set('lang', 'en-us');
-    if (!url.searchParams.get('group_adults')) url.searchParams.set('group_adults', '2');
-    if (!url.searchParams.get('req_adults')) url.searchParams.set('req_adults', '2');
-    if (!url.searchParams.get('group_children')) url.searchParams.set('group_children', '0');
-    if (!url.searchParams.get('no_rooms')) url.searchParams.set('no_rooms', '1');
-    if (!url.searchParams.get('room1')) url.searchParams.set('room1', 'A,A');
-    if (!url.searchParams.get('checkin') || !url.searchParams.get('checkout')) {
-      const start = new Date();
-      start.setUTCDate(start.getUTCDate() + 1);
-      const end = new Date(start.getTime());
-      end.setUTCDate(end.getUTCDate() + 1);
-      const isoDate = date => date.toISOString().slice(0, 10);
-      if (!url.searchParams.get('checkin')) url.searchParams.set('checkin', isoDate(start));
-      if (!url.searchParams.get('checkout')) url.searchParams.set('checkout', isoDate(end));
-    }
-    return url.toString();
-  } catch (_) {
-    return String(value || '');
-  }
-}
-
-async function readExactHotelSourcePage(env, sourceURL, provider = null) {
-  const headers = new Headers({
-    'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1',
-    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'accept-language': 'en-US,en;q=0.9',
-    'cache-control': 'no-cache'
-  });
-  if (provider === 'Booking') headers.set('cookie', 'selected_currency=USD; currency=USD; cur_curr=USD; b_selected_currency=USD');
-  let response;
-  try {
-    response = await fetch(sourceURL, { headers, redirect: 'follow', cf: { cacheTtl: 0 } });
-  } catch (_) {
-    throw new Error('HOTEL_PRICE_SOURCE_FETCH_FAILED');
-  }
-  if (!response.ok) throw new Error(`HOTEL_PRICE_SOURCE_HTTP_${response.status}`);
-  const html = await response.text();
-  if (!html || html.length < 500) throw new Error('HOTEL_PRICE_SOURCE_EMPTY_PAGE');
-  if (html.length > 8_000_000) throw new Error('HOTEL_PRICE_SOURCE_PAGE_TOO_LARGE');
-  if (isProviderChallengeHTML(html)) throw new Error('HOTEL_PRICE_SOURCE_CHALLENGE');
-  return { response, html, finalURL: response.url || sourceURL };
-}
-
 async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
+  const token = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 180000).toISOString();
+  const claimed = await env.HOTELS_DB.prepare(`
+    INSERT INTO hotel_price_refresh_leases (hotel_id, token, expires_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET token=excluded.token, expires_at=excluded.expires_at
+    WHERE hotel_price_refresh_leases.expires_at<=?
+    RETURNING token
+  `).bind(hotelID, token, leaseUntil, startedAt).first();
+  if (!claimed) throw new Error('HOTEL_PRICE_REFRESH_IN_PROGRESS');
+  try {
+    return await performHotelSourcePriceRefresh(env, hotelID, { ...options, startedAt });
+  } catch (error) {
+    await markHotelPriceRefreshFailure(env, hotelID, String(error?.message || 'HOTEL_PRICE_REFRESH_FAILED')).catch(() => {});
+    throw error;
+  } finally {
+    await env.HOTELS_DB.prepare('DELETE FROM hotel_price_refresh_leases WHERE hotel_id=? AND token=?').bind(hotelID, token).run();
+  }
+}
+
+async function performHotelSourcePriceRefresh(env, hotelID, options = {}) {
   const source = await ensureHotelPriceSourceLock(env, hotelID);
   if (!source?.source_url) throw new Error('HOTEL_PRICE_SOURCE_MISSING');
   const sourceURL = cleanURL(source.source_url);
@@ -4994,28 +4970,33 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   const provider = normalizedHotelPriceProvider(source.provider, sourceURL);
   if (!provider) throw new Error('HOTEL_PRICE_SOURCE_UNSUPPORTED');
 
-  const probeURL = provider === 'Booking' ? bookingPriceProbeURL(sourceURL) : sourceURL;
-  const page = await readExactHotelSourcePage(env, probeURL, provider);
-  const response = page.response;
-  const html = page.html;
-  const finalURL = page.finalURL;
-  let finalParsed;
-  try { finalParsed = new URL(finalURL); } catch (_) { throw new Error('HOTEL_PRICE_SOURCE_BAD_REDIRECT'); }
-  const finalProvider = detectRoomProvider(finalParsed) || provider;
-  if (finalProvider !== provider || !providerRoomHostAllowed(finalParsed, provider)) {
-    throw new Error('HOTEL_PRICE_SOURCE_REDIRECT_MISMATCH');
+  // The importer already stores the canonical URL from this exact source.
+  // Use it for opaque Share links; keep the original source lock for provenance.
+  let priceURL = sourceURL;
+  if (!propertyKey(sourceURL, provider) && source.canonical_url) {
+    try { if (propertyKey(source.canonical_url, provider)) priceURL = source.canonical_url; } catch (_) {}
   }
-
-  const quote = quoteContextFromProbeURL(finalURL, provider);
-  const extracted = extractHotelPriceFromHTML(html, provider, quote.nights);
-  if (!extracted?.nightlyUSD) throw new Error('HOTEL_PRICE_NOT_FOUND_ON_SOURCE');
-  if (provider === 'Booking' && extracted.currency !== 'USD') {
-    throw new Error('HOTEL_PRICE_BOOKING_USD_NOT_CONFIRMED');
-  }
+  const page = await obtainHotelPrice(env, priceURL, provider);
+  const { quote, extracted, finalURL } = page;
 
   const nowDate = new Date();
   const now = nowDate.toISOString();
   const expiresAt = new Date(nowDate.getTime() + HOTEL_PRICE_TTL_MS).toISOString();
+  const previous = await env.HOTELS_DB.prepare('SELECT * FROM hotel_price_cache WHERE hotel_id=? LIMIT 1').bind(hotelID).first();
+  if (hotelPriceMoveNeedsConfirmation(previous?.nightly_price_usd, extracted.nightlyUSD)) {
+    const count = hotelPriceCandidatesMatch(previous?.pending_nightly_price_usd, extracted.nightlyUSD)
+      ? Number(previous.pending_seen_count || 0) + 1 : 1;
+    if (count < 2) {
+      await env.HOTELS_DB.prepare(`
+        UPDATE hotel_price_cache SET status='stale', pending_nightly_price_usd=?, pending_seen_count=1,
+          pending_first_seen_at=?, pending_last_seen_at=?, last_attempt_at=?, next_retry_at=?,
+          error='PRICE_CHANGE_AWAITING_CONFIRMATION', updated_at=? WHERE hotel_id=?
+      `).bind(extracted.nightlyUSD, now, now, now,
+        new Date(nowDate.getTime() + HOTEL_PRICE_RETRY_MS).toISOString(), now, hotelID).run();
+      return readHotelPriceRow(env, hotelID);
+    }
+  }
+
   await env.HOTELS_DB.prepare(`
     INSERT INTO hotel_price_cache (
       hotel_id, source_id, provider, source_url, resolved_url,
@@ -5071,11 +5052,11 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
     quote.adults,
     quote.rooms,
     extracted.confidence,
-    extracted.method,
+    `${page.transport}:${extracted.method}`,
     now,
     expiresAt,
     now,
-    response.status,
+    page.httpStatus,
     now,
     now
   ).run();
@@ -5084,7 +5065,7 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   // Scheduled source refreshes keep the manual value active while refreshing
   // the underlying source snapshot in the background.
   if (options.clearManualOverride === true) {
-    await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+    await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=? AND updated_at<=?').bind(hotelID, options.startedAt).run();
   }
   return readHotelPriceRow(env, hotelID);
 }
@@ -5220,11 +5201,11 @@ async function refreshHotelPriceResponse(env, hotelID) {
 
   try {
     const row = await fetchExactHotelSourcePrice(env, hotelID, { clearManualOverride: true });
-    return json({ ok: true, price: hotelPriceFromRow(row), error: null });
+    return json({ ok: true, price: hotelPriceFromRow(row), error: row?.price_error || null });
   } catch (error) {
     const code = cleanText(error?.message, 220) || 'HOTEL_PRICE_REFRESH_FAILED';
+    if (code === 'HOTEL_PRICE_REFRESH_IN_PROGRESS') return json({ ok: false, error: code }, 409);
     console.warn('HOTEL_PRICE_ADMIN_REFRESH_FAILED', hotelID, code);
-    await markHotelPriceRefreshFailure(env, hotelID, code).catch(() => {});
     const status = code === 'HOTEL_PRICE_SOURCE_MISSING' ? 409
       : code === 'HOTEL_PRICE_NOT_FOUND_ON_SOURCE' || code === 'HOTEL_PRICE_SOURCE_CHALLENGE' ? 422
       : 502;
