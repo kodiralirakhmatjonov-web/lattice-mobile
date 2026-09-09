@@ -1,6 +1,28 @@
 import UIKit
 
 enum ImageOptimizer {
+    /// Ziyarat galleries keep a larger HD envelope than hotel catalog thumbnails.
+    /// The encoder first preserves the original pixel dimensions when they are already <= 2048 px,
+    /// then only trims JPEG entropy enough to keep R2 storage practical.
+    static func ziyaratJPEGData(from data: Data) throws -> Data {
+        guard let source = UIImage(data: data) else { throw APIError.server("IMAGE_DECODE_FAILED") }
+        let normalized = resized(source, maxDimension: 2048)
+        var best: Data?
+        for value in [CGFloat(0.92), 0.90, 0.88, 0.86, 0.84] {
+            guard let encoded = normalized.jpegData(compressionQuality: value) else { continue }
+            best = encoded
+            if encoded.count <= 950_000 { return encoded }
+        }
+        let compact = resized(normalized, maxDimension: 1800)
+        for value in [CGFloat(0.88), 0.86, 0.84, 0.82] {
+            guard let encoded = compact.jpegData(compressionQuality: value) else { continue }
+            best = encoded
+            if encoded.count <= 950_000 { return encoded }
+        }
+        guard let best else { throw APIError.server("IMAGE_ENCODE_FAILED") }
+        return best
+    }
+
     /// Hotel media is normalized before R2 upload so hundreds of gallery photos remain
     /// practical while still looking sharp on modern iPhone screens.
     static func jpegData(

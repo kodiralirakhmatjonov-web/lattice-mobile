@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const [hotelDatabaseID, zoneID] = process.argv.slice(2);
 const accountID = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -229,5 +232,66 @@ const rendered = template
   .replaceAll('__ZONE_ID__', zoneID);
 
 JSON.parse(rendered);
-fs.writeFileSync(new URL('../wrangler.generated.jsonc', import.meta.url), rendered);
+const generatedConfigURL = new URL('../wrangler.generated.jsonc', import.meta.url);
+fs.writeFileSync(generatedConfigURL, rendered);
 console.log('Generated wrangler.generated.jsonc with HOTELS_DB + verified BOOKINGS_DB bindings');
+
+async function seedZiyaratMedia() {
+  // The repository ZIP updater intentionally protects .github/workflows. Keep the
+  // initial bundled Ziyarats media bootstrap here so a normal root-level
+  // iumrah-business-*.zip patch is sufficient: the existing deployment workflow
+  // already runs this renderer after the R2 bucket has been resolved/created.
+  if (!process.env.CI || !process.env.CLOUDFLARE_API_TOKEN || !process.env.CLOUDFLARE_ACCOUNT_ID) {
+    console.log('Skipping Ziyarats R2 seed outside authenticated CI.');
+    return;
+  }
+
+  const workerRoot = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+  const seedRoot = path.join(workerRoot, 'seed', 'ziyarats', 'quba-mosque');
+  if (!fs.existsSync(seedRoot)) {
+    console.log('No bundled Ziyarats seed media found.');
+    return;
+  }
+
+  const allSeedNames = fs.readdirSync(seedRoot)
+    .filter(name => /^quba-[1-5]\.jpg$/i.test(name))
+    .sort();
+  let namesToSeed = allSeedNames;
+
+  // Before migration 0029 is applied the table does not exist, which is the
+  // first-install signal. On later deploys, upload only seed objects that are
+  // still referenced in D1; this avoids resurrecting media an admin deleted.
+  try {
+    const referenced = await d1Query(
+      hotelDatabaseID,
+      `SELECT object_key FROM ziyarat_images
+       WHERE place_id='quba-mosque' AND object_key LIKE 'ziyarats/quba-mosque/quba-%.jpg'
+       ORDER BY position ASC`,
+    );
+    const wanted = new Set(referenced.map(row => path.basename(String(row?.object_key || ''))).filter(Boolean));
+    namesToSeed = allSeedNames.filter(name => wanted.has(name));
+    if (!namesToSeed.length) {
+      console.log('Quba seed rows are not present in D1; preserving the current admin-managed gallery.');
+      return;
+    }
+  } catch {
+    console.log('Ziyarats schema not present yet; seeding first-install Quba media.');
+  }
+
+  const bucket = String(process.env.R2_NAME || 'iumrah-hotels-media').trim();
+  const configPath = fileURLToPath(generatedConfigURL);
+  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
+  for (const name of namesToSeed) {
+    const filePath = path.join(seedRoot, name);
+    const objectKey = `ziyarats/quba-mosque/${name}`;
+    console.log(`Seeding R2 object ${objectKey}`);
+    execFileSync(
+      npx,
+      ['wrangler', 'r2', 'object', 'put', `${bucket}/${objectKey}`, `--file=${filePath}`, '--content-type=image/jpeg', '--remote', `--config=${configPath}`],
+      { cwd: workerRoot, stdio: 'inherit', env: process.env },
+    );
+  }
+}
+
+await seedZiyaratMedia();

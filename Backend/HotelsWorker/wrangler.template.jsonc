@@ -6,6 +6,14 @@
   "workers_dev": true,
   "routes": [
     {
+      "pattern": "iumrah.app/api/admin/ziyarats*",
+      "zone_id": "__ZONE_ID__"
+    },
+    {
+      "pattern": "iumrah.app/api/catalog/ziyarats*",
+      "zone_id": "__ZONE_ID__"
+    },
+    {
       "pattern": "iumrah.app/api/admin/hotels*",
       "zone_id": "__ZONE_ID__"
     },
