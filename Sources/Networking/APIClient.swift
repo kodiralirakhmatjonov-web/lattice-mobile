@@ -187,6 +187,68 @@ actor APIClient {
         try validate(response, data: data)
     }
 
+    func paymentTemplates() async throws -> [BusinessPaymentTemplate] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/payment-templates")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessPaymentTemplatesResponse.self, from: data).templates
+    }
+
+    func createPaymentTemplate(_ template: BusinessPaymentTemplate) async throws -> BusinessPaymentTemplate {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/payment-templates"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BusinessPaymentTemplatePayload(template))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessPaymentTemplateResponse.self, from: data).template
+    }
+
+    func updatePaymentTemplate(_ template: BusinessPaymentTemplate) async throws -> BusinessPaymentTemplate {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/payment-templates/\(template.id)"))
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(BusinessPaymentTemplatePayload(template))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessPaymentTemplateResponse.self, from: data).template
+    }
+
+    func deletePaymentTemplate(id: String) async throws {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/payment-templates/\(id)"))
+        request.httpMethod = "DELETE"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+    }
+
+    func uploadPaymentTemplateQR(templateID: String, data: Data, contentType: String = "image/jpeg") async throws -> BusinessPaymentTemplate {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/payment-templates/\(templateID)/qr"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 75
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        let (body, response) = try await perform(request)
+        try validate(response, data: body)
+        return try decoder.decode(BusinessPaymentTemplateResponse.self, from: body).template
+    }
+
+    func deletePaymentTemplateQR(templateID: String) async throws -> BusinessPaymentTemplate {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/payment-templates/\(templateID)/qr"))
+        request.httpMethod = "DELETE"
+        let (body, response) = try await perform(request)
+        try validate(response, data: body)
+        return try decoder.decode(BusinessPaymentTemplateResponse.self, from: body).template
+    }
+
+    func applyPaymentTemplate(templateID: String, bookingID: String) async throws -> BusinessCheckout {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/payment-template/\(templateID)"))
+        request.httpMethod = "POST"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        struct Envelope: Decodable { let ok: Bool; let checkout: BusinessCheckout }
+        return try decoder.decode(Envelope.self, from: data).checkout
+    }
+
     func bookingDetail(id: String) async throws -> BookingDetailResponse {
         let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)")
         let (data, response) = try await perform(from: url)
@@ -299,8 +361,15 @@ actor APIClient {
 
     func privateMedia(path: String) async throws -> Data {
         let url: URL
-        if let direct = URL(string: path), direct.scheme != nil { url = direct }
-        else { url = AppConfig.apiBaseURL.appending(path: path) }
+        if let direct = URL(string: path), direct.scheme != nil {
+            url = direct
+        } else if let relative = URL(string: path, relativeTo: AppConfig.apiBaseURL)?.absoluteURL {
+            // Preserve query strings such as ?v=<updated_at>. URL.appending(path:) would
+            // treat the question mark as path text and break protected media URLs.
+            url = relative
+        } else {
+            throw APIError.invalidURL
+        }
         let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         return data
@@ -696,67 +765,11 @@ actor APIClient {
         return try decoder.decode(BusinessClientNotificationSendResponse.self, from: data)
     }
 
-    func ziyarats(city: String? = nil) async throws -> [BusinessZiyaratRoute] {
-        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats"), resolvingAgainstBaseURL: false)!
-        if let city, !city.isEmpty { components.queryItems = [URLQueryItem(name: "city", value: city)] }
-        let (data, response) = try await perform(from: components.url!)
-        try validate(response, data: data)
-        return try decoder.decode(BusinessZiyaratCatalogResponse.self, from: data).routes
-    }
-
-    func createZiyarat(_ payload: BusinessZiyaratPlacePayload) async throws -> BusinessZiyaratPlace {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(payload)
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(BusinessZiyaratPlaceResponse.self, from: data).place
-    }
-
-    func updateZiyarat(id: String, payload: BusinessZiyaratPlacePayload) async throws -> BusinessZiyaratPlace {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(id)"))
-        request.httpMethod = "PUT"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(payload)
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(BusinessZiyaratPlaceResponse.self, from: data).place
-    }
-
-    func deleteZiyarat(id: String) async throws {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(id)"))
-        request.httpMethod = "DELETE"
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        _ = try? decoder.decode(BusinessZiyaratDeleteResponse.self, from: data)
-    }
-
-    func uploadZiyaratImage(placeID: String, imageData: Data, position: Int) async throws {
-        let optimized = try ImageOptimizer.ziyaratJPEGData(from: imageData)
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(placeID)/images"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 90
-        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
-        request.setValue(String(position), forHTTPHeaderField: "X-Iumrah-Position")
-        request.httpBody = optimized
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        _ = try decoder.decode(BusinessZiyaratImageUploadResponse.self, from: data)
-    }
-
-    func deleteZiyaratImage(placeID: String, imageID: String) async throws {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/ziyarats/places/\(placeID)/images/\(imageID)"))
-        request.httpMethod = "DELETE"
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-    }
-
     func perform(_ original: URLRequest) async throws -> (Data, URLResponse) {
         var request = original
         if let url = request.url,
            url.host?.lowercased() == AppConfig.apiBaseURL.host?.lowercased(),
-           url.path.hasPrefix("/api/admin/"),
+           url.path.hasPrefix("/api/admin/hotels"),
            let token = BusinessSessionVault.sessionToken {
             request.setValue(token, forHTTPHeaderField: "X-Iumrah-Business-Session")
         }
@@ -795,6 +808,10 @@ enum APIError: LocalizedError {
         case .server(let value):
             switch value {
             case "PAYMENT_INSTRUCTIONS_REQUIRED": return "Сначала сохраните хотя бы один способ оплаты: Visa, PayMe или Humo."
+            case "PAYMENT_TEMPLATE_NOT_FOUND": return "Шаблон реквизитов больше не существует. Обновите список Payments."
+            case "PAYMENT_TEMPLATE_QR_NOT_FOUND": return "QR шаблона не найден в хранилище. Откройте Payments и загрузите QR заново."
+            case "PAYMENT_TEMPLATE_NAME_REQUIRED": return "Введите название шаблона реквизитов."
+            case "PAYMENT_INSTRUCTIONS_LOCKED": return "Реквизиты этой поездки уже нельзя изменять на текущем этапе."
             case "IUMRAH_ACCOUNT_REQUIRED": return "Паломник ещё не активировал свой iumrah ID и пароль."
             case "TRAVELER_DATA_INCOMPLETE": return "Не все анкеты паломников заполнены полностью и с паспортом."
             case "PAYMENT_RECEIPT_REQUIRED": return "Паломник ещё не прикрепил чек оплаты."

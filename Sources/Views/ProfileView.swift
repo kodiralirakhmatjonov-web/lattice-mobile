@@ -134,12 +134,9 @@ struct TeamMemberForm: View {
     @ViewBuilder private var avatar: some View {
         if let pendingPhotoData, let image = UIImage(data: pendingPhotoData) {
             Image(uiImage: image).resizable().scaledToFill()
-        } else if let url = teamPhotoURL(member.photoURL) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image): image.resizable().scaledToFill()
-                default: avatarPlaceholder
-                }
+        } else if let path = member.photoURL, !path.isEmpty {
+            BusinessPrivateImage(path: path) {
+                avatarPlaceholder
             }
         } else {
             avatarPlaceholder
@@ -151,12 +148,6 @@ struct TeamMemberForm: View {
             Circle().fill(BusinessDesign.secondarySurface)
             Image(systemName: "person.crop.circle.fill").font(.system(size: 38)).foregroundStyle(.secondary)
         }
-    }
-
-    private func teamPhotoURL(_ raw: String?) -> URL? {
-        guard let raw, !raw.isEmpty else { return nil }
-        if let absolute = URL(string: raw), absolute.scheme != nil { return absolute }
-        return URL(string: raw, relativeTo: AppConfig.apiBaseURL)?.absoluteURL
     }
 
     private var contactsCard: some View {

@@ -21,6 +21,8 @@ struct BookingCheckoutAdminCard: View {
     @State private var documentKind = "visa"
     @State private var imagePreview: BusinessImagePreview?
     @State private var previewLoadingID: String?
+    @State private var paymentTemplates: [BusinessPaymentTemplate] = []
+    @State private var loadingPaymentTemplates = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -108,6 +110,7 @@ struct BookingCheckoutAdminCard: View {
         .padding(18)
         .businessCard(radius: 28)
         .onAppear { loadDraft() }
+        .task { await loadPaymentTemplates() }
         .onChange(of: checkout?.payment) { _, _ in loadDraft() }
         .onChange(of: paymePhoto) { _, item in
             guard let item else { return }
@@ -250,6 +253,45 @@ struct BookingCheckoutAdminCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(12)
                     .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            }
+
+            if !paymentTemplates.isEmpty {
+                Menu {
+                    ForEach(paymentTemplates) { template in
+                        Button {
+                            Task { await applyPaymentTemplate(template) }
+                        } label: {
+                            Label(template.name, systemImage: template.hasPaymeQR ? "qrcode" : "creditcard")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "rectangle.stack.fill")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Вставить сохранённые реквизиты")
+                                .font(.subheadline.bold())
+                            Text("Payments · \(paymentTemplates.count) шаблонов")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 14)
+                    .frame(height: 56)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            } else if loadingPaymentTemplates {
+                HStack(spacing: 9) {
+                    ProgressView().controlSize(.small)
+                    Text("Загружаем Payments…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             paymentField(title: "Visa · номер карты", text: $visaCard, icon: "creditcard")
@@ -396,6 +438,33 @@ struct BookingCheckoutAdminCard: View {
         visaCard = p.visaCardNumber; visaHolder = p.visaHolder
         humoCard = p.humoCardNumber; humoHolder = p.humoHolder
         instructions = p.instructions
+    }
+
+    @MainActor private func loadPaymentTemplates() async {
+        loadingPaymentTemplates = true
+        defer { loadingPaymentTemplates = false }
+        do {
+            paymentTemplates = try await APIClient.shared.paymentTemplates()
+        } catch {
+            // Templates are an accelerator, not a blocker for manual booking editing.
+        }
+    }
+
+    @MainActor private func applyPaymentTemplate(_ template: BusinessPaymentTemplate) async {
+        saving = true
+        error = nil
+        do {
+            let updated = try await APIClient.shared.applyPaymentTemplate(templateID: template.id, bookingID: bookingID)
+            visaCard = updated.payment.visaCardNumber
+            visaHolder = updated.payment.visaHolder
+            humoCard = updated.payment.humoCardNumber
+            humoHolder = updated.payment.humoHolder
+            instructions = updated.payment.instructions
+            onReload()
+        } catch {
+            self.error = error.localizedDescription
+        }
+        saving = false
     }
 
     @MainActor private func savePayment() async {

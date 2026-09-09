@@ -1,5 +1,4 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
-import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
 const JSON_HEADERS = {
@@ -21,16 +20,6 @@ export default {
           status: 204,
           headers: corsHeaders(request)
         });
-      }
-
-      if (url.pathname.startsWith('/api/admin/ziyarats')) {
-        const staff = await requireStaff(request, env);
-        if (!staff.ok) return staff.response;
-        return withCors(await handleZiyaratAdmin(request, env, url, staff.user), request);
-      }
-
-      if (url.pathname.startsWith('/api/catalog/ziyarats')) {
-        return withCors(await handleZiyaratCatalog(request, env, url), request);
       }
 
       if (url.pathname.startsWith('/api/admin/hotels')) {
@@ -924,6 +913,23 @@ async function handleBusinessOperations(request, env, url, parts, user, business
     return methodNotAllowed();
   }
 
+  if (parts[0] === 'payment-templates') {
+    if (parts.length === 1 && request.method === 'GET') return listPaymentTemplates(env);
+    if (parts.length === 1 && request.method === 'POST') return createPaymentTemplate(request, env, user);
+    const templateID = safeID(parts[1]);
+    if (!templateID) return json({ ok: false, error: 'INVALID_PAYMENT_TEMPLATE_ID' }, 400);
+    if (parts.length === 2 && request.method === 'GET') return paymentTemplateDetail(env, templateID);
+    if (parts.length === 2 && request.method === 'PUT') return updatePaymentTemplate(request, env, templateID, user);
+    if (parts.length === 2 && request.method === 'DELETE') return deletePaymentTemplate(env, templateID);
+    if (parts.length === 3 && parts[2] === 'qr') {
+      if (request.method === 'GET') return servePaymentTemplateQR(env, templateID);
+      if (request.method === 'POST') return uploadPaymentTemplateQR(request, env, templateID, user);
+      if (request.method === 'DELETE') return deletePaymentTemplateQR(env, templateID, user);
+      return methodNotAllowed();
+    }
+    return methodNotAllowed();
+  }
+
   if (parts.length === 1 && parts[0] === 'ignav-usage') {
     if (request.method !== 'GET') return methodNotAllowed();
     return adminIgnavUsage(env);
@@ -995,6 +1001,7 @@ async function handleBusinessOperations(request, env, url, parts, user, business
       return syncBookingEsim(request, env, bookingID, parts[3]);
     }
     if (parts.length === 3 && parts[2] === 'payment' && request.method === 'PUT') return saveBookingPaymentInstructions(request, env, bookingID, user);
+    if (parts.length === 4 && parts[2] === 'payment-template' && request.method === 'POST') return applyPaymentTemplateToBooking(env, bookingID, parts[3], user);
     if (parts.length === 3 && parts[2] === 'payment-qr' && request.method === 'POST') return uploadBookingPaymeQR(request, env, bookingID, user);
     if (parts.length === 4 && parts[2] === 'receipt' && parts[3] === 'media' && request.method === 'GET') return serveAdminPaymentReceipt(env, bookingID, url.searchParams.get('id'));
     if (parts.length === 5 && parts[2] === 'travelers' && parts[4] === 'passport' && request.method === 'GET') return serveAdminTravelerPassport(env, bookingID, Number(parts[3]));
@@ -1632,6 +1639,174 @@ async function deleteTeamMember(env, memberID) {
   await env.HOTELS_DB.prepare('DELETE FROM team_members WHERE id=?').bind(memberID).run();
   if (row.photo_object_key) await env.HOTELS_MEDIA.delete(row.photo_object_key).catch(() => {});
   return json({ ok: true });
+}
+
+function mapPaymentTemplate(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name || 'Реквизиты',
+    visaCardNumber: row.visa_card_number || '',
+    visaHolder: row.visa_holder || '',
+    hasPaymeQR: !!row.payme_qr_object_key,
+    paymeQRURL: row.payme_qr_object_key
+      ? `/api/admin/hotels/operations/payment-templates/${encodeURIComponent(row.id)}/qr?v=${encodeURIComponent(row.updated_at || '')}`
+      : null,
+    humoCardNumber: row.humo_card_number || '',
+    humoHolder: row.humo_holder || '',
+    instructions: row.instructions || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || ''
+  };
+}
+
+function paymentTemplatePayload(payload, defaults = {}) {
+  return {
+    name: safeHumanText(payload?.name ?? defaults.name ?? '', 140) || '',
+    visaCardNumber: cleanText(payload?.visaCardNumber ?? defaults.visaCardNumber ?? '', 80) || '',
+    visaHolder: safeHumanText(payload?.visaHolder ?? defaults.visaHolder ?? '', 160) || '',
+    humoCardNumber: cleanText(payload?.humoCardNumber ?? defaults.humoCardNumber ?? '', 80) || '',
+    humoHolder: safeHumanText(payload?.humoHolder ?? defaults.humoHolder ?? '', 160) || '',
+    instructions: safeHumanText(payload?.instructions ?? defaults.instructions ?? '', 1500) || ''
+  };
+}
+
+async function listPaymentTemplates(env) {
+  const result = await env.HOTELS_DB.prepare('SELECT * FROM payment_templates ORDER BY sort_order ASC, updated_at DESC, name COLLATE NOCASE').all();
+  return json({ ok: true, templates: (result.results || []).map(mapPaymentTemplate) });
+}
+
+async function paymentTemplateDetail(env, templateID) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!row) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NOT_FOUND' }, 404);
+  return json({ ok: true, template: mapPaymentTemplate(row) });
+}
+
+async function createPaymentTemplate(request, env, user) {
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const value = paymentTemplatePayload(payload);
+  if (!value.name) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NAME_REQUIRED' }, 400);
+  const id = `paytpl-${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  const max = await env.HOTELS_DB.prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM payment_templates').first();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO payment_templates(id,name,visa_card_number,visa_holder,humo_card_number,humo_holder,instructions,sort_order,created_by,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(id,value.name,value.visaCardNumber,value.visaHolder,value.humoCardNumber,value.humoHolder,value.instructions,Number(max?.max_order || 0)+1,cleanText(user?.login,180),now,now).run();
+  return paymentTemplateDetail(env, id);
+}
+
+async function updatePaymentTemplate(request, env, templateID, user) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!row) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NOT_FOUND' }, 404);
+  const payload = await request.json().catch(() => null);
+  if (!payload) return json({ ok: false, error: 'INVALID_JSON' }, 400);
+  const value = paymentTemplatePayload(payload, mapPaymentTemplate(row));
+  if (!value.name) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NAME_REQUIRED' }, 400);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`UPDATE payment_templates SET name=?,visa_card_number=?,visa_holder=?,humo_card_number=?,humo_holder=?,instructions=?,updated_at=? WHERE id=?`)
+    .bind(value.name,value.visaCardNumber,value.visaHolder,value.humoCardNumber,value.humoHolder,value.instructions,now,templateID).run();
+  return paymentTemplateDetail(env, templateID);
+}
+
+async function servePaymentTemplateQR(env, templateID) {
+  const row = await env.HOTELS_DB.prepare('SELECT payme_qr_object_key,payme_qr_content_type FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!row?.payme_qr_object_key) return json({ ok: false, error: 'PAYMENT_TEMPLATE_QR_NOT_FOUND' }, 404);
+  const object = await env.HOTELS_MEDIA.get(row.payme_qr_object_key);
+  if (!object) return json({ ok: false, error: 'PAYMENT_TEMPLATE_QR_NOT_FOUND' }, 404);
+  return new Response(object.body, { headers: { 'content-type': row.payme_qr_content_type || 'image/png', 'cache-control': 'private, max-age=3600' } });
+}
+
+async function uploadPaymentTemplateQR(request, env, templateID, user) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!row) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NOT_FOUND' }, 404);
+  const uploaded = await privateImageUpload(request, env, `payment-templates/${templateID}`);
+  if (!uploaded.ok) return uploaded.response;
+  const previousKey = row.payme_qr_object_key || null;
+  const now = new Date().toISOString();
+  try {
+    await env.HOTELS_DB.prepare('UPDATE payment_templates SET payme_qr_object_key=?,payme_qr_content_type=?,updated_at=? WHERE id=?')
+      .bind(uploaded.key,uploaded.ct,now,templateID).run();
+  } catch (error) {
+    await env.HOTELS_MEDIA.delete(uploaded.key).catch(() => {});
+    throw error;
+  }
+  if (previousKey && previousKey !== uploaded.key) await env.HOTELS_MEDIA.delete(previousKey).catch(() => {});
+  return paymentTemplateDetail(env, templateID);
+}
+
+async function deletePaymentTemplateQR(env, templateID, user) {
+  const row = await env.HOTELS_DB.prepare('SELECT * FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!row) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NOT_FOUND' }, 404);
+  const previousKey = row.payme_qr_object_key || null;
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare('UPDATE payment_templates SET payme_qr_object_key=NULL,payme_qr_content_type=NULL,updated_at=? WHERE id=?').bind(now,templateID).run();
+  if (previousKey) await env.HOTELS_MEDIA.delete(previousKey).catch(() => {});
+  return paymentTemplateDetail(env, templateID);
+}
+
+async function deletePaymentTemplate(env, templateID) {
+  const row = await env.HOTELS_DB.prepare('SELECT payme_qr_object_key FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!row) return json({ ok: true });
+  await env.HOTELS_DB.prepare('DELETE FROM payment_templates WHERE id=?').bind(templateID).run();
+  if (row.payme_qr_object_key) await env.HOTELS_MEDIA.delete(row.payme_qr_object_key).catch(() => {});
+  return json({ ok: true });
+}
+
+function privateImageExtension(contentType) {
+  const value = String(contentType || '').toLowerCase();
+  if (value.includes('png')) return 'png';
+  if (value.includes('heic')) return 'heic';
+  return 'jpg';
+}
+
+async function applyPaymentTemplateToBooking(env, bookingID, templateID, user) {
+  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  if (!trip || !['availability_check','payment_pending'].includes(normalizedTripStatus(trip.status))) {
+    return json({ ok: false, error: 'PAYMENT_INSTRUCTIONS_LOCKED' }, 409);
+  }
+  const template = await env.HOTELS_DB.prepare('SELECT * FROM payment_templates WHERE id=? LIMIT 1').bind(templateID).first();
+  if (!template) return json({ ok: false, error: 'PAYMENT_TEMPLATE_NOT_FOUND' }, 404);
+
+  const current = await env.HOTELS_DB.prepare('SELECT payme_qr_object_key FROM booking_payment_instructions WHERE booking_id=? LIMIT 1').bind(bookingID).first();
+  let newQRKey = null;
+  let newQRContentType = null;
+  if (template.payme_qr_object_key) {
+    const sourceObject = await env.HOTELS_MEDIA.get(template.payme_qr_object_key);
+    if (!sourceObject) return json({ ok: false, error: 'PAYMENT_TEMPLATE_QR_NOT_FOUND' }, 409);
+    newQRContentType = template.payme_qr_content_type || 'image/png';
+    newQRKey = `private/payment-qr/${bookingID}/${crypto.randomUUID()}.${privateImageExtension(newQRContentType)}`;
+    await env.HOTELS_MEDIA.put(newQRKey, sourceObject.body, { httpMetadata: { contentType: newQRContentType } });
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO booking_payment_instructions(booking_id,visa_card_number,visa_holder,payme_qr_object_key,payme_qr_content_type,humo_card_number,humo_holder,instructions,updated_by,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(booking_id) DO UPDATE SET
+        visa_card_number=excluded.visa_card_number,
+        visa_holder=excluded.visa_holder,
+        payme_qr_object_key=excluded.payme_qr_object_key,
+        payme_qr_content_type=excluded.payme_qr_content_type,
+        humo_card_number=excluded.humo_card_number,
+        humo_holder=excluded.humo_holder,
+        instructions=excluded.instructions,
+        updated_by=excluded.updated_by,
+        updated_at=excluded.updated_at
+    `).bind(
+      bookingID,template.visa_card_number || '',template.visa_holder || '',newQRKey,newQRContentType,
+      template.humo_card_number || '',template.humo_holder || '',template.instructions || '',cleanText(user?.login,180),now
+    ).run();
+  } catch (error) {
+    if (newQRKey) await env.HOTELS_MEDIA.delete(newQRKey).catch(() => {});
+    throw error;
+  }
+  if (current?.payme_qr_object_key && current.payme_qr_object_key !== newQRKey) {
+    await env.HOTELS_MEDIA.delete(current.payme_qr_object_key).catch(() => {});
+  }
+  return json({ ok: true, checkout: await adminCheckoutDetail(env, bookingID, trip) });
 }
 
 async function publicTeam(env, parts) {
@@ -6253,7 +6428,9 @@ async function createImportJob(request, env, user) {
     return json({ ok: false, error: 'HOTEL_PRICE_REQUIRED', detail: 'Published hotel requires one confirmed price from the exact imported source link.' }, 422);
   }
   const trustedImageCount = images.filter(image => image.category !== 'other').length;
-  const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= 4 && plausibleRooms.length > 0 && importedPriceAvailable;
+  const isBookingImport = Array.isArray(draft?.sources) && draft.sources.some(source => normalizedHotelPriceProvider(source?.provider, source?.sourceURL) === 'Booking');
+  const requiredImageCount = isBookingImport ? 1 : 4;
+  const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= requiredImageCount && plausibleRooms.length > 0 && importedPriceAvailable;
   const safeDraft = { ...draft, id: repairDuplicate?.id || draft?.id, status: 'draft', lifecycleState: 'importing' };
   const persisted = await persistHotelDraft(safeDraft, env, user, { checkDuplicate: false });
   if (!persisted.ok) return persisted.response;

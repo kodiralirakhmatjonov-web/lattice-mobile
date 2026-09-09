@@ -8,6 +8,8 @@ struct HotelReviewView: View {
     @State private var importJob: HotelImportJob?
     @State private var importIdempotencyKey = UUID().uuidString
     @State private var showPossibleDuplicateAlert = false
+    @State private var bookingManualPriceText = ""
+    @State private var bookingManualPriceError: String?
 
     private let columns = [
         GridItem(.flexible(), spacing: 8),
@@ -154,6 +156,8 @@ struct HotelReviewView: View {
     }
 
     @ViewBuilder private func priceCard(_ draft: HotelDraft) -> some View {
+        let bookingSource = draft.sources.contains { $0.provider.lowercased() == "booking" }
+
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 ZStack {
@@ -169,14 +173,20 @@ struct HotelReviewView: View {
                     if let price = draft.importedPrice {
                         Text("\(price.currency) \(price.amount.formatted(.number.precision(.fractionLength(0...2)))) · 1 номер / \(price.nights) ночь")
                             .font(.subheadline.weight(.semibold))
-                        if let room = price.roomName, !room.isEmpty {
+                        if price.method == "booking-admin-manual-usd" {
+                            Text("Ручная Booking цена · будет сохранена в D1")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else if let room = price.roomName, !room.isEmpty {
                             Text(room)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
                         }
                     } else {
-                        Text("Цена не получена — отель нельзя публиковать и использовать в генераторе.")
+                        Text(bookingSource
+                             ? "Booking не вернул цену. Для Booking можно указать рабочую цену вручную в USD и опубликовать отель."
+                             : "Цена не получена — отель нельзя публиковать и использовать в генераторе.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -184,6 +194,44 @@ struct HotelReviewView: View {
                 }
                 Spacer(minLength: 0)
             }
+
+            if bookingSource && draft.importedPrice == nil {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("Ручная цена Booking · USD за 1 ночь")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Text("$")
+                            .font(.title3.bold())
+                        TextField("Например 72", text: $bookingManualPriceText)
+                            .keyboardType(.decimalPad)
+                            .font(.title3.weight(.semibold))
+                            .textFieldStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 52)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    if let bookingManualPriceError {
+                        Text(bookingManualPriceError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button { applyBookingManualPrice() } label: {
+                        Label("Использовать эту цену и разрешить публикацию", systemImage: "checkmark.circle.fill")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(BusinessDesign.onPrimaryControl)
+                    .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .padding(12)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+
             if let price = draft.importedPrice, let total = price.totalAmount, total > price.amount {
                 Text("Итого у источника: \(price.totalCurrency ?? price.currency) \(total.formatted(.number.precision(.fractionLength(0...2))))")
                     .font(.caption)
@@ -192,6 +240,19 @@ struct HotelReviewView: View {
         }
         .padding(16)
         .businessCard(radius: 26)
+    }
+
+    private func applyBookingManualPrice() {
+        let normalized = bookingManualPriceText
+            .replacingOccurrences(of: ",", with: ".")
+            .replacingOccurrences(of: "$", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(normalized), value.isFinite, value >= 15, value <= 5000 else {
+            bookingManualPriceError = "Введите цену за одну ночь от $15 до $5000."
+            return
+        }
+        bookingManualPriceError = nil
+        coordinator.setManualBookingImportPriceUSD(value)
     }
 
     @ViewBuilder private func hotelFacts(_ draft: HotelDraft) -> some View {
@@ -659,7 +720,9 @@ struct HotelReviewView: View {
     }
 
     @ViewBuilder private func publishBlock(_ draft: HotelDraft) -> some View {
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty && draft.importedPrice != nil
+        let isBooking = draft.sources.contains { $0.provider.lowercased() == "booking" }
+        let requiredImageCount = isBooking ? 1 : 4
+        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= requiredImageCount && !draft.rooms.isEmpty && draft.importedPrice != nil
 
         VStack(spacing: 12) {
             if let duplicate = coordinator.duplicateCandidate, duplicate.isPossible {
@@ -713,7 +776,9 @@ struct HotelReviewView: View {
             }
 
             if !canPublish {
-                Text("Карточка будет сохранена как черновик, пока у неё нет минимум 4 фотографий и распознанных типов номеров.")
+                Text(draft.sources.contains { $0.provider.lowercased() == "booking" } && draft.importedPrice == nil
+                     ? "Для Booking можно ввести USD цену вручную выше. Для публикации достаточно хотя бы одной фотографии и распознанного типа номера."
+                     : "Карточка будет сохранена как черновик, пока у неё нет цены, минимум 4 фотографий и распознанных типов номеров.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -776,7 +841,9 @@ struct HotelReviewView: View {
     }
 
     private func submit(_ draft: HotelDraft, allowPossibleDuplicate: Bool) {
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= 4 && !draft.rooms.isEmpty && draft.importedPrice != nil
+        let isBooking = draft.sources.contains { $0.provider.lowercased() == "booking" }
+        let requiredImageCount = isBooking ? 1 : 4
+        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= requiredImageCount && !draft.rooms.isEmpty && draft.importedPrice != nil
         publishing = true
         publishStatus = draft.selectedImages.isEmpty ? "Сохраняем серверный черновик…" : "Передаём отель в защищённую фоновую очередь…"
         Task { @MainActor in

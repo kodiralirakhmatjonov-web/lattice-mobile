@@ -61,14 +61,12 @@ struct EmployeesView: View {
     }
 
     @ViewBuilder private func employeeAvatar(_ member: BusinessTeamMember) -> some View {
-        if let url = teamPhotoURL(member.photoURL) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image): image.resizable().scaledToFill()
-                default: avatarPlaceholder(member)
-                }
+        if let path = member.photoURL, !path.isEmpty {
+            BusinessPrivateImage(path: path) {
+                avatarPlaceholder(member)
             }
             .frame(width: 50, height: 50)
+            .clipped()
             .clipShape(Circle())
         } else {
             avatarPlaceholder(member).frame(width: 50, height: 50).clipShape(Circle())
@@ -79,12 +77,6 @@ struct EmployeesView: View {
         Circle()
             .fill(BusinessDesign.secondarySurface)
             .overlay(Text(initials(member)).font(.headline))
-    }
-
-    private func teamPhotoURL(_ raw: String?) -> URL? {
-        guard let raw, !raw.isEmpty else { return nil }
-        if let absolute = URL(string: raw), absolute.scheme != nil { return absolute }
-        return URL(string: raw, relativeTo: AppConfig.apiBaseURL)?.absoluteURL
     }
 
     @MainActor private func load() async {

@@ -116,6 +116,49 @@ struct BusinessTeamMemberPayload: Encodable {
 struct BusinessTeamMemberResponse: Codable { let ok: Bool; let member: BusinessTeamMember }
 struct BusinessTeamResponse: Codable { let ok: Bool; let members: [BusinessTeamMember] }
 
+struct BusinessPaymentTemplate: Codable, Identifiable, Hashable {
+    let id: String
+    var name: String
+    var visaCardNumber: String
+    var visaHolder: String
+    var hasPaymeQR: Bool
+    var paymeQRURL: String?
+    var humoCardNumber: String
+    var humoHolder: String
+    var instructions: String
+    var createdAt: String
+    var updatedAt: String
+
+    static var empty: BusinessPaymentTemplate {
+        BusinessPaymentTemplate(
+            id: "new", name: "", visaCardNumber: "", visaHolder: "",
+            hasPaymeQR: false, paymeQRURL: nil, humoCardNumber: "", humoHolder: "",
+            instructions: "", createdAt: "", updatedAt: ""
+        )
+    }
+}
+
+struct BusinessPaymentTemplatePayload: Encodable {
+    let name: String
+    let visaCardNumber: String
+    let visaHolder: String
+    let humoCardNumber: String
+    let humoHolder: String
+    let instructions: String
+
+    init(_ template: BusinessPaymentTemplate) {
+        name = template.name
+        visaCardNumber = template.visaCardNumber
+        visaHolder = template.visaHolder
+        humoCardNumber = template.humoCardNumber
+        humoHolder = template.humoHolder
+        instructions = template.instructions
+    }
+}
+
+struct BusinessPaymentTemplatesResponse: Codable { let ok: Bool; let templates: [BusinessPaymentTemplate] }
+struct BusinessPaymentTemplateResponse: Codable { let ok: Bool; let template: BusinessPaymentTemplate }
+
 struct BookingOperation: Codable, Hashable {
     let tripID: String
     let bookingID: String

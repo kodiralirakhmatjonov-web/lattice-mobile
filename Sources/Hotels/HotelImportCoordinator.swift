@@ -218,6 +218,30 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         draft = value
     }
 
+    func setManualBookingImportPriceUSD(_ amount: Double) {
+        guard amount.isFinite, amount > 0, var value = draft,
+              let index = value.sources.firstIndex(where: { $0.provider.lowercased() == "booking" }) else { return }
+
+        value.sources[index].price = ProviderPriceSnapshot(
+            amount: amount,
+            currency: "USD",
+            totalAmount: amount,
+            totalCurrency: "USD",
+            priceBasis: "nightly",
+            checkIn: nil,
+            checkOut: nil,
+            nights: 1,
+            adults: 2,
+            rooms: 1,
+            roomName: nil,
+            method: "booking-admin-manual-usd",
+            confidence: 1
+        )
+        value.dataQuality["price"] = "manual-admin-usd"
+        draft = value
+        status = "Booking-карточка готова. Ручная USD цена будет сохранена в D1 и использоваться генератором."
+    }
+
     func deselectAllImages() {
         guard var value = draft else { return }
         for index in value.images.indices {
