@@ -314,23 +314,41 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         if provider == .booking { await captureBookingEmbeddedMedia() }
 
         status = "Открываем полную галерею именно этого отеля…"
+        if provider == .booking {
+            // Start a clean, property-gallery-only network/media window. Booking virtualizes
+            // its gallery and often keeps only 1–3 <img> nodes mounted at a time; harvesting
+            // the DOM once therefore produced the exact two-photo regression seen in TestFlight.
+            _ = try? await webView.evaluateJavaScript("window.__iumrahBookingGalleryMode = true; window.__iumrahJSONResponses = [];")
+        }
         let openedGallery = ((try? await webView.evaluateJavaScript(Self.openGalleryScript(provider: provider))) as? Bool) == true
         if openedGallery {
-            try? await Task.sleep(nanoseconds: 650_000_000)
+            try? await Task.sleep(nanoseconds: 700_000_000)
             await captureVisibleMedia(provider: provider, sourceURL: currentURL)
-            if provider == .booking { await captureBookingEmbeddedMedia() }
+            if provider == .booking {
+                await captureBookingEmbeddedMedia()
+                await captureBookingGalleryCarousel(sourceURL: currentURL)
+            }
             let galleryFractions: [Double] = [0.0, 0.08, 0.16, 0.24, 0.32, 0.40, 0.48, 0.56, 0.64, 0.72, 0.80, 0.88, 0.94, 1.0]
             for (index, fraction) in galleryFractions.enumerated() {
                 _ = try? await webView.evaluateJavaScript(Self.scrollGalleryScript(fraction: fraction))
-                try? await Task.sleep(nanoseconds: 130_000_000)
+                try? await Task.sleep(nanoseconds: 150_000_000)
                 await captureVisibleMedia(provider: provider, sourceURL: currentURL)
                 if provider == .booking { await captureBookingEmbeddedMedia() }
                 progress = 0.42 + (Double(index + 1) / Double(galleryFractions.count)) * 0.24
             }
             _ = try? await webView.evaluateJavaScript(Self.closeGalleryScript())
+            if provider == .booking {
+                await captureBookingEmbeddedMedia()
+                _ = try? await webView.evaluateJavaScript("window.__iumrahBookingGalleryMode = false;")
+            }
             try? await Task.sleep(nanoseconds: 350_000_000)
             _ = try? await webView.evaluateJavaScript("window.scrollTo(0, document.documentElement.scrollHeight * 0.72);")
             try? await Task.sleep(nanoseconds: 220_000_000)
+        } else if provider == .booking {
+            // Even if Booking changes the gallery button again, retain property-owned images
+            // discovered from the page/network state and never leave gallery mode enabled.
+            await captureBookingEmbeddedMedia()
+            _ = try? await webView.evaluateJavaScript("window.__iumrahBookingGalleryMode = false;")
         }
 
         status = "Открываем список типов номеров…"
@@ -464,10 +482,33 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         _ = try? await webView.evaluateJavaScript(Self.captureBookingEmbeddedMediaScript())
     }
 
+    private func captureBookingGalleryCarousel(sourceURL: URL) async {
+        var lastCount = ((try? await webView.evaluateJavaScript("Object.keys(window.__iumrahHotelMedia || {}).length")) as? Int) ?? 0
+        var stagnantSteps = 0
+
+        // Booking's desktop gallery is virtualized: only the active/adjacent images may exist
+        // in the DOM. Advance the carousel and capture after each step so every real hotel
+        // photo that Booking exposes can enter the existing deduplicated media store.
+        for _ in 0..<110 {
+            guard ((try? await webView.evaluateJavaScript(Self.advanceBookingGalleryScript())) as? Bool) == true else { break }
+            try? await Task.sleep(nanoseconds: 115_000_000)
+            await captureVisibleMedia(provider: .booking, sourceURL: sourceURL)
+            await captureBookingEmbeddedMedia()
+
+            let count = ((try? await webView.evaluateJavaScript("Object.keys(window.__iumrahHotelMedia || {}).length")) as? Int) ?? lastCount
+            if count > lastCount {
+                lastCount = count
+                stagnantSteps = 0
+            } else {
+                stagnantSteps += 1
+                if stagnantSteps >= 10 { break }
+            }
+        }
+    }
+
     private func recoverBookingPriceInBrowser(propertyURL: URL) async -> ProviderPriceSnapshot? {
         guard Provider.booking.isLikelyHotelDetailURL(propertyURL) else { return nil }
 
-        let quoteURL = Self.bookingOperationalURL(propertyURL)
         let config = WKWebViewConfiguration()
         let bookingDataStore = WKWebsiteDataStore.default()
         config.websiteDataStore = bookingDataStore
@@ -483,16 +524,20 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
         await Self.primeBookingUSDCurrency(in: bookingDataStore)
 
-        let priceWebView = WKWebView(frame: .zero, configuration: config)
-        priceWebView.customUserAgent = Self.userAgent(for: .booking)
+        // A zero-sized WKWebView was a real bug here. The old price parser intentionally
+        // rejected zero-layout elements, so Booking could render a perfectly valid USD rate
+        // and we would still discard it. Give the isolated probe a real desktop viewport.
+        let priceWebView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1366, height: 900), configuration: config)
+        priceWebView.customUserAgent = Self.bookingDesktopSafariUserAgent
         defer { priceWebView.stopLoading() }
 
-        // The user's normal Booking session can be pinned to UZS by Booking's cur_curr
-        // cookie. selected_currency=USD alone does not reliably override that preference.
-        // Keep the existing authenticated/WAF session, but reset only Booking currency
-        // cookies and, if needed, run Booking's own currency switch once before retrying.
-        for attempt in 0..<2 {
-            if attempt == 1 {
+        let quoteURLs = Self.bookingOperationalURLs(propertyURL)
+        for (quoteIndex, quoteURL) in quoteURLs.enumerated() {
+            // Re-prime before every quote window. Booking can rewrite cur_curr after a hotel
+            // navigation even when selected_currency=USD remains in the URL.
+            await Self.primeBookingUSDCurrency(in: bookingDataStore)
+
+            if quoteIndex == 1 {
                 var switchRequest = URLRequest(url: Self.bookingUSDCurrencyBootstrapURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
                 switchRequest.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
                 switchRequest.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
@@ -502,40 +547,73 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 await Self.primeBookingUSDCurrency(in: bookingDataStore)
             }
 
-            var request = URLRequest(url: quoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+            var request = URLRequest(url: quoteURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35)
             request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
             request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
             request.setValue(Self.bookingUSDCookieHeader, forHTTPHeaderField: "Cookie")
             priceWebView.load(request)
 
-            guard await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 20),
+            guard await waitForRoomProbeLoad(priceWebView, provider: .booking, timeoutSeconds: 22),
                   !(await detectVerification(in: priceWebView)) else {
                 continue
             }
 
-            // Booking often mounts availability/prices after the initial document finished.
+            // Put the actual availability table in the viewport. Booking may server-render the
+            // room rate before its SPA finishes, and this is much more deterministic than
+            // random page fractions.
             _ = try? await priceWebView.evaluateJavaScript(Self.revealRoomsScript())
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            for fraction in [0.18, 0.42, 0.68, 0.86] {
-                _ = try? await priceWebView.evaluateJavaScript("window.scrollTo(0, Math.max(0, (document.documentElement.scrollHeight - window.innerHeight) * \(fraction)));" )
-                try? await Task.sleep(nanoseconds: 220_000_000)
+            _ = try? await priceWebView.evaluateJavaScript(#"""
+            (() => {
+              const target = document.querySelector('#hprt-table')
+                || document.querySelector('[data-testid="availability-table"]')
+                || [...document.querySelectorAll('h2,h3,[role="heading"]')].find(el => /availability|room type|select a room/i.test(el.innerText || ''));
+              try { target?.scrollIntoView({ block: 'center' }); } catch (_) {}
+              return !!target;
+            })();
+            """#)
+
+            // Poll the direct Booking room table first. For the hotel from the user's screenshot
+            // Booking publicly exposes a normal USD per-night value; we should read that value,
+            // not fail because a generic extractor did not like the DOM geometry.
+            for _ in 0..<18 {
+                if let price = await extractBookingUSDPrice(in: priceWebView, quoteURL: quoteURL) {
+                    return price
+                }
+                try? await Task.sleep(nanoseconds: 350_000_000)
             }
 
-            guard let pageURL = priceWebView.url,
-                  Provider.booking.isLikelyHotelDetailURL(pageURL),
-                  !(await detectVerification(in: priceWebView)),
-                  let raw = try? await priceWebView.evaluateJavaScript(Self.extractionScript(provider: .booking, sourceURL: quoteURL.absoluteString)),
-                  let json = raw as? String,
-                  let data = json.data(using: .utf8),
-                  let quoteSnapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
-                  let price = quoteSnapshot.price,
-                  price.isUsable,
-                  price.currency.uppercased() == "USD" else {
-                continue
+            // Keep the existing generic extractor as a secondary path for Booking layouts that
+            // still match it. This does not affect Expedia.
+            if let pageURL = priceWebView.url,
+               Provider.booking.isLikelyHotelDetailURL(pageURL),
+               !(await detectVerification(in: priceWebView)),
+               let raw = try? await priceWebView.evaluateJavaScript(Self.extractionScript(provider: .booking, sourceURL: quoteURL.absoluteString)),
+               let json = raw as? String,
+               let data = json.data(using: .utf8),
+               let quoteSnapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
+               let price = quoteSnapshot.price,
+               price.isUsable,
+               price.currency.uppercased() == "USD" {
+                return price
             }
-            return price
         }
         return nil
+    }
+
+    private func extractBookingUSDPrice(in targetWebView: WKWebView, quoteURL: URL) async -> ProviderPriceSnapshot? {
+        let escapedURL = quoteURL.absoluteString
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let script = Self.bookingUSDPriceScript(sourceURL: escapedURL)
+        guard let raw = try? await targetWebView.evaluateJavaScript(script),
+              let json = raw as? String,
+              let data = json.data(using: .utf8),
+              let price = try? JSONDecoder().decode(ProviderPriceSnapshot.self, from: data),
+              price.isUsable,
+              price.currency.uppercased() == "USD" else {
+            return nil
+        }
+        return price
     }
 
     private static let bookingUSDCookieNames = Set(["selected_currency", "currency", "cur_curr", "b_selected_currency"])
@@ -948,7 +1026,10 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           if (!value || typeof value !== 'object') return;
           const json = JSON.stringify(value);
           if (!json || json.length > 4000000) return;
-          if (!/(room|suite|bed|occupancy|unit|accommodation|property|hotel)/i.test(json.slice(0, 600000))) return;
+          const head = json.slice(0, 900000);
+          const isHotelData = /(room|suite|bed|occupancy|unit|accommodation|property|hotel)/i.test(head);
+          const isBookingHotelMedia = /bstatic\.com\/xdata\/images\/hotel\//i.test(head);
+          if (!isHotelData && !isBookingHotelMedia) return;
           window.__iumrahJSONResponses.push(value);
           if (window.__iumrahJSONResponses.length > 36) window.__iumrahJSONResponses.shift();
         } catch (_) {}
@@ -1048,46 +1129,186 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     }
 
     private static func bookingOperationalURL(_ url: URL) -> URL {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
-        var items = components.queryItems ?? []
+        bookingOperationalURLs(url).first ?? url
+    }
 
-        func set(_ name: String, _ value: String, onlyIfMissing: Bool = false) {
-            if let index = items.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
-                if !onlyIfMissing { items[index] = URLQueryItem(name: name, value: value) }
-            } else {
-                items.append(URLQueryItem(name: name, value: value))
+    private static func bookingOperationalURLs(_ url: URL) -> [URL] {
+        guard let original = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return [url] }
+
+        let originalItems = original.queryItems ?? []
+        let originalCheckIn = originalItems.first { $0.name.caseInsensitiveCompare("checkin") == .orderedSame }?.value
+        let originalCheckOut = originalItems.first { $0.name.caseInsensitiveCompare("checkout") == .orderedSame }?.value
+        let hasOriginalDates = !(originalCheckIn ?? "").isEmpty && !(originalCheckOut ?? "").isEmpty
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let today = calendar.startOfDay(for: Date())
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        var windows: [(Date?, Int)] = []
+        if hasOriginalDates {
+            windows.append((nil, 0))
+        }
+        // Do not make a single arbitrary one-night window the only source of truth. Some
+        // Booking properties have no one-night inventory tomorrow while 2/3-night inventory
+        // is available immediately. Probe a few near-term windows and keep the first real USD
+        // rate Booking itself exposes.
+        windows.append((today.addingTimeInterval(86_400), 1))
+        windows.append((today.addingTimeInterval(86_400), 3))
+        windows.append((today.addingTimeInterval(7 * 86_400), 1))
+        windows.append((today.addingTimeInterval(7 * 86_400), 3))
+
+        var output: [URL] = []
+        var seen = Set<String>()
+        for (startDate, nights) in windows {
+            var components = original
+            var items = originalItems
+
+            func set(_ name: String, _ value: String) {
+                if let index = items.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+                    items[index] = URLQueryItem(name: name, value: value)
+                } else {
+                    items.append(URLQueryItem(name: name, value: value))
+                }
             }
+
+            set("selected_currency", "USD")
+            set("cur_currency", "USD")
+            set("changed_currency", "1")
+            set("top_currency", "1")
+            set("lang", "en-us")
+            set("group_adults", "2")
+            set("req_adults", "2")
+            set("group_children", "0")
+            set("no_rooms", "1")
+            set("room1", "A,A")
+
+            if let startDate {
+                let endDate = startDate.addingTimeInterval(Double(nights) * 86_400)
+                set("checkin", formatter.string(from: startDate))
+                set("checkout", formatter.string(from: endDate))
+            }
+
+            components.queryItems = items
+            guard let candidate = components.url else { continue }
+            if seen.insert(candidate.absoluteString).inserted { output.append(candidate) }
         }
+        return output.isEmpty ? [url] : output
+    }
 
-        set("selected_currency", "USD")
-        set("cur_currency", "USD")
-        set("changed_currency", "1")
-        set("top_currency", "1")
-        set("lang", "en-us")
-        set("group_adults", "2", onlyIfMissing: true)
-        set("req_adults", "2", onlyIfMissing: true)
-        set("group_children", "0", onlyIfMissing: true)
-        set("no_rooms", "1", onlyIfMissing: true)
-        set("room1", "A,A", onlyIfMissing: true)
+    private static func bookingUSDPriceScript(sourceURL: String) -> String {
+        #"""
+        (() => {
+          const sourceURL = '\#(sourceURL)';
+          const clean = value => String(value || '').replace(/[\u00a0\u202f\s]+/g, ' ').trim();
+          const compact = value => clean(value).replace(/\s+/g, ' ');
+          const parseAmount = raw => {
+            let text = String(raw || '').replace(/[\u00a0\u202f\s]/g, '').replace(/[^0-9.,]/g, '');
+            if (!text) return null;
+            const comma = text.lastIndexOf(',');
+            const dot = text.lastIndexOf('.');
+            if (comma >= 0 && dot >= 0) {
+              if (dot > comma) text = text.replace(/,/g, '');
+              else text = text.replace(/\./g, '').replace(',', '.');
+            } else if (comma >= 0) {
+              const after = text.length - comma - 1;
+              text = (after === 1 || after === 2) ? text.replace(',', '.') : text.replace(/,/g, '');
+            } else if (dot >= 0) {
+              const after = text.length - dot - 1;
+              if (after !== 1 && after !== 2) text = text.replace(/\./g, '');
+            }
+            const amount = Number(text);
+            return Number.isFinite(amount) && amount > 0 ? amount : null;
+          };
+          const params = new URL(location.href).searchParams;
+          const checkIn = params.get('checkin');
+          const checkOut = params.get('checkout');
+          const dateDays = (() => {
+            if (!checkIn || !checkOut) return 1;
+            const a = Date.parse(checkIn + 'T00:00:00Z');
+            const b = Date.parse(checkOut + 'T00:00:00Z');
+            const days = Math.round((b - a) / 86400000);
+            return Number.isFinite(days) && days > 0 ? days : 1;
+          })();
 
-        let hasCheckIn = items.contains { $0.name.caseInsensitiveCompare("checkin") == .orderedSame && !($0.value ?? "").isEmpty }
-        let hasCheckOut = items.contains { $0.name.caseInsensitiveCompare("checkout") == .orderedSame && !($0.value ?? "").isEmpty }
-        if !hasCheckIn || !hasCheckOut {
-            var calendar = Calendar(identifier: .gregorian)
-            calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-            let start = calendar.startOfDay(for: Date()).addingTimeInterval(86_400)
-            let end = start.addingTimeInterval(86_400)
-            let formatter = DateFormatter()
-            formatter.calendar = calendar
-            formatter.timeZone = calendar.timeZone
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.dateFormat = "yyyy-MM-dd"
-            if !hasCheckIn { set("checkin", formatter.string(from: start)) }
-            if !hasCheckOut { set("checkout", formatter.string(from: end)) }
-        }
+          const bodyText = compact(document.body?.innerText || '');
+          const usdContext = /prices? converted to usd|currency\s*[:\-]?\s*usd|\bUSD\b|US\$/i.test(bodyText)
+            || /selected_currency=USD/i.test(location.href);
+          if (!usdContext) return null;
 
-        components.queryItems = items
-        return components.url ?? url
+          const roots = [
+            document.querySelector('#hprt-table'),
+            document.querySelector('[data-testid="availability-table"]'),
+            document.querySelector('[data-testid*="availability"]'),
+            document.querySelector('main'),
+            document.body
+          ].filter(Boolean);
+
+          const candidates = [];
+          const push = (amount, basis, method, score, roomName = null, nights = dateDays) => {
+            if (!amount || amount < 5 || amount > 100000) return;
+            candidates.push({ amount, basis, method, score, roomName, nights });
+          };
+          const perNight = /(?:US\$|USD|\$)\s*([0-9][0-9.,\s]*)\s*(?:per\s*(?:1\s*)?night|\/\s*night|nightly)/ig;
+          const perNightAfter = /(?:per\s*(?:1\s*)?night|\/\s*night|nightly)\s*(?:US\$|USD|\$)\s*([0-9][0-9.,\s]*)/ig;
+          const totalForNights = /(?:US\$|USD|\$)\s*([0-9][0-9.,\s]*)[^$]{0,80}?(?:price\s*)?(?:for\s*)?(\d+)\s*nights?/ig;
+          const priceThenNights = /(?:price|total)\s*(?:US\$|USD|\$)\s*([0-9][0-9.,\s]*)[^$]{0,70}?(\d+)\s*nights?/ig;
+
+          for (const root of roots) {
+            const text = compact(root.innerText || root.textContent || '');
+            if (!text) continue;
+            let match;
+            while ((match = perNight.exec(text)) !== null) push(parseAmount(match[1]), 'nightly', 'booking-usd-per-night', 120);
+            while ((match = perNightAfter.exec(text)) !== null) push(parseAmount(match[1]), 'nightly', 'booking-usd-per-night', 118);
+            while ((match = totalForNights.exec(text)) !== null) push(parseAmount(match[1]), 'stay_total', 'booking-usd-stay-total', 100, null, Number(match[2]) || dateDays);
+            while ((match = priceThenNights.exec(text)) !== null) push(parseAmount(match[1]), 'stay_total', 'booking-usd-stay-total', 96, null, Number(match[2]) || dateDays);
+          }
+
+          // Booking's room rows are more trustworthy than generic money elsewhere on the page.
+          const rows = [...document.querySelectorAll('#hprt-table tr,[data-testid="availability-table"] tr,[data-testid*="room-row"],[data-testid*="room-card"]')];
+          for (const row of rows) {
+            const text = compact(row.innerText || row.textContent || '');
+            if (!text || !/(US\$|USD|\$)/i.test(text)) continue;
+            const roomName = clean(row.querySelector?.('h2,h3,h4,[data-testid*="room-name"],a')?.innerText || '');
+            let match;
+            perNight.lastIndex = 0;
+            if ((match = perNight.exec(text)) !== null) push(parseAmount(match[1]), 'nightly', 'booking-usd-room-row', 160, roomName || null);
+            totalForNights.lastIndex = 0;
+            if ((match = totalForNights.exec(text)) !== null) push(parseAmount(match[1]), 'stay_total', 'booking-usd-room-row-total', 135, roomName || null, Number(match[2]) || dateDays);
+          }
+
+          if (!candidates.length) return null;
+          const preferred = /(twin|double|standard|classic)/i;
+          candidates.sort((a, b) => {
+            const as = a.score + (preferred.test(a.roomName || '') ? 25 : 0);
+            const bs = b.score + (preferred.test(b.roomName || '') ? 25 : 0);
+            if (bs !== as) return bs - as;
+            const an = a.basis === 'stay_total' ? a.amount / Math.max(1, a.nights) : a.amount;
+            const bn = b.basis === 'stay_total' ? b.amount / Math.max(1, b.nights) : b.amount;
+            return an - bn;
+          });
+          const best = candidates[0];
+          return JSON.stringify({
+            amount: best.amount,
+            currency: 'USD',
+            totalAmount: best.basis === 'stay_total' ? best.amount : null,
+            totalCurrency: best.basis === 'stay_total' ? 'USD' : null,
+            priceBasis: best.basis,
+            checkIn,
+            checkOut,
+            nights: Math.max(1, best.nights || dateDays),
+            adults: 2,
+            rooms: 1,
+            roomName: best.roomName || null,
+            method: best.method,
+            confidence: 0.99
+          });
+        })();
+        """#
     }
 
     private static func propertyID(from url: URL, provider: Provider) -> String? {
@@ -1340,6 +1561,26 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
             document.querySelector('[data-testid="property-header"]')
           ].filter(Boolean);
 
+          const hotelName = clean(document.querySelector('[data-testid="title"]')?.innerText || document.querySelector('h1')?.innerText || '').toLowerCase();
+          const sameHotelLabel = value => {
+            const label = clean(value).toLowerCase();
+            if (!hotelName || !label) return false;
+            if (label.includes(hotelName)) return true;
+            const hotelTokens = hotelName.split(/\s+/).filter(x => x.length >= 4);
+            return hotelTokens.length >= 2 && hotelTokens.filter(x => label.includes(x)).length >= Math.min(3, hotelTokens.length);
+          };
+
+          // Booking's normal property page often has many lazy image nodes outside the current
+          // gallery root. Their alt text includes the exact property name, which gives us a
+          // strong identity boundary without importing recommendation hotels.
+          for (const img of document.querySelectorAll('img')) {
+            const label = clean([img.alt, img.title, img.getAttribute?.('aria-label')].filter(Boolean).join(' '));
+            if (!sameHotelLabel(label)) continue;
+            [img.currentSrc, img.src, img.dataset?.src, img.dataset?.lazySrc, img.dataset?.highres, img.getAttribute?.('data-original'), img.getAttribute?.('data-highres')].forEach(v => add(v, label));
+            const srcset = img.srcset || img.getAttribute?.('data-srcset') || '';
+            for (const part of String(srcset).split(',')) add(part.trim().split(/\s+/)[0], label);
+          }
+
           for (const root of roots) {
             for (const img of root.querySelectorAll?.('img') || []) {
               const label = clean([img.alt, img.title, img.getAttribute?.('aria-label')].filter(Boolean).join(' '));
@@ -1358,6 +1599,31 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
               .replace(/\\\//g, '/');
             const urls = html.match(/https?:\/\/(?:[A-Za-z0-9-]+\.)*bstatic\.com\/xdata\/images\/hotel\/[^\s"'<>\)]+/ig) || [];
             for (const raw of urls.slice(0, 700)) add(raw, 'Booking gallery');
+          }
+
+          // Once the exact-property gallery is open, Booking may deliver most of the photos
+          // through JSON/fetch rather than keeping them mounted as <img> nodes. We cleared the
+          // response buffer immediately before opening this gallery, so these responses belong
+          // to the current property context rather than recommendation cards.
+          if (window.__iumrahBookingGalleryMode === true) {
+            const seenObjects = new WeakSet();
+            let budget = 9000;
+            const walk = (value, label = 'Booking gallery', depth = 0) => {
+              if (value == null || depth > 10 || budget <= 0) return;
+              budget -= 1;
+              if (typeof value === 'string') { add(value, label); return; }
+              if (Array.isArray(value)) {
+                for (const child of value.slice(0, 700)) walk(child, label, depth + 1);
+                return;
+              }
+              if (typeof value !== 'object' || seenObjects.has(value)) return;
+              seenObjects.add(value);
+              for (const [key, child] of Object.entries(value).slice(0, 500)) {
+                const nextLabel = /caption|alt|name|title|description/i.test(key) && typeof child === 'string' ? clean(child) : label;
+                walk(child, nextLabel, depth + 1);
+              }
+            };
+            for (const response of (window.__iumrahJSONResponses || []).slice(-48)) walk(response);
           }
 
           return Object.keys(window.__iumrahHotelMedia).length;
@@ -1440,6 +1706,57 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           try { target.scrollIntoView({ block: 'center' }); target.click(); return true; } catch (_) { return false; }
         })();
         """
+    }
+
+    private static func advanceBookingGalleryScript() -> String {
+        #"""
+        (() => {
+          const clean = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+          const galleryRoots = [
+            dialogs[dialogs.length - 1],
+            document.querySelector('[data-testid*="gallery"]'),
+            document.querySelector('#photo_wrapper'),
+            document
+          ].filter(Boolean);
+          const root = galleryRoots.find(el => (el.querySelectorAll?.('img')?.length || 0) >= 1) || document;
+          const visible = el => {
+            const style = window.getComputedStyle?.(el);
+            const rect = el.getBoundingClientRect?.();
+            return (!style || (style.display !== 'none' && style.visibility !== 'hidden'))
+              && (!rect || rect.width > 0 || rect.height > 0);
+          };
+          const selectors = [
+            'button[aria-label*="Next" i]',
+            '[role="button"][aria-label*="Next" i]',
+            'button[data-testid*="next" i]',
+            '[role="button"][data-testid*="next" i]',
+            'button[class*="next" i]',
+            '[role="button"][class*="next" i]'
+          ];
+          for (const selector of selectors) {
+            const target = [...root.querySelectorAll(selector)].find(visible);
+            if (target) { try { target.click(); return true; } catch (_) {} }
+          }
+          const buttons = [...root.querySelectorAll('button,[role="button"]')].filter(visible);
+          const target = buttons.find(el => {
+            const t = clean(`${el.innerText || ''} ${el.getAttribute?.('aria-label') || ''} ${el.getAttribute?.('title') || ''}`);
+            if (/close|закрыть|previous|back|назад|предыдущ/.test(t)) return false;
+            return /next photo|next image|next|следующ|далее|keyingi|التالي|suivant|weiter|sonraki|berikut/.test(t);
+          });
+          if (target) { try { target.click(); return true; } catch (_) {} }
+
+          // Booking occasionally hides the arrow behind an icon-only control but still reacts
+          // to ArrowRight in the active gallery. Dispatching the key lets the stagnation guard
+          // in Swift decide whether the gallery actually moved.
+          try {
+            const event = new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39, bubbles: true });
+            root.dispatchEvent(event);
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39, bubbles: true }));
+            return true;
+          } catch (_) { return false; }
+        })();
+        """#
     }
 
     private static func closeGalleryScript() -> String {
