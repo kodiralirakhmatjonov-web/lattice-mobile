@@ -43,6 +43,28 @@ struct BusinessSidebarButton: View {
 
 /// Root-level interactive drawer modeled after the ChatGPT iOS sidebar behavior:
 /// the sidebar lives underneath while the complete app surface follows the user's finger.
+private struct DrawerLeadingEdge: View {
+    let progress: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            let radius = 31 * progress
+            ZStack(alignment: .leading) {
+                // These caps reproduce the rounded ChatGPT-like leading corners
+                // without masking/clipping the full application hierarchy.
+                Circle()
+                    .fill(BusinessDesign.background)
+                    .frame(width: radius * 2, height: radius * 2)
+                    .offset(x: -radius, y: -radius)
+                Circle()
+                    .fill(BusinessDesign.background)
+                    .frame(width: radius * 2, height: radius * 2)
+                    .offset(x: -radius, y: proxy.size.height - radius)
+            }
+        }
+    }
+}
+
 struct BusinessSidebarHost<Content: View>: View {
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var sidebar = BusinessSidebarStore()
@@ -75,8 +97,6 @@ struct BusinessSidebarHost<Content: View>: View {
             appSurface
         }
         .background(BusinessDesign.background.ignoresSafeArea())
-        .contentShape(Rectangle())
-        .simultaneousGesture(drawerGesture)
         .fullScreenCover(item: $sidebar.route) { route in
             NavigationStack {
                 switch route {
@@ -103,21 +123,25 @@ struct BusinessSidebarHost<Content: View>: View {
             // rather than making it look like a conventional slide-over panel.
             .offset(x: -18 * (1 - openProgress))
             .opacity(0.82 + (0.18 * openProgress))
+            .allowsHitTesting(openProgress > 0.02)
             .accessibilityHidden(openProgress < 0.02)
+            .zIndex(2)
     }
 
     private var appSurface: some View {
         content
             .environmentObject(sidebar)
-            .frame(width: screenWidth)
-            .frame(maxHeight: .infinity)
+            // Keep the original TabView/NavigationStack layout untouched. Explicit
+            // screen-sized frames or a root clip here crop the top/bottom safe areas.
             .background(BusinessDesign.background)
-            .clipShape(
-                RoundedRectangle(
-                    cornerRadius: 31 * openProgress,
-                    style: .continuous
-                )
-            )
+            .overlay(alignment: .leading) {
+                // Visual-only rounded leading edge. It does not clip the root view,
+                // so the status bar and tab bar retain their original geometry.
+                if openProgress > 0.001 {
+                    DrawerLeadingEdge(progress: openProgress)
+                        .allowsHitTesting(false)
+                }
+            }
             .shadow(
                 color: .black.opacity(0.10 * openProgress),
                 radius: 30 * openProgress,
@@ -125,9 +149,12 @@ struct BusinessSidebarHost<Content: View>: View {
                 y: 0
             )
             .offset(x: contentOffset)
+            // The drag recognizer belongs only to the moving app surface. The drawer
+            // itself has no competing gesture recognizer, so all sidebar buttons tap normally.
+            .simultaneousGesture(drawerGesture)
             .overlay {
                 if sidebar.isOpen && !horizontalDragIsActive {
-                    Color.clear
+                    Color.black.opacity(0.001)
                         .contentShape(Rectangle())
                         .onTapGesture { sidebar.close() }
                 }
