@@ -214,7 +214,7 @@ struct HotelAdminDetailView: View {
                 if let price = hotel.price {
                     Text(priceStatus(price))
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(price.status == "failed" ? Color.orange : (price.isManualOverride == true ? BusinessDesign.accent : Color.secondary))
+                        .foregroundStyle(priceNeedsAttention(price) ? Color.orange : (price.isManualOverride == true ? BusinessDesign.accent : Color.secondary))
                 }
             }
 
@@ -224,6 +224,7 @@ struct HotelAdminDetailView: View {
                         Text(nightly.formatted(.currency(code: "USD").precision(.fractionLength(0))))
                             .font(.system(size: 34, weight: .bold, design: .rounded))
                             .monospacedDigit()
+                            .foregroundStyle(priceNeedsAttention(price) ? Color.orange : Color.primary)
                         Text("/ ночь")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
@@ -237,6 +238,11 @@ struct HotelAdminDetailView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                        if let fetchedAt = price.fetchedAt {
+                            Text("Источник проверен: \(compactDate(fetchedAt))")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     } else {
                         if let provider = price.provider ?? hotel.sources.first?.provider {
                             Text(provider.capitalized)
@@ -248,6 +254,12 @@ struct HotelAdminDetailView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
+                    }
+                    if priceNeedsAttention(price) {
+                        Label("Цена не обновилась. Показана последняя подтверждённая цена.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.orange)
+                            .padding(.top, 3)
                     }
                 }
             } else if hotel.price?.status == "pending" {
@@ -512,17 +524,25 @@ struct HotelAdminDetailView: View {
         switch price.status {
         case "manual": return "Ручная цена"
         case "fresh": return "Актуально"
-        case "stale": return "Нужно обновить"
+        case "stale": return "Цена не обновилась"
         case "pending": return "Обновляется"
-        case "failed": return "Ошибка"
+        case "failed": return "Цена не обновилась"
         default: return price.status.capitalized
         }
     }
 
+    private func priceNeedsAttention(_ price: HotelCachedPrice) -> Bool {
+        price.status == "stale" || price.status == "failed"
+    }
+
     private func compactDate(_ raw: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: raw) else { return raw }
-        return date.formatted(date: .abbreviated, time: .shortened)
+        let iso = ISO8601DateFormatter()
+        guard let date = iso.date(from: raw) else { return raw }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.timeZone = TimeZone(identifier: "Asia/Tashkent")
+        formatter.dateFormat = "d MMM yyyy, HH:mm"
+        return formatter.string(from: date)
     }
 
     @MainActor
