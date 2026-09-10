@@ -7,20 +7,22 @@ final class BusinessSidebarStore: ObservableObject {
     @Published var route: BusinessSidebarRoute?
 
     func open() {
-        withAnimation(.interactiveSpring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.12)) {
+        withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.88, blendDuration: 0.10)) {
             isOpen = true
         }
     }
 
     func close() {
-        withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.90, blendDuration: 0.10)) {
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.90, blendDuration: 0.08)) {
             isOpen = false
         }
     }
 
     func show(_ route: BusinessSidebarRoute) {
+        // Present the destination immediately. The full-screen destination owns its
+        // own hit-testing and the drawer is reset underneath for the return trip.
         self.route = route
-        close()
+        isOpen = false
     }
 }
 
@@ -41,30 +43,9 @@ struct BusinessSidebarButton: View {
     }
 }
 
-/// Root-level interactive drawer modeled after the ChatGPT iOS sidebar behavior:
-/// the sidebar lives underneath while the complete app surface follows the user's finger.
-private struct DrawerLeadingEdge: View {
-    let progress: CGFloat
-
-    var body: some View {
-        GeometryReader { proxy in
-            let radius = 31 * progress
-            ZStack(alignment: .leading) {
-                // These caps reproduce the rounded ChatGPT-like leading corners
-                // without masking/clipping the full application hierarchy.
-                Circle()
-                    .fill(BusinessDesign.background)
-                    .frame(width: radius * 2, height: radius * 2)
-                    .offset(x: -radius, y: -radius)
-                Circle()
-                    .fill(BusinessDesign.background)
-                    .frame(width: radius * 2, height: radius * 2)
-                    .offset(x: -radius, y: proxy.size.height - radius)
-            }
-        }
-    }
-}
-
+/// Root drawer with the same interaction model as ChatGPT on iPhone:
+/// the drawer is a stationary, opaque surface underneath the application,
+/// while the complete application surface follows the user's horizontal drag.
 struct BusinessSidebarHost<Content: View>: View {
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var sidebar = BusinessSidebarStore()
@@ -78,11 +59,11 @@ struct BusinessSidebarHost<Content: View>: View {
     }
 
     private var screenWidth: CGFloat { UIScreen.main.bounds.width }
-    private var drawerWidth: CGFloat { min(390, screenWidth * 0.74) }
+    private var drawerWidth: CGFloat { min(326, screenWidth * 0.76) }
 
     private var contentOffset: CGFloat {
-        let base = sidebar.isOpen ? drawerWidth : 0
-        return min(drawerWidth, max(0, base + dragTranslation))
+        let restingOffset = sidebar.isOpen ? drawerWidth : 0
+        return min(drawerWidth, max(0, restingOffset + dragTranslation))
     }
 
     private var openProgress: CGFloat {
@@ -92,9 +73,13 @@ struct BusinessSidebarHost<Content: View>: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
+            // Always opaque. Never animate opacity on the drawer itself: doing so
+            // makes the screen underneath visible through menu rows.
             drawerLayer
+                .zIndex(0)
 
             appSurface
+                .zIndex(1)
         }
         .background(BusinessDesign.background.ignoresSafeArea())
         .fullScreenCover(item: $sidebar.route) { route in
@@ -116,50 +101,49 @@ struct BusinessSidebarHost<Content: View>: View {
     }
 
     private var drawerLayer: some View {
-        drawer
-            .frame(width: drawerWidth)
-            .frame(maxHeight: .infinity)
-            // Tiny parallax keeps the drawer visually anchored underneath the page,
-            // rather than making it look like a conventional slide-over panel.
-            .offset(x: -18 * (1 - openProgress))
-            .opacity(0.82 + (0.18 * openProgress))
-            .allowsHitTesting(openProgress > 0.02)
-            .accessibilityHidden(openProgress < 0.02)
-            .zIndex(2)
+        ZStack(alignment: .leading) {
+            // Dedicated solid backdrop extending through status/home-indicator areas.
+            BusinessDesign.background
+                .ignoresSafeArea()
+
+            drawerContent
+        }
+        .frame(width: drawerWidth)
+        .frame(maxHeight: .infinity)
+        // The drawer only becomes interactive once it is intentionally open.
+        // During an interactive drag, the moving app surface owns the gesture.
+        .allowsHitTesting(sidebar.isOpen && !horizontalDragIsActive)
+        .accessibilityHidden(!sidebar.isOpen)
     }
 
     private var appSurface: some View {
+        // IMPORTANT: all overlays/gestures that belong to the app surface are added
+        // BEFORE offset. This guarantees their hit region travels with the page and
+        // never remains invisibly on top of the revealed drawer.
         content
             .environmentObject(sidebar)
-            // Keep the original TabView/NavigationStack layout untouched. Explicit
-            // screen-sized frames or a root clip here crop the top/bottom safe areas.
             .background(BusinessDesign.background)
-            .overlay(alignment: .leading) {
-                // Visual-only rounded leading edge. It does not clip the root view,
-                // so the status bar and tab bar retain their original geometry.
-                if openProgress > 0.001 {
-                    DrawerLeadingEdge(progress: openProgress)
-                        .allowsHitTesting(false)
-                }
-            }
-            .shadow(
-                color: .black.opacity(0.10 * openProgress),
-                radius: 30 * openProgress,
-                x: -8,
-                y: 0
-            )
-            .offset(x: contentOffset)
-            // The drag recognizer belongs only to the moving app surface. The drawer
-            // itself has no competing gesture recognizer, so all sidebar buttons tap normally.
-            .simultaneousGesture(drawerGesture)
             .overlay {
                 if sidebar.isOpen && !horizontalDragIsActive {
-                    Color.black.opacity(0.001)
+                    // Transparent interaction layer only over the MOVED app surface.
+                    // It prevents accidental interaction with the page and closes the
+                    // drawer on tap, just like ChatGPT.
+                    Rectangle()
+                        .fill(Color.black.opacity(0.0001))
                         .contentShape(Rectangle())
                         .onTapGesture { sidebar.close() }
                 }
             }
-            .zIndex(1)
+            .simultaneousGesture(drawerGesture)
+            // No root frame and no clipShape here. Navigation bars, status-area
+            // content and the TabView keep their original full-height geometry.
+            .shadow(
+                color: .black.opacity(0.14 * openProgress),
+                radius: 26 * openProgress,
+                x: -8,
+                y: 0
+            )
+            .offset(x: contentOffset)
     }
 
     private var drawerGesture: some Gesture {
@@ -169,11 +153,13 @@ struct BusinessSidebarHost<Content: View>: View {
                 let dy = value.translation.height
 
                 if !horizontalDragIsActive {
-                    // Do not steal vertical scrolling. When closed, ChatGPT-style opening
-                    // is intentionally allowed from most of the left/center part of the page,
-                    // not only from a tiny edge hit target.
-                    let isHorizontal = abs(dx) > max(10, abs(dy) * 1.18)
-                    let mayOpenFromHere = value.startLocation.x <= screenWidth * 0.72
+                    // Lock only after the gesture is clearly horizontal. This keeps
+                    // vertical ScrollViews and Lists responsive.
+                    let isHorizontal = abs(dx) > max(10, abs(dy) * 1.20)
+
+                    // Opening may begin from the left or the center of the page,
+                    // matching the demonstrated ChatGPT gesture.
+                    let mayOpenFromHere = value.startLocation.x <= screenWidth * 0.78
                     let opening = !sidebar.isOpen && dx > 0 && mayOpenFromHere
                     let closing = sidebar.isOpen && dx < 0
 
@@ -196,28 +182,31 @@ struct BusinessSidebarHost<Content: View>: View {
                 }
 
                 let predicted = value.predictedEndTranslation.width
-                let current = contentOffset
-                let projected = min(drawerWidth, max(0, (sidebar.isOpen ? drawerWidth : 0) + predicted))
-                let openingVelocityIntent = predicted > value.translation.width + 22
-                let closingVelocityIntent = predicted < value.translation.width - 22
+                let projectedOffset = min(
+                    drawerWidth,
+                    max(0, (sidebar.isOpen ? drawerWidth : 0) + predicted)
+                )
+
+                let fastOpen = predicted > value.translation.width + 24
+                let fastClose = predicted < value.translation.width - 24
 
                 let shouldOpen: Bool
                 if sidebar.isOpen {
-                    shouldOpen = !(projected < drawerWidth * 0.58 || closingVelocityIntent)
+                    shouldOpen = !(projectedOffset < drawerWidth * 0.58 || fastClose)
                 } else {
-                    shouldOpen = projected > drawerWidth * 0.32 || openingVelocityIntent || current > drawerWidth * 0.42
+                    shouldOpen = projectedOffset > drawerWidth * 0.34 || fastOpen
                 }
 
                 dragTranslation = 0
                 horizontalDragIsActive = false
 
-                withAnimation(.interactiveSpring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.12)) {
+                withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.88, blendDuration: 0.10)) {
                     sidebar.isOpen = shouldOpen
                 }
             }
     }
 
-    private var drawer: some View {
+    private var drawerContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 BusinessBrandLogo(width: 138)
@@ -243,7 +232,7 @@ struct BusinessSidebarHost<Content: View>: View {
             }
             sidebarButton("Создать уведомление", icon: "bell.badge.fill", route: .notifications)
 
-            Spacer()
+            Spacer(minLength: 12)
 
             Button(role: .destructive) {
                 Task { await auth.logout() }
@@ -258,8 +247,7 @@ struct BusinessSidebarHost<Content: View>: View {
             .padding(.horizontal, 10)
             .padding(.bottom, 18)
         }
-        .frame(maxHeight: .infinity)
-        .background(BusinessDesign.background.ignoresSafeArea())
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func sidebarButton(_ title: String, icon: String, route: BusinessSidebarRoute) -> some View {
@@ -268,7 +256,8 @@ struct BusinessSidebarHost<Content: View>: View {
                 Image(systemName: icon)
                     .font(.system(size: 18, weight: .semibold))
                     .frame(width: 28)
-                Text(title).font(.body.weight(.semibold))
+                Text(title)
+                    .font(.body.weight(.semibold))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.bold())
@@ -277,9 +266,13 @@ struct BusinessSidebarHost<Content: View>: View {
             .foregroundStyle(.primary)
             .padding(.horizontal, 18)
             .frame(height: 54)
-            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(
+                BusinessDesign.secondarySurface,
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
