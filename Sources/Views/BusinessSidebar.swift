@@ -6,8 +6,18 @@ final class BusinessSidebarStore: ObservableObject {
     @Published var isOpen = false
     @Published var route: BusinessSidebarRoute?
 
-    func open() { withAnimation(.snappy(duration: 0.3)) { isOpen = true } }
-    func close() { withAnimation(.snappy(duration: 0.3)) { isOpen = false } }
+    func open() {
+        withAnimation(.interactiveSpring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.12)) {
+            isOpen = true
+        }
+    }
+
+    func close() {
+        withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.90, blendDuration: 0.10)) {
+            isOpen = false
+        }
+    }
+
     func show(_ route: BusinessSidebarRoute) {
         self.route = route
         close()
@@ -21,6 +31,7 @@ enum BusinessSidebarRoute: String, Identifiable {
 
 struct BusinessSidebarButton: View {
     @EnvironmentObject private var sidebar: BusinessSidebarStore
+
     var body: some View {
         Button { sidebar.open() } label: {
             Image(systemName: "line.3.horizontal")
@@ -30,57 +41,42 @@ struct BusinessSidebarButton: View {
     }
 }
 
+/// Root-level interactive drawer modeled after the ChatGPT iOS sidebar behavior:
+/// the sidebar lives underneath while the complete app surface follows the user's finger.
 struct BusinessSidebarHost<Content: View>: View {
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var sidebar = BusinessSidebarStore()
     let content: Content
 
-    @State private var dragOffset: CGFloat = 0
+    @State private var dragTranslation: CGFloat = 0
+    @State private var horizontalDragIsActive = false
 
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
 
-    private let drawerWidth: CGFloat = min(350, UIScreen.main.bounds.width * 0.86)
+    private var screenWidth: CGFloat { UIScreen.main.bounds.width }
+    private var drawerWidth: CGFloat { min(390, screenWidth * 0.74) }
+
+    private var contentOffset: CGFloat {
+        let base = sidebar.isOpen ? drawerWidth : 0
+        return min(drawerWidth, max(0, base + dragTranslation))
+    }
+
+    private var openProgress: CGFloat {
+        guard drawerWidth > 0 else { return 0 }
+        return min(1, max(0, contentOffset / drawerWidth))
+    }
 
     var body: some View {
         ZStack(alignment: .leading) {
-            content
-                .environmentObject(sidebar)
-                .allowsHitTesting(!sidebar.isOpen)
-                .scaleEffect(sidebar.isOpen ? 0.985 : 1, anchor: .trailing)
+            drawerLayer
 
-            if sidebar.isOpen {
-                Color.black.opacity(0.16)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-                    .onTapGesture { sidebar.close() }
-            }
-
-            drawer
-                .frame(width: drawerWidth)
-                .offset(x: sidebar.isOpen ? min(0, dragOffset) : -drawerWidth + max(0, dragOffset))
-                .shadow(color: .black.opacity(sidebar.isOpen ? 0.12 : 0), radius: 28, x: 10)
+            appSurface
         }
-        .background(BusinessDesign.background)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 12, coordinateSpace: .global)
-                .onChanged { value in
-                    if sidebar.isOpen {
-                        dragOffset = min(0, value.translation.width)
-                    } else if value.startLocation.x < 26, value.translation.width > 0 {
-                        dragOffset = min(drawerWidth, value.translation.width)
-                    }
-                }
-                .onEnded { value in
-                    defer { dragOffset = 0 }
-                    if sidebar.isOpen {
-                        if value.translation.width < -70 { sidebar.close() }
-                    } else if value.startLocation.x < 26, value.translation.width > 70 {
-                        sidebar.open()
-                    }
-                }
-        )
+        .background(BusinessDesign.background.ignoresSafeArea())
+        .contentShape(Rectangle())
+        .simultaneousGesture(drawerGesture)
         .fullScreenCover(item: $sidebar.route) { route in
             NavigationStack {
                 switch route {
@@ -97,6 +93,101 @@ struct BusinessSidebarHost<Content: View>: View {
                 }
             }
         }
+    }
+
+    private var drawerLayer: some View {
+        drawer
+            .frame(width: drawerWidth)
+            .frame(maxHeight: .infinity)
+            // Tiny parallax keeps the drawer visually anchored underneath the page,
+            // rather than making it look like a conventional slide-over panel.
+            .offset(x: -18 * (1 - openProgress))
+            .opacity(0.82 + (0.18 * openProgress))
+            .accessibilityHidden(openProgress < 0.02)
+    }
+
+    private var appSurface: some View {
+        content
+            .environmentObject(sidebar)
+            .frame(width: screenWidth)
+            .frame(maxHeight: .infinity)
+            .background(BusinessDesign.background)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: 31 * openProgress,
+                    style: .continuous
+                )
+            )
+            .shadow(
+                color: .black.opacity(0.10 * openProgress),
+                radius: 30 * openProgress,
+                x: -8,
+                y: 0
+            )
+            .offset(x: contentOffset)
+            .overlay {
+                if sidebar.isOpen && !horizontalDragIsActive {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { sidebar.close() }
+                }
+            }
+            .zIndex(1)
+    }
+
+    private var drawerGesture: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .onChanged { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+
+                if !horizontalDragIsActive {
+                    // Do not steal vertical scrolling. When closed, ChatGPT-style opening
+                    // is intentionally allowed from most of the left/center part of the page,
+                    // not only from a tiny edge hit target.
+                    let isHorizontal = abs(dx) > max(10, abs(dy) * 1.18)
+                    let mayOpenFromHere = value.startLocation.x <= screenWidth * 0.72
+                    let opening = !sidebar.isOpen && dx > 0 && mayOpenFromHere
+                    let closing = sidebar.isOpen && dx < 0
+
+                    guard isHorizontal && (opening || closing) else { return }
+                    horizontalDragIsActive = true
+                }
+
+                guard horizontalDragIsActive else { return }
+
+                if sidebar.isOpen {
+                    dragTranslation = max(-drawerWidth, min(0, dx))
+                } else {
+                    dragTranslation = min(drawerWidth, max(0, dx))
+                }
+            }
+            .onEnded { value in
+                guard horizontalDragIsActive else {
+                    dragTranslation = 0
+                    return
+                }
+
+                let predicted = value.predictedEndTranslation.width
+                let current = contentOffset
+                let projected = min(drawerWidth, max(0, (sidebar.isOpen ? drawerWidth : 0) + predicted))
+                let openingVelocityIntent = predicted > value.translation.width + 22
+                let closingVelocityIntent = predicted < value.translation.width - 22
+
+                let shouldOpen: Bool
+                if sidebar.isOpen {
+                    shouldOpen = !(projected < drawerWidth * 0.58 || closingVelocityIntent)
+                } else {
+                    shouldOpen = projected > drawerWidth * 0.32 || openingVelocityIntent || current > drawerWidth * 0.42
+                }
+
+                dragTranslation = 0
+                horizontalDragIsActive = false
+
+                withAnimation(.interactiveSpring(response: 0.38, dampingFraction: 0.88, blendDuration: 0.12)) {
+                    sidebar.isOpen = shouldOpen
+                }
+            }
     }
 
     private var drawer: some View {
@@ -141,9 +232,7 @@ struct BusinessSidebarHost<Content: View>: View {
             .padding(.bottom, 18)
         }
         .frame(maxHeight: .infinity)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .trailing) { Rectangle().fill(BusinessDesign.line).frame(width: 0.5) }
-        .ignoresSafeArea(edges: .bottom)
+        .background(BusinessDesign.background.ignoresSafeArea())
     }
 
     private func sidebarButton(_ title: String, icon: String, route: BusinessSidebarRoute) -> some View {
