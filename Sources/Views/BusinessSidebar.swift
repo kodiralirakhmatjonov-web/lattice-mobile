@@ -43,16 +43,13 @@ struct BusinessSidebarButton: View {
     }
 }
 
-/// Root drawer with the same interaction model as ChatGPT on iPhone:
-/// the drawer is a stationary, opaque surface underneath the application,
-/// while the complete application surface follows the user's horizontal drag.
+/// Root button-driven drawer. The drawer is a stationary, opaque surface underneath
+/// the application; the complete application surface moves only when the explicit
+/// menu button opens or closes it. There is intentionally no swipe gesture.
 struct BusinessSidebarHost<Content: View>: View {
     @EnvironmentObject private var auth: AuthStore
     @StateObject private var sidebar = BusinessSidebarStore()
     let content: Content
-
-    @State private var dragTranslation: CGFloat = 0
-    @State private var horizontalDragIsActive = false
 
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
@@ -62,8 +59,7 @@ struct BusinessSidebarHost<Content: View>: View {
     private var drawerWidth: CGFloat { min(326, screenWidth * 0.76) }
 
     private var contentOffset: CGFloat {
-        let restingOffset = sidebar.isOpen ? drawerWidth : 0
-        return min(drawerWidth, max(0, restingOffset + dragTranslation))
+        sidebar.isOpen ? drawerWidth : 0
     }
 
     private var openProgress: CGFloat {
@@ -110,9 +106,8 @@ struct BusinessSidebarHost<Content: View>: View {
         }
         .frame(width: drawerWidth)
         .frame(maxHeight: .infinity)
-        // The drawer only becomes interactive once it is intentionally open.
-        // During an interactive drag, the moving app surface owns the gesture.
-        .allowsHitTesting(sidebar.isOpen && !horizontalDragIsActive)
+        // The drawer is opened only from the explicit menu button.
+        .allowsHitTesting(sidebar.isOpen)
         .accessibilityHidden(!sidebar.isOpen)
     }
 
@@ -124,7 +119,7 @@ struct BusinessSidebarHost<Content: View>: View {
             .environmentObject(sidebar)
             .background(BusinessDesign.background)
             .overlay {
-                if sidebar.isOpen && !horizontalDragIsActive {
+                if sidebar.isOpen {
                     // Transparent interaction layer only over the MOVED app surface.
                     // It prevents accidental interaction with the page and closes the
                     // drawer on tap, just like ChatGPT.
@@ -134,7 +129,6 @@ struct BusinessSidebarHost<Content: View>: View {
                         .onTapGesture { sidebar.close() }
                 }
             }
-            .simultaneousGesture(drawerGesture)
             // No root frame and no clipShape here. Navigation bars, status-area
             // content and the TabView keep their original full-height geometry.
             .shadow(
@@ -146,65 +140,8 @@ struct BusinessSidebarHost<Content: View>: View {
             .offset(x: contentOffset)
     }
 
-    private var drawerGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .global)
-            .onChanged { value in
-                let dx = value.translation.width
-                let dy = value.translation.height
-
-                if !horizontalDragIsActive {
-                    // Lock only after the gesture is clearly horizontal. This keeps
-                    // vertical ScrollViews and Lists responsive.
-                    let isHorizontal = abs(dx) > max(10, abs(dy) * 1.20)
-
-                    // Opening may begin from the left or the center of the page,
-                    // matching the demonstrated ChatGPT gesture.
-                    let mayOpenFromHere = value.startLocation.x <= screenWidth * 0.78
-                    let opening = !sidebar.isOpen && dx > 0 && mayOpenFromHere
-                    let closing = sidebar.isOpen && dx < 0
-
-                    guard isHorizontal && (opening || closing) else { return }
-                    horizontalDragIsActive = true
-                }
-
-                guard horizontalDragIsActive else { return }
-
-                if sidebar.isOpen {
-                    dragTranslation = max(-drawerWidth, min(0, dx))
-                } else {
-                    dragTranslation = min(drawerWidth, max(0, dx))
-                }
-            }
-            .onEnded { value in
-                guard horizontalDragIsActive else {
-                    dragTranslation = 0
-                    return
-                }
-
-                let predicted = value.predictedEndTranslation.width
-                let projectedOffset = min(
-                    drawerWidth,
-                    max(0, (sidebar.isOpen ? drawerWidth : 0) + predicted)
-                )
-
-                let fastOpen = predicted > value.translation.width + 24
-                let fastClose = predicted < value.translation.width - 24
-
-                let shouldOpen: Bool
-                if sidebar.isOpen {
-                    shouldOpen = !(projectedOffset < drawerWidth * 0.58 || fastClose)
-                } else {
-                    shouldOpen = projectedOffset > drawerWidth * 0.34 || fastOpen
-                }
-
-                dragTranslation = 0
-                horizontalDragIsActive = false
-
-                withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.88, blendDuration: 0.10)) {
-                    sidebar.isOpen = shouldOpen
-                }
-            }
-    }
+    // Deliberately no DragGesture here. The sidebar is button-only so it cannot
+    // compete with scrolling, carousels, cards, or any other screen interaction.
 
     private var drawerContent: some View {
         VStack(alignment: .leading, spacing: 0) {
