@@ -680,81 +680,138 @@ struct HotelCloudHealthResponse: Codable {
     let hotels: Int
 }
 
-// MARK: - Staged hotel price monitoring
+// MARK: - JSON hotel price exchange
 
-struct HotelPriceMonitorItem: Codable, Identifiable, Hashable {
-    let id: String
-    let runID: String
+struct HotelPriceMonitorPolicy: Codable, Hashable {
+    let rooms: Int
+    let adults: Int
+    let priceBasis: String
+    let dateStrategy: String
+    let preferredDateOffsetsDays: [Int]
+    let sourceRule: String
+    let comparisonRule: String
+    let returnSchema: String
+}
+
+struct HotelPriceExportHotel: Codable, Identifiable, Hashable {
     let hotelID: String
     let hotelName: String
-    let city: String?
+    let city: String
     let stars: Int?
+    let currentNightlyUSD: Double?
+    let currency: String
+    let catalogStatus: String?
+    let priceStatus: String?
+    let isManualOverride: Bool
     let provider: String?
     let sourceURL: String?
-    let resolvedURL: String?
+    let lastPriceFetchedAt: String?
+
+    var id: String { hotelID }
+}
+
+struct HotelPriceExportDocument: Codable, Hashable {
+    let schema: String
+    let version: Int
+    let exportID: String
+    let city: String
+    let generatedAt: String
+    let currency: String
+    let monitoringPolicy: HotelPriceMonitorPolicy
+    let instructions: [String]
+    let hotelCount: Int
+    let hotels: [HotelPriceExportHotel]
+}
+
+struct HotelPriceUpdateItem: Codable, Identifiable, Hashable {
+    let hotelID: String
+    let hotelName: String?
+    let status: String
     let oldNightlyUSD: Double?
-    let candidateNightlyUSD: Double?
+    let newNightlyUSD: Double?
+    let provider: String?
+    let sourceURL: String?
+    let checkedSourceURL: String?
+    let confidence: String?
+    let reason: String?
+    let checkedAt: String?
+
+    var id: String { hotelID }
+}
+
+struct HotelPriceUpdateDocument: Codable, Hashable {
+    let schema: String
+    let sourceExportID: String
+    let city: String
+    let checkedAt: String
+    let hotels: [HotelPriceUpdateItem]
+}
+
+struct HotelPriceJSONConfidence: Codable, Hashable {
+    let label: String
+    let score: Double
+}
+
+struct HotelPriceJSONPreviewItem: Codable, Identifiable, Hashable {
+    let hotelID: String
+    let hotelName: String
+    let status: String
+    let oldNightlyUSD: Double?
+    let newNightlyUSD: Double?
+    let provider: String?
+    let sourceURL: String?
+    let checkedSourceURL: String?
+    let confidence: HotelPriceJSONConfidence
+    let reason: String?
+    let checkedAt: String?
+    let city: String?
+    let stars: Int?
+    let currentNightlyUSD: Double?
+    let currentProvider: String?
+    let currentSourceURL: String?
+    let isManualOverride: Bool?
+    let reviewStatus: String
+    let selectable: Bool
+    let issue: String?
     let deltaUSD: Double?
     let deltaPercent: Double?
-    let confidence: Double?
-    let method: String?
-    let status: String
-    let error: String?
-    let checkedAt: String?
-    let publishedAt: String?
 
-    var isPublishable: Bool { status == "changed" || status == "unchanged" }
-    var hasChanged: Bool { status == "changed" }
+    var id: String { hotelID }
+    var hasPriceChange: Bool { reviewStatus == "ready" }
 }
 
-struct HotelPriceMonitorRun: Codable, Identifiable, Hashable {
-    let id: String
-    let status: String
-    let totalHotels: Int
-    let checkedHotels: Int
-    let changedHotels: Int
-    let unchangedHotels: Int
-    let failedHotels: Int
-    let publishedHotels: Int
-    let error: String?
-    let createdAt: String
-    let startedAt: String?
-    let completedAt: String?
-    let updatedAt: String
-    let items: [HotelPriceMonitorItem]?
-
-    var isActive: Bool { status == "queued" || status == "running" }
-    var isFinished: Bool { status == "completed" || status == "completed_with_errors" || status == "failed" }
+struct HotelPriceJSONPreview: Codable, Hashable {
+    let schema: String
+    let sourceExportID: String
+    let city: String
+    let checkedAt: String
+    let total: Int
+    let changed: Int
+    let unchanged: Int
+    let conflicts: Int
+    let unverified: Int
+    let invalid: Int
+    let items: [HotelPriceJSONPreviewItem]
 }
 
-struct HotelPriceMonitorRunResponse: Codable {
+struct HotelPriceJSONPreviewResponse: Codable {
     let ok: Bool
-    let reused: Bool?
-    let run: HotelPriceMonitorRun
+    let preview: HotelPriceJSONPreview
 }
 
-struct HotelPriceMonitorRunsResponse: Codable {
-    let ok: Bool
-    let runs: [HotelPriceMonitorRun]
-}
-
-struct HotelPriceMonitorPublishPayload: Codable {
+struct HotelPriceJSONApplyPayload: Encodable {
+    let document: HotelPriceUpdateDocument
     let hotelIDs: [String]
 }
 
-struct HotelPriceMonitorPublishResponse: Codable {
+struct HotelPriceJSONApplyResponse: Codable {
     let ok: Bool
-    let published: Int
-    let run: HotelPriceMonitorRun
+    let applied: Int
+    let requested: Int
+    let skipped: Int
+    let appliedHotelIDs: [String]
+    let preview: HotelPriceJSONPreview
+    let appliedBy: String?
+    let appliedAt: String
 }
 
-struct ChatGPTAccessLinkPayload: Codable {
-    let runID: String?
-}
-
-struct ChatGPTAccessLinkResponse: Codable {
-    let ok: Bool
-    let scope: String
-    let expiresAt: String
-    let url: String
-}

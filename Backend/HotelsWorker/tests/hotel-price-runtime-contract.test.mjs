@@ -9,10 +9,9 @@ test('Hotels Worker exposes manual hotel price refresh route', () => {
   assert.match(worker, /refreshHotelPriceResponse\(env,\s*hotelID/);
 });
 
-test('Hotels Worker has scheduled price maintenance handler', () => {
-  assert.match(worker, /async scheduled\(controller,\s*env,\s*ctx\)/);
-  assert.match(worker, /runHotelPriceMaintenance\(env/);
-  assert.match(worker, /HOTEL_PRICE_TTL_MS/);
+test('Hotels Worker no longer runs automatic Cloudflare price maintenance', () => {
+  assert.doesNotMatch(worker, /async scheduled\(controller,\s*env,\s*ctx\)/);
+  assert.match(worker, /handlePriceJSONAdmin/);
 });
 
 test('imported WKWebView price is persisted into hotel_price_cache', () => {
@@ -93,14 +92,9 @@ test('successful source refresh removes the manual hotel price override only aft
 });
 
 
-test('scheduled maintenance actively refreshes due published hotel prices and preserves manual overrides', () => {
-  const start = worker.indexOf('async function runHotelPriceMaintenance');
-  const end = worker.indexOf('async function setManualHotelPrice', start);
-  const implementation = worker.slice(start, end);
-  assert.match(implementation, /JOIN hotel_price_sources hps ON hps\.hotel_id=h\.id/);
-  assert.match(implementation, /LIMIT 4/);
-  assert.match(implementation, /fetchExactHotelSourcePrice\(env, hotelID, \{ clearManualOverride: false \}\)/);
-  assert.match(worker, /await markHotelPriceRefreshFailure\(env, hotelID,/);
+test('legacy maintenance code is not wired to a scheduled runtime trigger', () => {
+  assert.doesNotMatch(worker, /async scheduled\(controller,\s*env,\s*ctx\)/);
+  assert.match(worker, /async function runHotelPriceMaintenance/);
 });
 
 test('public catalog keeps a last-known stale or manual price usable for package generation', () => {

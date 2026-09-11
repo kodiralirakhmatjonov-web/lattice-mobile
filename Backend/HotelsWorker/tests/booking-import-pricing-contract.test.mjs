@@ -27,23 +27,15 @@ test('Booking importer resolves Share first and obtains price only from USD quot
   assert.match(importer, /booking-usd-one-night-element/);
 });
 
-test('Booking source refresh persists only a device-verified USD price into the existing D1 cache', () => {
-  assert.match(worker, /parts\[1\] === 'price' && parts\[2\] === 'browser'/);
-  assert.match(worker, /async function saveBrowserHotelPrice/);
-  assert.match(worker, /HOTEL_BROWSER_PRICE_BOOKING_ONLY/);
-  assert.match(worker, /HOTEL_BROWSER_PRICE_USD_REQUIRED/);
-  assert.match(worker, /normalized\.currencyOriginal !== 'USD'/);
-  assert.match(worker, /INSERT INTO hotel_price_cache/);
-  assert.match(worker, /DELETE FROM hotel_price_overrides WHERE hotel_id=\?/);
-  assert.match(hotelDetail, /BookingLivePriceReader/);
-  assert.match(hotelDetail, /WKWebView\(frame: CGRect\(x: 0, y: 0, width: 1366, height: 900\)/);
-  assert.match(hotelDetail, /refreshBookingPriceOnDevice/);
-  assert.match(hotelDetail, /saveBrowserHotelPrice/);
-  assert.match(hotelDetail, /canonicalURL/);
-  assert.match(hotelDetail, /price\.currency\.uppercased\(\) == "USD"/);
-  assert.match(hotelDetail, /APIClient.shared.refreshHotelPrice/);
-  assert.match(hotelDetail, /Цена проверена в/);
-  assert.match(hotelDetail, /Цена обновилась в/);
+test('Booking importer keeps initial USD pricing while source-refresh UI is retired in favor of JSON updates', () => {
+  assert.match(importer, /recoverBookingPriceInBrowser\(propertyURL: currentURL\)/);
+  assert.match(importer, /price\.currency\.uppercased\(\) == "USD"/);
+  assert.doesNotMatch(hotelDetail, /BookingLivePriceReader/);
+  assert.doesNotMatch(hotelDetail, /refreshBookingPriceOnDevice/);
+  assert.doesNotMatch(hotelDetail, /saveBrowserHotelPrice/);
+  assert.doesNotMatch(hotelDetail, /APIClient\.shared\.refreshHotelPrice/);
+  assert.doesNotMatch(hotelDetail, /Обновить из источника/);
+  assert.match(hotelDetail, /Hotels → Обновление цен → JSON/);
 });
 
 test('Booking and Expedia source refresh share the server price reader', () => {

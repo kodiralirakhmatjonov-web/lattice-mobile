@@ -1,13 +1,38 @@
 import SwiftUI
-import UIKit
+import UniformTypeIdentifiers
+
+private struct HotelJSONFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
 
 struct HotelPriceMonitoringView: View {
-    @State private var run: HotelPriceMonitorRun?
+    let makkahCount: Int
+    let madinahCount: Int
+
+    @State private var exportingCity: String?
+    @State private var exportDocument: HotelJSONFileDocument?
+    @State private var exportFilename = "iumrah-hotels.json"
+    @State private var showExporter = false
+    @State private var showImporter = false
+    @State private var importedDocument: HotelPriceUpdateDocument?
+    @State private var importedFilename: String?
+    @State private var preview: HotelPriceJSONPreview?
     @State private var selectedHotelIDs = Set<String>()
-    @State private var selectionRunID: String?
-    @State private var loading = false
-    @State private var publishing = false
-    @State private var linkLoading = false
+    @State private var previewing = false
+    @State private var applying = false
     @State private var notice: String?
     @State private var errorMessage: String?
 
@@ -15,22 +40,34 @@ struct HotelPriceMonitoringView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 introCard
-                if let run {
-                    statusCard(run)
-                    if let items = run.items, !items.isEmpty {
-                        controls(items)
-                        ForEach(items) { item in
-                            priceRow(item)
-                        }
+
+                Text("Экспорт базы")
+                    .font(.title2.bold())
+
+                cityExportCard(
+                    city: "Makkah",
+                    title: "Makkah",
+                    subtitle: "Отели Мекки",
+                    count: makkahCount,
+                    symbol: "building.2.crop.circle"
+                )
+
+                cityExportCard(
+                    city: "Madinah",
+                    title: "Madinah",
+                    subtitle: "Отели Медины",
+                    count: madinahCount,
+                    symbol: "building.columns.circle"
+                )
+
+                importCard
+
+                if let preview {
+                    previewSummary(preview)
+                    resultControls(preview)
+                    ForEach(preview.items) { item in
+                        resultRow(item)
                     }
-                } else if !loading {
-                    ContentUnavailableView(
-                        "Мониторинг ещё не запускался",
-                        systemImage: "arrow.triangle.2.circlepath",
-                        description: Text("Проверка читает свежую цену из закреплённого Expedia/Booking источника и ничего не публикует автоматически.")
-                    )
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 28)
                 }
 
                 if let notice {
@@ -41,6 +78,7 @@ struct HotelPriceMonitoringView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
+
                 if let errorMessage {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote.weight(.medium))
@@ -55,10 +93,34 @@ struct HotelPriceMonitoringView: View {
         .contentMargins(.horizontal, 18, for: .scrollContent)
         .scrollIndicators(.hidden)
         .background(BusinessDesign.background)
-        .navigationTitle("Мониторинг цен")
+        .navigationTitle("Обновление цен")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await loadLatest() }
-        .refreshable { await refreshCurrent() }
+        .fileExporter(
+            isPresented: $showExporter,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: exportFilename
+        ) { result in
+            switch result {
+            case .success:
+                notice = "JSON сохранён. Загрузите этот файл в наш чат ChatGPT для проверки цен."
+                errorMessage = nil
+            case .failure(let error):
+                errorMessage = error.localizedDescription
+            }
+            exportDocument = nil
+        }
+        .fileImporter(
+            isPresented: $showImporter,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case .success(let urls) = result, let url = urls.first else {
+                if case .failure(let error) = result { errorMessage = error.localizedDescription }
+                return
+            }
+            Task { await importResult(from: url) }
+        }
     }
 
     private var introCard: some View {
@@ -68,105 +130,156 @@ struct HotelPriceMonitoringView: View {
                     RoundedRectangle(cornerRadius: 17, style: .continuous)
                         .fill(BusinessDesign.primaryControl)
                         .frame(width: 52, height: 52)
-                    Image(systemName: "waveform.path.ecg.rectangle")
+                    Image(systemName: "arrow.left.arrow.right.document.fill")
                         .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(BusinessDesign.onPrimaryControl)
                 }
+
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Price Monitor")
+                    Text("JSON Price Update")
                         .font(.title2.bold())
-                    Text("Проверка каталога без автоматической публикации")
+                    Text("iumrah Business → ChatGPT → iumrah Business")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            Text("Система откроет закреплённый источник каждого опубликованного отеля, сохранит найденные цены как кандидаты и покажет изменения. Production-каталог меняется только после Вашего подтверждения.")
+            Text("Экспортируйте Makkah или Madinah в JSON, загрузите файл в ChatGPT, а затем импортируйте полученный JSON с результатами. Никакой Cloudflare Browser-проверки и автоматической публикации: цена меняется только после Вашего подтверждения.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button {
-                Task { await startMonitor() }
-            } label: {
-                HStack(spacing: 8) {
-                    if loading || run?.isActive == true { ProgressView().tint(BusinessDesign.onPrimaryControl) }
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                    Text(run?.isActive == true ? "Мониторинг выполняется" : "Запустить мониторинг цен")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 50)
-                .foregroundStyle(BusinessDesign.onPrimaryControl)
-                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            HStack(spacing: 8) {
+                stepPill("1", "Экспорт")
+                stepPill("2", "Проверка")
+                stepPill("3", "Импорт")
             }
-            .buttonStyle(.plain)
-            .disabled(loading || run?.isActive == true)
-
-            Button {
-                Task { await copyChatGPTCatalogLink() }
-            } label: {
-                HStack(spacing: 8) {
-                    if linkLoading { ProgressView().controlSize(.small) }
-                    Image(systemName: "link")
-                    Text("Скопировать доступ к каталогу для ChatGPT")
-                }
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .disabled(linkLoading)
         }
         .padding(16)
         .businessCard(radius: 28)
     }
 
-    private func statusCard(_ run: HotelPriceMonitorRun) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
+    private func stepPill(_ number: String, _ title: String) -> some View {
+        HStack(spacing: 6) {
+            Text(number)
+                .font(.caption2.bold())
+                .frame(width: 20, height: 20)
+                .background(BusinessDesign.primaryControl, in: Circle())
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
+            Text(title)
+                .font(.caption.weight(.semibold))
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(BusinessDesign.secondarySurface, in: Capsule())
+    }
+
+    private func cityExportCard(city: String, title: String, subtitle: String, count: Int, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(BusinessDesign.secondarySurface)
+                        .frame(width: 50, height: 50)
+                    Image(systemName: symbol)
+                        .font(.system(size: 20, weight: .semibold))
+                }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(statusTitle(run.status))
+                    Text(title)
                         .font(.headline)
-                    Text("Проверено \(run.checkedHotels) из \(run.totalHotels)")
+                    Text("\(count) отелей · полный городской JSON + source URL")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("\(run.changedHotels) изменений")
+            }
+
+            Button {
+                Task { await export(city: city) }
+            } label: {
+                HStack(spacing: 8) {
+                    if exportingCity == city {
+                        ProgressView().tint(BusinessDesign.onPrimaryControl)
+                    } else {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    Text(exportingCity == city ? "Формируем JSON…" : "Экспорт JSON")
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Image(systemName: "doc.text")
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 50)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(exportingCity != nil || previewing || applying)
+        }
+        .padding(16)
+        .businessCard(radius: 26)
+    }
+
+    private var importCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Результат ChatGPT")
+                        .font(.title2.bold())
+                    Text(importedFilename ?? "Импортируйте JSON после проверки цен")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                if previewing { ProgressView() }
+            }
+
+            Button {
+                showImporter = true
+            } label: {
+                Label("Импортировать JSON от ChatGPT", systemImage: "square.and.arrow.down")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .disabled(previewing || applying)
+
+            Text("Сначала будет только предпросмотр. Данные из файла не меняют D1, пока Вы не выберете изменения и не нажмёте «Обновить выбранные цены».")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .businessCard(radius: 28)
+    }
+
+    private func previewSummary(_ preview: HotelPriceJSONPreview) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Предпросмотр")
+                        .font(.headline)
+                    Text("\(preview.city) · \(preview.total) отелей")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(preview.changed) изменений")
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(Color.orange.opacity(0.10), in: Capsule())
             }
 
-            ProgressView(value: Double(run.checkedHotels), total: Double(max(run.totalHotels, 1)))
-                .tint(BusinessDesign.ink)
-
             HStack(spacing: 8) {
-                metric("Изменено", run.changedHotels)
-                metric("Без изменений", run.unchangedHotels)
-                metric("Ошибки", run.failedHotels)
-            }
-
-            if run.isFinished {
-                Button {
-                    Task { await copyChatGPTLink(runID: run.id) }
-                } label: {
-                    HStack(spacing: 8) {
-                        if linkLoading { ProgressView().controlSize(.small) }
-                        Image(systemName: "link")
-                        Text("Скопировать результаты для ChatGPT")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(linkLoading)
+                metric("Изменено", preview.changed)
+                metric("Без изменений", preview.unchanged)
+                metric("Проверить", preview.conflicts + preview.unverified + preview.invalid)
             }
         }
         .padding(16)
@@ -188,11 +301,10 @@ struct HotelPriceMonitoringView: View {
         .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 
-    private func controls(_ items: [HotelPriceMonitorItem]) -> some View {
-        let publishable = items.filter(\.isPublishable)
-        return VStack(alignment: .leading, spacing: 11) {
+    private func resultControls(_ preview: HotelPriceJSONPreview) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
             HStack {
-                Text("Результаты")
+                Text("Изменения")
                     .font(.title2.bold())
                 Spacer()
                 Text("\(selectedHotelIDs.count) выбрано")
@@ -201,52 +313,51 @@ struct HotelPriceMonitoringView: View {
             }
 
             HStack(spacing: 10) {
-                Button("Все") {
-                    selectedHotelIDs = Set(publishable.map(\.hotelID))
+                Button("Все изменения") {
+                    selectedHotelIDs = Set(preview.items.filter(\.selectable).map(\.hotelID))
                 }
-                Button("Только изменения") {
-                    selectedHotelIDs = Set(publishable.filter(\.hasChanged).map(\.hotelID))
+                Button("Снять") {
+                    selectedHotelIDs.removeAll()
                 }
-                Button("Снять") { selectedHotelIDs.removeAll() }
             }
             .font(.caption.weight(.semibold))
             .buttonStyle(.bordered)
 
             Button {
-                Task { await publishSelected() }
+                Task { await applySelected() }
             } label: {
                 HStack(spacing: 8) {
-                    if publishing { ProgressView().tint(BusinessDesign.onPrimaryControl) }
+                    if applying { ProgressView().tint(BusinessDesign.onPrimaryControl) }
                     Image(systemName: "checkmark.seal.fill")
-                    Text("Опубликовать выбранные цены")
+                    Text(applying ? "Обновляем D1…" : "Обновить выбранные цены")
                         .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 50)
+                .frame(height: 52)
                 .foregroundStyle(BusinessDesign.onPrimaryControl)
                 .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(publishing || selectedHotelIDs.isEmpty || run?.isActive == true)
+            .disabled(applying || selectedHotelIDs.isEmpty || importedDocument == nil)
         }
-        .padding(.top, 4)
+        .padding(.top, 2)
     }
 
-    private func priceRow(_ item: HotelPriceMonitorItem) -> some View {
+    private func resultRow(_ item: HotelPriceJSONPreviewItem) -> some View {
         let selected = selectedHotelIDs.contains(item.hotelID)
         return VStack(alignment: .leading, spacing: 11) {
             HStack(alignment: .top, spacing: 12) {
                 Button {
-                    guard item.isPublishable else { return }
+                    guard item.selectable else { return }
                     if selected { selectedHotelIDs.remove(item.hotelID) }
                     else { selectedHotelIDs.insert(item.hotelID) }
                 } label: {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                         .font(.title3)
-                        .foregroundStyle(item.isPublishable ? (selected ? BusinessDesign.ink : Color.secondary) : Color.secondary.opacity(0.35))
+                        .foregroundStyle(item.selectable ? (selected ? BusinessDesign.ink : Color.secondary) : Color.secondary.opacity(0.35))
                 }
                 .buttonStyle(.plain)
-                .disabled(!item.isPublishable)
+                .disabled(!item.selectable)
 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(alignment: .firstTextBaseline) {
@@ -259,27 +370,17 @@ struct HotelPriceMonitoringView: View {
                     HStack(spacing: 6) {
                         if let stars = item.stars { Text("\(stars)★") }
                         if let city = item.city { Text(city) }
-                        if let provider = item.provider { Text("· \(provider)") }
+                        if let provider = item.currentProvider ?? item.provider { Text("· \(provider)") }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
             }
 
-            if item.status == "failed" {
-                Text(errorText(item.error))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let candidate = item.candidateNightlyUSD {
+            if let current = item.currentNightlyUSD, let candidate = item.newNightlyUSD {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if let old = item.oldNightlyUSD {
-                        Text(money(old))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("—")
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(money(current))
+                        .foregroundStyle(.secondary)
                     Image(systemName: "arrow.right")
                         .font(.caption.bold())
                         .foregroundStyle(.tertiary)
@@ -293,12 +394,24 @@ struct HotelPriceMonitoringView: View {
                             .foregroundStyle(delta > 0 ? .orange : .green)
                     }
                 }
+            }
 
-                if let source = AppConfig.absoluteURL(item.sourceURL) {
-                    Link(destination: source) {
-                        Label("Открыть источник", systemImage: "safari")
-                            .font(.caption.weight(.semibold))
-                    }
+            if let issue = item.issue {
+                Label(issueText(issue), systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let reason = item.reason, item.reviewStatus == "unverified" || item.reviewStatus == "needs_review" {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let source = AppConfig.absoluteURL(item.currentSourceURL ?? item.sourceURL) {
+                Link(destination: source) {
+                    Label("Открыть источник", systemImage: "safari")
+                        .font(.caption.weight(.semibold))
                 }
             }
         }
@@ -306,16 +419,17 @@ struct HotelPriceMonitoringView: View {
         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
-    private func statusBadge(_ item: HotelPriceMonitorItem) -> some View {
+    private func statusBadge(_ item: HotelPriceJSONPreviewItem) -> some View {
         let text: String
         let color: Color
-        switch item.status {
-        case "changed": text = "ИЗМЕНЕНИЕ"; color = .orange
+        switch item.reviewStatus {
+        case "ready": text = "ИЗМЕНЕНИЕ"; color = .orange
         case "unchanged": text = "БЕЗ ИЗМЕНЕНИЙ"; color = .green
-        case "published": text = "ОПУБЛИКОВАНО"; color = .blue
-        case "failed": text = "ОШИБКА"; color = .red
-        case "checking": text = "ПРОВЕРКА"; color = .secondary
-        default: text = item.status.uppercased(); color = .secondary
+        case "applied": text = "ОБНОВЛЕНО"; color = .blue
+        case "conflict": text = "КОНФЛИКТ"; color = .red
+        case "unverified": text = "НЕ ПОДТВЕРЖДЕНО"; color = .secondary
+        case "needs_review": text = "ПРОВЕРИТЬ"; color = .orange
+        default: text = "ОШИБКА"; color = .red
         }
         return Text(text)
             .font(.system(size: 9, weight: .bold))
@@ -326,131 +440,74 @@ struct HotelPriceMonitoringView: View {
     }
 
     @MainActor
-    private func loadLatest() async {
-        loading = true
-        defer { loading = false }
+    private func export(city: String) async {
+        exportingCity = city
+        notice = nil
+        errorMessage = nil
+        defer { exportingCity = nil }
         do {
-            let runs = try await APIClient.shared.priceMonitorRuns()
-            if let latest = runs.first {
-                run = try await APIClient.shared.priceMonitorRun(id: latest.id)
-                syncSelectionIfNeeded()
-                if run?.isActive == true { await pollRun(id: latest.id) }
-            }
-            errorMessage = nil
+            let document = try await APIClient.shared.hotelPriceJSONExport(city: city)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            let data = try encoder.encode(document)
+            exportFilename = "iumrah-hotels-\(city.lowercased())-\(dateStamp()).json"
+            exportDocument = HotelJSONFileDocument(data: data)
+            showExporter = true
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     @MainActor
-    private func startMonitor() async {
-        loading = true
+    private func importResult(from url: URL) async {
+        previewing = true
         notice = nil
         errorMessage = nil
+        defer { previewing = false }
+
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
         do {
-            let started = try await APIClient.shared.startPriceMonitor()
-            run = started
-            selectionRunID = nil
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .nameKey])
+            if let size = values.fileSize, size > 5_000_000 {
+                throw PriceJSONUIError.invalidFile("JSON слишком большой. Максимум 5 MB.")
+            }
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            let document = try decoder.decode(HotelPriceUpdateDocument.self, from: data)
+            guard document.schema == "iumrah.hotel-price-update.v1" else {
+                throw PriceJSONUIError.invalidFile("Это не iumrah hotel-price-update JSON.")
+            }
+            let verifiedPreview = try await APIClient.shared.previewHotelPriceJSON(document)
+            importedDocument = document
+            importedFilename = values.name ?? url.lastPathComponent
+            preview = verifiedPreview
+            selectedHotelIDs = Set(verifiedPreview.items.filter(\.selectable).map(\.hotelID))
+            notice = "JSON проверен. Ничего ещё не опубликовано — выберите изменения ниже."
+        } catch {
+            importedDocument = nil
+            preview = nil
             selectedHotelIDs.removeAll()
-            loading = false
-            await pollRun(id: started.id)
-        } catch {
-            loading = false
             errorMessage = error.localizedDescription
         }
     }
 
     @MainActor
-    private func pollRun(id: String) async {
-        while !Task.isCancelled {
-            do {
-                let latest = try await APIClient.shared.priceMonitorRun(id: id)
-                run = latest
-                syncSelectionIfNeeded()
-                if !latest.isActive { break }
-            } catch {
-                errorMessage = error.localizedDescription
-                break
-            }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-        }
-    }
-
-    @MainActor
-    private func refreshCurrent() async {
-        guard let id = run?.id else { await loadLatest(); return }
-        do {
-            run = try await APIClient.shared.priceMonitorRun(id: id)
-            syncSelectionIfNeeded()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    @MainActor
-    private func syncSelectionIfNeeded() {
-        guard let run, selectionRunID != run.id, let items = run.items else { return }
-        if run.isFinished {
-            selectedHotelIDs = Set(items.filter(\.hasChanged).map(\.hotelID))
-            selectionRunID = run.id
-        }
-    }
-
-    @MainActor
-    private func publishSelected() async {
-        guard let run, !selectedHotelIDs.isEmpty else { return }
-        publishing = true
+    private func applySelected() async {
+        guard let document = importedDocument, !selectedHotelIDs.isEmpty else { return }
+        applying = true
         notice = nil
         errorMessage = nil
+        defer { applying = false }
+
         do {
-            let updated = try await APIClient.shared.publishPriceMonitor(runID: run.id, hotelIDs: Array(selectedHotelIDs))
-            self.run = updated
-            selectedHotelIDs.subtract(updated.items?.filter { $0.status == "published" }.map(\.hotelID) ?? [])
-            notice = "Опубликовано. Каталог iumrah использует подтверждённые цены выбранных отелей."
+            let response = try await APIClient.shared.applyHotelPriceJSON(document, hotelIDs: Array(selectedHotelIDs))
+            preview = response.preview
+            selectedHotelIDs.removeAll()
+            notice = "Обновлено \(response.applied) цен в D1. Клиентский каталог теперь использует подтверждённые значения."
         } catch {
             errorMessage = error.localizedDescription
-        }
-        publishing = false
-    }
-
-    @MainActor
-    private func copyChatGPTCatalogLink() async {
-        linkLoading = true
-        notice = nil
-        errorMessage = nil
-        do {
-            let response = try await APIClient.shared.createChatGPTAccessLink()
-            UIPasteboard.general.string = response.url
-            notice = "Доступ к каталогу скопирован. Отправьте ссылку в этот чат — она только для чтения и действует 30 минут."
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        linkLoading = false
-    }
-
-    @MainActor
-    private func copyChatGPTLink(runID: String) async {
-        linkLoading = true
-        notice = nil
-        errorMessage = nil
-        do {
-            let response = try await APIClient.shared.createChatGPTAccessLink(runID: runID)
-            UIPasteboard.general.string = response.url
-            notice = "Ссылка скопирована. Отправьте её в этот чат — она только для чтения и действует 30 минут."
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        linkLoading = false
-    }
-
-    private func statusTitle(_ status: String) -> String {
-        switch status {
-        case "queued": return "В очереди"
-        case "running": return "Проверяем источники"
-        case "completed": return "Проверка завершена"
-        case "completed_with_errors": return "Завершено с предупреждениями"
-        case "failed": return "Мониторинг остановлен"
-        default: return status
         }
     }
 
@@ -460,21 +517,39 @@ struct HotelPriceMonitoringView: View {
 
     private func deltaText(_ delta: Double, percent: Double?) -> String {
         let sign = delta > 0 ? "+" : ""
-        if let percent {
-            let pSign = percent > 0 ? "+" : ""
-            return "\(sign)\(money(delta)) · \(pSign)\(percent.formatted(.number.precision(.fractionLength(1))))%"
-        }
-        return "\(sign)\(money(delta))"
+        let usd = "\(sign)\(money(delta))"
+        guard let percent else { return usd }
+        let percentSign = percent > 0 ? "+" : ""
+        return "\(usd) · \(percentSign)\(percent.formatted(.number.precision(.fractionLength(0...1))))%"
     }
 
-    private func errorText(_ code: String?) -> String {
-        switch code {
-        case "HOTEL_PRICE_SOURCE_MISSING": return "Для отеля не закреплён источник цены."
-        case "HOTEL_PRICE_NOT_FOUND_ON_SOURCE": return "Источник открылся, но подтверждаемая цена не найдена."
-        case "HOTEL_PRICE_SOURCE_CHALLENGE": return "Источник временно показал защитную проверку."
-        case "HOTEL_PRICE_BROWSER_UNAVAILABLE": return "Облачный браузер временно недоступен."
-        case "HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH": return "Источник не подтверждает точный объект отеля."
-        default: return code ?? "Цена не подтверждена."
+    private func issueText(_ issue: String) -> String {
+        switch issue {
+        case "PRICE_CHANGED_AFTER_EXPORT": return "Цена в базе изменилась после экспорта. Повторно экспортируйте этот город перед обновлением."
+        case "SOURCE_CHANGED": return "Источник отеля изменился после экспорта. Эта цена заблокирована от автоматического применения."
+        case "LOW_CONFIDENCE": return "Низкая уверенность проверки. Цена не будет применена автоматически."
+        case "PRICE_NOT_VERIFIED": return "Источник не подтвердил цену."
+        case "HOTEL_NOT_FOUND": return "Отель больше не найден в базе."
+        case "HOTEL_NOT_PUBLISHED": return "Отель больше не опубликован."
+        case "CITY_MISMATCH": return "Город отеля не совпадает с экспортом."
+        default: return issue.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    private func dateStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+}
+
+private enum PriceJSONUIError: LocalizedError {
+    case invalidFile(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidFile(let message): return message
         }
     }
 }

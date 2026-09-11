@@ -1,51 +1,69 @@
-# Expedia Price Refresh v3 — 11 сентября 2026
+# iumrah Business — JSON Price Exchange v2
 
-Эта версия исправляет конкретную ситуацию, когда iumrah Business показывает старые `$87/$173`, а Expedia уже показывает существенно другую цену, но кнопка отвечает «Expedia сейчас не подтвердила новую цену».
+## Active price-update architecture
 
-## Найденные причины
+Hotel price monitoring no longer runs through Cloudflare Browser Rendering or the old ChatGPT access-link bridge.
 
-### 1. Слишком большой скачок цены блокировался защитой
+The active workflow is deliberately explicit and admin-controlled:
 
-В v2 изменение больше примерно `+75%` или падение ниже `-35%` специально отправлялось на повторную проверку. Поэтому реальный переход, например, с `$87` к примерно `$190`, мог быть корректно найден Expedia, но UI всё равно получал `PRICE_CHANGE_AWAITING_CONFIRMATION` и показывал отказ.
+1. iumrah Business exports the full **Makkah** or **Madinah** hotel database slice as JSON.
+2. The JSON is uploaded to ChatGPT.
+3. ChatGPT checks the exact hotels/sources with one consistent monitoring policy and returns `iumrah.hotel-price-update.v1` JSON.
+4. iumrah Business imports that result and performs a server-side preview.
+5. Only selected, verified changes are written to D1 after the admin taps **Update selected prices**.
 
-В v3 сильное подтверждение от **exact Expedia property** принимается сразу. Для слабого/универсального парсинга двойная проверка остаётся.
+The hotel importer remains unchanged for adding new hotels. Initial imported/manual pricing is still supported. The old per-hotel **Update from source** UI is retired; ongoing catalog price updates use JSON exchange.
 
-### 2. Browser fallback фактически не доходил до дальних дат
+## Export schema
 
-В v2 общий список был `+1, +3, +7, +14, +21, +30`, но Browser Rendering проверял только первые 4 URL. Значит, если Expedia не отдавала цену до `+14`, browser до `+21/+30` вообще не доходил.
+`iumrah.hotel-monitor.v1`
 
-В v3 лестница: `+1, +7, +14, +20, +25, +30, +45, +60`. Browser Rendering одной сессией проверяет первые шесть, то есть реально доходит до `+20/+25/+30`.
+Each exported hotel contains:
 
-### 3. Импортированные даты могли удерживать старый benchmark
+- stable `hotelID`
+- hotel name, city, stars
+- current effective nightly USD price
+- whether the current value is a manual override
+- provider
+- exact stored source URL
+- last stored price timestamp
 
-Для каталога больше не используются старые даты, с которыми когда-то импортировали ссылку. Expedia URL остаётся источником и hotel identity, но price refresh каждый раз строит даты относительно сегодняшнего дня.
+The monitoring policy in the document tells ChatGPT to use the same method for every hotel and prefer future samples around +20 / +25 / +30 days when a provider needs dates.
 
-### 4. Региональный источник переписывался
+## Return schema
 
-`expedia.sa` раньше мог превращаться в `www.expedia.com`. Теперь домен источника сохраняется. Если отель импортирован с `expedia.sa`, автоматическая проверка тоже идёт через `expedia.sa`.
+`iumrah.hotel-price-update.v1`
 
-### 5. Самый полезный Expedia benchmark мог вырезаться
+Each result item preserves `hotelID`, old price, provider and source URL, and returns:
 
-Expedia часто пишет в FAQ карточки отеля смысл: **цена 1 ночи для 2 взрослых начинается от X; это минимальная ночная цена, найденная за последние 24 часа для проживания в следующие 30 дней**.
+- `status`: `changed`, `unchanged`, or `unverified`
+- `newNightlyUSD`
+- `confidence`: `high`, `medium`, `low`, or `none`
+- optional checked URL / reason / timestamp
 
-Это почти идеальный показатель именно для Вашего каталога, потому что Вам не нужна точная дата поездки — нужна свежая ориентировочная цена конкретного отеля. Но FAQ на странице часто находится ниже `Similar properties`, а защитный parser обрезал страницу перед рекомендациями и вместе с ними терял FAQ.
+## Safety before D1 write
 
-В v3 добавлен отдельный строгий parser только для этой Expedia-фразы. Цены соседних отелей из `Similar properties` по-прежнему не принимаются.
+The Worker validates the result again at preview and again immediately before applying it:
 
-## Итоговая логика
+- hotel still exists in the selected city
+- city still matches the export
+- source URL still points to the same stored hotel page
+- current D1 price is still equal to the exported old price
+- new price is valid USD nightly data
+- low-confidence / unverified data is not selectable
 
-`Expedia property ID -> 1 room / 2 adults -> rolling benchmark -> +1/+7/+14/+20/+25/+30/+45/+60 -> любой доступный room exact property -> D1 -> 48 часов`
+If a price or source changed after export, the item becomes a conflict and cannot be silently overwritten.
 
-Если сильная live-цена exact property найдена, она принимается сразу, даже если отличается от старой на `$100+`.
+When an approved JSON price is applied, any old manual override for that hotel is removed so the newly approved price becomes the effective catalog/generator price.
 
-Если цена действительно та же, кнопка честно пишет, что Expedia проверена и цена не изменилась.
+## Retired runtime pieces
 
-Если Expedia не дала подтверждаемую цену вообще, только тогда старая цена остаётся stale и показывается предупреждение.
+The active Worker no longer routes or schedules:
 
-## Проверка
+- `/api/iumrah/chatgpt/*`
+- `/api/admin/hotels/price-monitor`
+- `/api/admin/hotels/chatgpt-links`
+- Cloudflare price-monitor Workflows
+- scheduled automatic hotel price maintenance
 
-После изменений:
-
-- `npm run check` — passed
-- полный Worker test suite — `94/94 passed`
-- отдельно проверены: FAQ после `Similar properties`, SAR -> USD, exact property ID, диапазон +20/+25/+30, сохранение `expedia.sa`, sold-out fallback и большой скачок `$87 -> $190` за один подтверждённый Expedia read.
+The historical migration/table files remain in the repository because already-applied D1 migrations must not be deleted or rewritten.

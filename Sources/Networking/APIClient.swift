@@ -540,26 +540,6 @@ actor APIClient {
         return try decoder.decode(HotelAdminDetailResponse.self, from: data).hotel
     }
 
-    func refreshHotelPrice(id: String) async throws -> HotelPriceResponse {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/refresh"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 90
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(HotelPriceResponse.self, from: data)
-    }
-
-    func saveBrowserHotelPrice(id: String, sourceURL: String, price: ProviderPriceSnapshot) async throws -> HotelPriceResponse {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price/browser"))
-        request.httpMethod = "PUT"
-        request.timeoutInterval = 45
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(HotelBrowserPriceUpdatePayload(sourceURL: sourceURL, price: price))
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(HotelPriceResponse.self, from: data)
-    }
-
     func setManualHotelPrice(id: String, nightlyUSD: Double) async throws -> HotelPriceResponse {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/\(id)/price"))
         request.httpMethod = "PUT"
@@ -578,48 +558,34 @@ actor APIClient {
         return try decoder.decode(HotelPriceResponse.self, from: data)
     }
 
-    func priceMonitorRuns() async throws -> [HotelPriceMonitorRun] {
-        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor")
-        let (data, response) = try await perform(from: url)
+    func hotelPriceJSONExport(city: String) async throws -> HotelPriceExportDocument {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-json/export"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "city", value: city)]
+        let (data, response) = try await perform(from: components.url!)
         try validate(response, data: data)
-        return try decoder.decode(HotelPriceMonitorRunsResponse.self, from: data).runs
+        return try decoder.decode(HotelPriceExportDocument.self, from: data)
     }
 
-    func startPriceMonitor() async throws -> HotelPriceMonitorRun {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 45
-        let (data, response) = try await perform(request)
-        try validate(response, data: data)
-        return try decoder.decode(HotelPriceMonitorRunResponse.self, from: data).run
-    }
-
-    func priceMonitorRun(id: String) async throws -> HotelPriceMonitorRun {
-        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor/\(id)")
-        let (data, response) = try await perform(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(HotelPriceMonitorRunResponse.self, from: data).run
-    }
-
-    func publishPriceMonitor(runID: String, hotelIDs: [String]) async throws -> HotelPriceMonitorRun {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor/\(runID)/publish"))
+    func previewHotelPriceJSON(_ document: HotelPriceUpdateDocument) async throws -> HotelPriceJSONPreview {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-json/preview"))
         request.httpMethod = "POST"
         request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(HotelPriceMonitorPublishPayload(hotelIDs: hotelIDs))
+        request.httpBody = try encoder.encode(document)
         let (data, response) = try await perform(request)
         try validate(response, data: data)
-        return try decoder.decode(HotelPriceMonitorPublishResponse.self, from: data).run
+        return try decoder.decode(HotelPriceJSONPreviewResponse.self, from: data).preview
     }
 
-    func createChatGPTAccessLink(runID: String? = nil) async throws -> ChatGPTAccessLinkResponse {
-        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chatgpt-links"))
+    func applyHotelPriceJSON(_ document: HotelPriceUpdateDocument, hotelIDs: [String]) async throws -> HotelPriceJSONApplyResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-json/apply"))
         request.httpMethod = "POST"
+        request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try encoder.encode(ChatGPTAccessLinkPayload(runID: runID))
+        request.httpBody = try encoder.encode(HotelPriceJSONApplyPayload(document: document, hotelIDs: hotelIDs))
         let (data, response) = try await perform(request)
         try validate(response, data: data)
-        return try decoder.decode(ChatGPTAccessLinkResponse.self, from: data)
+        return try decoder.decode(HotelPriceJSONApplyResponse.self, from: data)
     }
 
     func hotelCloudHealth() async throws -> HotelCloudHealthResponse {
