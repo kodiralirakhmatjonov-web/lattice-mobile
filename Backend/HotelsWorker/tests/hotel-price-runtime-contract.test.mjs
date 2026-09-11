@@ -33,6 +33,17 @@ test('failed refresh preserves last known price and schedules retry', () => {
   assert.match(worker, /HOTEL_PRICE_RETRY_MS/);
 });
 
+
+test('admin refresh never labels a stale fallback as a successful live refresh', () => {
+  const start = worker.indexOf('async function refreshHotelPriceResponse');
+  const end = worker.indexOf('async function health', start);
+  const implementation = worker.slice(start, end);
+  assert.match(implementation, /refreshed:\s*true/);
+  assert.match(implementation, /changed/);
+  assert.match(implementation, /ok:\s*false,\s*refreshed:\s*false/);
+  assert.doesNotMatch(implementation, /fallback[\s\S]{0,220}ok:\s*true/);
+});
+
 test('large hotel price jumps are staged instead of replacing the accepted price immediately', () => {
   assert.match(worker, /PRICE_CHANGE_AWAITING_CONFIRMATION/);
   assert.match(worker, /pending_nightly_price_usd/);
@@ -41,7 +52,7 @@ test('large hotel price jumps are staged instead of replacing the accepted price
 });
 
 
-test('price refresh is exact-source only and has no alternate URL or static fallback', () => {
+test('price refresh stays property-bound while Expedia may probe alternate dates for availability', () => {
   assert.match(worker, /ensureHotelPriceSourceLock\(env, hotelID\)/);
   assert.match(worker, /obtainHotelPrice\(env, priceURL, provider\)/);
 
@@ -50,9 +61,10 @@ test('price refresh is exact-source only and has no alternate URL or static fall
   const start = worker.indexOf('async function fetchExactHotelSourcePrice');
   const end = worker.indexOf('async function health', start);
   const refreshImplementation = worker.slice(start, end);
-  assert.doesNotMatch(refreshImplementation, /buildHotelPriceProbeURLs/);
+  assert.match(worker, /safePropertyKey\(sourceURL, provider\)/);
+  assert.match(worker, /canonical_url/);
+  assert.doesNotMatch(refreshImplementation, /searchHotel|search by name|queryHotelByName/i);
   assert.doesNotMatch(refreshImplementation, /staticHotelHTML\(/);
-  assert.doesNotMatch(refreshImplementation, /roomRecoveryProbeURLs/);
   assert.doesNotMatch(refreshImplementation, /source-rooms/);
 });
 
@@ -86,7 +98,7 @@ test('scheduled maintenance actively refreshes due published hotel prices and pr
   const end = worker.indexOf('async function setManualHotelPrice', start);
   const implementation = worker.slice(start, end);
   assert.match(implementation, /JOIN hotel_price_sources hps ON hps\.hotel_id=h\.id/);
-  assert.match(implementation, /LIMIT 12/);
+  assert.match(implementation, /LIMIT 4/);
   assert.match(implementation, /fetchExactHotelSourcePrice\(env, hotelID, \{ clearManualOverride: false \}\)/);
   assert.match(worker, /await markHotelPriceRefreshFailure\(env, hotelID,/);
 });

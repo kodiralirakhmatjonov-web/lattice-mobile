@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import * as price from '../src/hotel-price.js';
-import { propertyKey } from '../src/hotel-price-source.js';
+import { propertyKey, safePropertyKey } from '../src/hotel-price-source.js';
 
 // Execute the actual Worker functions and SQL against SQLite, not text patterns.
 const source = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
@@ -28,8 +28,8 @@ function fixture(obtain) {
       async all() { return { results: db.prepare(sql).all(...values) }; },
       async run() { return db.prepare(sql).run(...values); } };
   }};
-  const fn = new Function('WorkflowEntrypoint', 'obtainHotelPrice', 'propertyKey', ...Object.keys(price), `${source}\nreturn {fetchExactHotelSourcePrice,runHotelPriceMaintenance,refreshHotelPriceResponse};`);
-  const api = fn(class {}, obtain, propertyKey, ...Object.values(price));
+  const fn = new Function('WorkflowEntrypoint', 'obtainHotelPrice', 'propertyKey', 'safePropertyKey', ...Object.keys(price), `${source}\nreturn {fetchExactHotelSourcePrice,runHotelPriceMaintenance,refreshHotelPriceResponse};`);
+  const api = fn(class {}, obtain, propertyKey, safePropertyKey, ...Object.values(price));
   return { db, env: { HOTELS_DB: binding }, ...api };
 }
 const quote = () => ({ finalURL: 'https://www.booking.com/hotel/sa/example.html?checkin=2026-10-01&checkout=2026-10-02',
@@ -71,6 +71,8 @@ test('cron preserves manual override; successful button returns to source', asyn
   assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_overrides').get().nightly_price_usd, 150);
   const response = await f.refreshHotelPriceResponse(f.env, 'h1');
   const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.refreshed, true);
   assert.equal(body.price.nightlyUSD, 120);
   assert.equal(body.price.isManualOverride, false);
 });
@@ -83,6 +85,8 @@ test('failed source preserves last price and manual override with a 6h retry; ma
   fail = true;
   const response = await f.refreshHotelPriceResponse(f.env, 'h1');
   const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.refreshed, false);
   assert.equal(body.error, 'HOTEL_PRICE_SOURCE_CHALLENGE');
   assert.equal(body.price.nightlyUSD, 180);
   const row = f.db.prepare('SELECT * FROM hotel_price_cache').get();
@@ -125,6 +129,28 @@ test('missing locks are repaired and existing locks are preserved by migration',
   assert.equal(f.db.prepare('SELECT source_id FROM hotel_price_sources WHERE hotel_id=?').get('h1').source_id, 's1');
 });
 
+
+test('Expedia v2 migration prefers Expedia and makes the preserved price due immediately', () => {
+  const f = fixture(async () => quote());
+  f.db.exec(`
+    INSERT INTO hotel_sources(id,hotel_id,provider,source_url,checked_at,canonical_url)
+    VALUES('e1','h1','Expedia','https://www.expedia.com/Medina-Hotels-Example.h1234.Hotel-Information','2026-09-10','https://www.expedia.com/Medina-Hotels-Example.h1234.Hotel-Information');
+    INSERT INTO hotel_price_cache(hotel_id,provider,source_url,nightly_price_usd,status,fetched_at,expires_at)
+    VALUES('h1','Booking','https://www.booking.com/hotel/sa/example.html',154,'fresh','2026-09-05T10:00:00Z','2099-01-01T00:00:00Z')
+    ON CONFLICT(hotel_id) DO UPDATE SET provider=excluded.provider,source_url=excluded.source_url,nightly_price_usd=excluded.nightly_price_usd,status=excluded.status,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at;
+  `);
+  f.db.exec(fs.readFileSync(new URL('../migrations/0034_expedia_price_refresh_v2.sql', import.meta.url),'utf8'));
+  const lock = f.db.prepare('SELECT source_id,provider,source_url FROM hotel_price_sources WHERE hotel_id=?').get('h1');
+  const cache = f.db.prepare('SELECT nightly_price_usd,status,next_retry_at,error FROM hotel_price_cache WHERE hotel_id=?').get('h1');
+  assert.equal(lock.source_id, 'e1');
+  assert.equal(lock.provider, 'Expedia');
+  assert.match(lock.source_url, /\.h1234\.Hotel-Information/);
+  assert.equal(cache.nightly_price_usd, 154);
+  assert.equal(cache.status, 'stale');
+  assert.ok(cache.next_retry_at);
+  assert.equal(cache.error, null);
+});
+
 test('large source movement requires a second matching read and leaves manual price until confirmed', async () => {
   let amount = 120;
   const f = fixture(async () => { const q = quote(); q.extracted.nightlyUSD = amount; return q; });
@@ -132,9 +158,14 @@ test('large source movement requires a second matching read and leaves manual pr
   f.db.exec("INSERT INTO hotel_price_overrides(hotel_id,nightly_price_usd,updated_at) VALUES ('h1',150,'2020-01-01')");
   amount = 300;
   const first = await (await f.refreshHotelPriceResponse(f.env, 'h1')).json();
+  assert.equal(first.ok, false);
+  assert.equal(first.refreshed, false);
   assert.equal(first.error, 'PRICE_CHANGE_AWAITING_CONFIRMATION');
   assert.equal(first.price.nightlyUSD, 150);
   const second = await (await f.refreshHotelPriceResponse(f.env, 'h1')).json();
+  assert.equal(second.ok, true);
+  assert.equal(second.refreshed, true);
+  assert.equal(second.changed, true);
   assert.equal(second.error, null);
   assert.equal(second.price.nightlyUSD, 300);
   assert.equal(second.price.isManualOverride, false);

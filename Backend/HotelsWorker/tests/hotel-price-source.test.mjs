@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { obtainHotelPrice, preparePriceURL, propertyKey, priceSourceURL } from '../src/hotel-price-source.js';
+import { obtainHotelPrice, preparePriceURL, propertyKey, priceSourceURL, expediaPriceProbeURLs } from '../src/hotel-price-source.js';
 import { extractHotelPriceFromHTML } from '../src/hotel-price.js';
 const now = Date.parse('2026-09-09T12:00:00Z');
 const booking = 'https://www.booking.com/hotel/sa/example.en-gb.html';
@@ -110,6 +110,61 @@ test('rendered date-less teaser and other property are never accepted', async ()
       render: async () => ({ finalURL, html: bookingHTML })
     }), /MISMATCH/);
   }
+});
+
+
+test('Expedia probe ladder stays on one property and normalizes two-adult USD occupancy', () => {
+  const probes = expediaPriceProbeURLs(expedia, now);
+  assert.equal(probes.length, 6);
+  assert.deepEqual(probes.map(value => new URL(value).searchParams.get('chkin')), [
+    '2026-09-10', '2026-09-12', '2026-09-16', '2026-09-23', '2026-09-30', '2026-10-09'
+  ]);
+  for (const value of probes) {
+    const url = new URL(value);
+    assert.equal(propertyKey(value, 'Expedia'), '1234');
+    assert.equal(url.searchParams.get('rm1'), 'a2');
+    assert.equal(url.searchParams.get('rooms'), '1');
+    assert.equal(url.searchParams.get('currency'), 'USD');
+    assert.equal(url.searchParams.get('top_cur'), 'USD');
+  }
+});
+
+test('Expedia sold-out first date falls through to a later date for the same hotel before browser rendering', async () => {
+  const requested = [];
+  const result = await obtainHotelPrice({}, expedia, 'Expedia', {
+    now,
+    fetcher: async url => {
+      requested.push(url);
+      const date = new URL(url).searchParams.get('chkin');
+      return new Response(date === '2026-09-16' ? expediaHTML : html('No rooms available for these dates'));
+    },
+    renderMany: () => assert.fail('same-property SSR fallback should avoid browser')
+  });
+  assert.equal(result.quote.checkIn, '2026-09-16');
+  assert.equal(result.extracted.nightlyUSD, 120);
+  assert.equal(requested.length, 3);
+  assert.ok(requested.every(value => propertyKey(value, 'Expedia') === '1234'));
+});
+
+test('Expedia browser fallback receives the bounded same-property date ladder once', async () => {
+  let renderManyCalls = 0;
+  const result = await obtainHotelPrice({}, expedia, 'Expedia', {
+    now,
+    fetcher: async () => new Response(html('Availability loads in JavaScript')),
+    renderMany: async (env, probes, expectedKey) => {
+      renderManyCalls += 1;
+      assert.equal(expectedKey, '1234');
+      assert.equal(probes.length, 6);
+      const quoteURL = probes[1];
+      return {
+        html: expediaHTML, finalURL: quoteURL, quoteURL, httpStatus: 200, transport: 'browser', contextVerified: true,
+        quote: { checkIn: '2026-09-12', checkOut: '2026-09-13', nights: 1, adults: 2, rooms: 1 },
+        extracted: extractHotelPriceFromHTML(expediaHTML, 'Expedia', 1)
+      };
+    }
+  });
+  assert.equal(renderManyCalls, 1);
+  assert.equal(result.extracted.nightlyUSD, 120);
 });
 
 test('Booking price element does not consume following tax or neighbouring room prices', () => {

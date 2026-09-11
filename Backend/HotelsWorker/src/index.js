@@ -1,4 +1,4 @@
-import { obtainHotelPrice, propertyKey } from './hotel-price-source.js';
+import { obtainHotelPrice, propertyKey, safePropertyKey } from './hotel-price-source.js';
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
@@ -4827,9 +4827,10 @@ async function runHotelPriceMaintenance(env) {
   });
 
   // Prices expire after 48h. The 15-minute cron picks up every due row on the
-  // next run; a 12-item batch covers the current catalog quickly without turning
-  // one expiry boundary into an uncontrolled provider burst. Provider failures never erase nightly_price_usd: mark failure
-  // preserves the last accepted rate as stale and schedules a retry.
+  // next run. Keep each pass intentionally small because Expedia may require a
+  // real browser session; four hotels per pass prevents one expiry boundary from
+  // exhausting Browser Run minutes. Provider failures never erase nightly_price_usd:
+  // mark failure preserves the last accepted rate as stale and schedules a retry.
   let due = { results: [] };
   try {
     due = await env.HOTELS_DB.prepare(`
@@ -4849,9 +4850,10 @@ async function runHotelPriceMaintenance(env) {
           OR (hp.status IN ('stale','failed','pending') AND (hp.next_retry_at IS NULL OR hp.next_retry_at<=?))
         )
       ORDER BY
+        CASE WHEN LOWER(COALESCE(hps.provider, (SELECT hs0.provider FROM hotel_sources hs0 WHERE hs0.hotel_id=h.id ORDER BY CASE WHEN LOWER(hs0.provider) IN ('expedia','expedia.com') THEN 0 ELSE 1 END, hs0.checked_at DESC LIMIT 1), '')) IN ('expedia','expedia.com') THEN 0 ELSE 1 END,
         CASE WHEN hp.nightly_price_usd IS NULL THEN 0 ELSE 1 END,
         COALESCE(hp.next_retry_at, hp.expires_at, hp.updated_at, h.updated_at) ASC
-      LIMIT 12
+      LIMIT 4
     `).bind(now, now).all();
   } catch (error) {
     console.error('HOTEL_PRICE_MAINTENANCE_QUEUE_FAILED', String(error?.message || error));
@@ -4910,32 +4912,60 @@ function normalizedHotelPriceProvider(value, sourceURL = '') {
 }
 
 async function ensureHotelPriceSourceLock(env, hotelID) {
-  let row = await env.HOTELS_DB.prepare(`
-    SELECT hps.source_id, hps.provider, hps.source_url, hs.canonical_url
+  const existing = await env.HOTELS_DB.prepare(`
+    SELECT hps.source_id, hps.provider, hps.source_url,
+           hs.canonical_url
     FROM hotel_price_sources hps
     LEFT JOIN hotel_sources hs ON hs.id=hps.source_id AND hs.hotel_id=hps.hotel_id
     WHERE hps.hotel_id=?
     LIMIT 1
   `).bind(hotelID).first().catch(() => null);
-  if (row?.source_url) return row;
 
-  row = await env.HOTELS_DB.prepare(`
+  // Expedia is the preferred pricing engine. If this hotel has an Expedia import,
+  // use that property even when an older Booking lock already exists. This keeps
+  // metadata provenance intact while giving price refresh one deterministic source.
+  const expedia = await env.HOTELS_DB.prepare(`
     SELECT hs.id AS source_id, hs.provider, hs.source_url, hs.canonical_url
     FROM hotel_sources hs
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id=hs.hotel_id
-    WHERE hs.hotel_id=? AND LOWER(hs.provider) IN ('booking','booking.com','expedia','expedia.com')
+    WHERE hs.hotel_id=? AND LOWER(hs.provider) IN ('expedia','expedia.com')
+      AND hs.source_url IS NOT NULL AND hs.source_url!=''
     ORDER BY CASE WHEN hp.source_id=hs.id THEN 0 WHEN hp.source_url=hs.source_url THEN 1 ELSE 2 END,
-             hs.checked_at ASC
+             hs.checked_at DESC
     LIMIT 1
-  `).bind(hotelID).first();
+  `).bind(hotelID).first().catch(() => null);
+
+  let row = expedia || existing;
+  if (!row?.source_url) {
+    row = await env.HOTELS_DB.prepare(`
+      SELECT hs.id AS source_id, hs.provider, hs.source_url, hs.canonical_url
+      FROM hotel_sources hs
+      LEFT JOIN hotel_price_cache hp ON hp.hotel_id=hs.hotel_id
+      WHERE hs.hotel_id=? AND LOWER(hs.provider) IN ('booking','booking.com','expedia','expedia.com')
+        AND hs.source_url IS NOT NULL AND hs.source_url!=''
+      ORDER BY CASE WHEN LOWER(hs.provider) IN ('expedia','expedia.com') THEN 0 ELSE 1 END,
+               CASE WHEN hp.source_id=hs.id THEN 0 WHEN hp.source_url=hs.source_url THEN 1 ELSE 2 END,
+               hs.checked_at DESC
+      LIMIT 1
+    `).bind(hotelID).first();
+  }
   if (!row?.source_url) return null;
 
   const provider = normalizedHotelPriceProvider(row.provider, row.source_url);
   if (!provider) return null;
   const now = new Date().toISOString();
+
+  // ON CONFLICT intentionally updates an old Booking lock to Expedia when the
+  // same hotel has a verified Expedia source. The property URL itself is still
+  // sourced only from the imported hotel row; no name search is performed.
   await env.HOTELS_DB.prepare(`
-    INSERT OR IGNORE INTO hotel_price_sources (hotel_id, source_id, provider, source_url, locked_at, updated_at)
+    INSERT INTO hotel_price_sources (hotel_id, source_id, provider, source_url, locked_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(hotel_id) DO UPDATE SET
+      source_id=excluded.source_id,
+      provider=excluded.provider,
+      source_url=excluded.source_url,
+      updated_at=excluded.updated_at
   `).bind(hotelID, row.source_id, provider, row.source_url, now, now).run().catch(() => {});
   return { ...row, provider };
 }
@@ -4970,12 +5000,15 @@ async function performHotelSourcePriceRefresh(env, hotelID, options = {}) {
   const provider = normalizedHotelPriceProvider(source.provider, sourceURL);
   if (!provider) throw new Error('HOTEL_PRICE_SOURCE_UNSUPPORTED');
 
-  // The importer already stores the canonical URL from this exact source.
-  // Use it for opaque Share links; keep the original source lock for provenance.
+  // Keep the imported source URL as provenance, but price from the canonical
+  // property page whenever the imported Expedia/Booking link is opaque (for
+  // example expe.onelink.me). safePropertyKey deliberately does not throw here.
   let priceURL = sourceURL;
-  if (!propertyKey(sourceURL, provider) && source.canonical_url) {
-    try { if (propertyKey(source.canonical_url, provider)) priceURL = source.canonical_url; } catch (_) {}
+  const lockedPropertyKey = safePropertyKey(sourceURL, provider);
+  if (!lockedPropertyKey && source.canonical_url && safePropertyKey(source.canonical_url, provider)) {
+    priceURL = source.canonical_url;
   }
+  if (!safePropertyKey(priceURL, provider)) throw new Error('HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH');
   const page = await obtainHotelPrice(env, priceURL, provider);
   const { quote, extracted, finalURL } = page;
 
@@ -5197,25 +5230,62 @@ async function saveBrowserHotelPrice(request, env, hotelID) {
 
 async function refreshHotelPriceResponse(env, hotelID) {
   const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
-  if (!hotel) return json({ ok: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
+  if (!hotel) return json({ ok: false, refreshed: false, changed: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
+
+  // The button has a strict semantic contract: `ok/refreshed=true` means this
+  // request really obtained a new live provider snapshot and persisted it. A
+  // stale cached amount may still be returned for continuity, but it is never
+  // reported as a successful refresh.
+  const beforeRow = await readHotelPriceRow(env, hotelID);
+  const beforePrice = hotelPriceFromRow(beforeRow);
+  const beforeSourceNightly = Number(beforePrice?.sourceNightlyUSD);
+  const beforeFetchedAt = beforePrice?.fetchedAt || null;
 
   try {
     const row = await fetchExactHotelSourcePrice(env, hotelID, { clearManualOverride: true });
-    return json({ ok: true, price: hotelPriceFromRow(row), error: row?.price_error || null });
+    const current = hotelPriceFromRow(row);
+    const sourceNightly = Number(current?.sourceNightlyUSD);
+    const rowError = cleanText(row?.price_error, 220) || null;
+    const persistedFreshSnapshot = row?.price_status === 'fresh'
+      && !rowError
+      && Number.isFinite(sourceNightly)
+      && sourceNightly > 0
+      && !!current?.fetchedAt
+      && current.fetchedAt !== beforeFetchedAt;
+
+    if (!persistedFreshSnapshot) {
+      const code = rowError || 'HOTEL_PRICE_REFRESH_NOT_CONFIRMED';
+      console.warn('HOTEL_PRICE_ADMIN_REFRESH_NOT_CONFIRMED', hotelID, code);
+      return json({ ok: false, refreshed: false, changed: false, price: current, error: code }, 200);
+    }
+
+    const changed = Number.isFinite(beforeSourceNightly)
+      && beforeSourceNightly > 0
+      && Math.abs(beforeSourceNightly - sourceNightly) >= 0.01;
+    console.log('HOTEL_PRICE_ADMIN_REFRESH_OK', hotelID, current?.provider || null, sourceNightly, changed ? 'changed' : 'confirmed');
+    return json({ ok: true, refreshed: true, changed, price: current, error: null }, 200);
   } catch (error) {
     const code = cleanText(error?.message, 220) || 'HOTEL_PRICE_REFRESH_FAILED';
-    if (code === 'HOTEL_PRICE_REFRESH_IN_PROGRESS') return json({ ok: false, error: code }, 409);
-    console.warn('HOTEL_PRICE_ADMIN_REFRESH_FAILED', hotelID, code);
-    const status = code === 'HOTEL_PRICE_SOURCE_MISSING' ? 409
-      : code === 'HOTEL_PRICE_NOT_FOUND_ON_SOURCE' || code === 'HOTEL_PRICE_SOURCE_CHALLENGE' ? 422
-      : 502;
-    const fallback = hotelPriceFromRow(await readHotelPriceRow(env, hotelID));
-    // If a previously accepted price exists, a provider 429/challenge/network
-    // error is a refresh warning, not a reason to make the hotel unusable.
-    if (fallback?.nightlyUSD != null && Number(fallback.nightlyUSD) > 0) {
-      return json({ ok: true, price: fallback, error: code }, 200);
+    if (code === 'HOTEL_PRICE_REFRESH_IN_PROGRESS') {
+      return json({ ok: false, refreshed: false, changed: false, price: hotelPriceFromRow(await readHotelPriceRow(env, hotelID)), error: code }, 409);
     }
-    return json({ ok: false, price: fallback, error: code }, status);
+    console.warn('HOTEL_PRICE_ADMIN_REFRESH_FAILED', hotelID, code);
+    const fallback = hotelPriceFromRow(await readHotelPriceRow(env, hotelID));
+    // Provider availability, anti-bot challenges and temporary browser/network
+    // failures are valid business outcomes for a refresh attempt. Return them as
+    // a decodable 200 response so iumrah Business can explicitly show that the
+    // last accepted price was preserved rather than claiming success.
+    const expectedSourceFailure = [
+      /^HOTEL_PRICE_SOURCE_HTTP_\d+$/,
+      /^HOTEL_PRICE_NOT_FOUND_ON_SOURCE$/,
+      /^HOTEL_PRICE_SOURCE_CHALLENGE$/,
+      /^HOTEL_PRICE_BROWSER_UNAVAILABLE$/,
+      /^HOTEL_PRICE_SOURCE_EMPTY$/,
+      /^HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH$/,
+      /^HOTEL_PRICE_SOURCE_(?:BAD_REDIRECT|REDIRECT_LIMIT|REDIRECT_MISMATCH)$/
+    ].some(pattern => pattern.test(code));
+    const status = expectedSourceFailure ? 200 : (code === 'HOTEL_PRICE_SOURCE_MISSING' ? 409 : 502);
+    return json({ ok: false, refreshed: false, changed: false, price: fallback, error: code }, status);
   }
 }
 

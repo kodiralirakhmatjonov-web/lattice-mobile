@@ -1,12 +1,27 @@
-import { extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
+import { extractHotelPriceFromHTML, normalizeImportedHotelPriceSnapshot, quoteContextFromProbeURL } from './hotel-price.js';
 
 const DAY = 86400000;
+const EXPEDIA_PROBE_OFFSETS = [1, 3, 7, 14, 21, 30];
+const EXPEDIA_BROWSER_PROBE_LIMIT = 4;
+
+function expediaHostAllowed(host) {
+  const value = String(host || '').toLowerCase();
+  // Keep the allow-list provider-specific while accepting Expedia regional domains.
+  // Examples: expedia.com, expedia.co.uk, expedia.com.au, expedia.com.sa, expedia.ae.
+  return /(^|\.)expedia\.(?:com(?:\.[a-z]{2})?|co\.[a-z]{2}|[a-z]{2})$/.test(value);
+}
+
+function expediaShareHost(host) {
+  const value = String(host || '').toLowerCase();
+  return value === 'expe.onelink.me' || value.endsWith('.expe.onelink.me');
+}
+
 export function priceSourceURL(value, provider) {
-  const url = new URL(value);
+  const url = value instanceof URL ? new URL(value.toString()) : new URL(String(value));
   const host = url.hostname.toLowerCase();
   const allowed = provider === 'Booking'
     ? /(^|\.)booking\.com$/.test(host)
-    : provider === 'Expedia' && /(^|\.)expedia\.(com|co\.uk|ca|de|fr|it|es|com\.au|co\.jp|co\.in|com\.sa|ae)$/.test(host);
+    : provider === 'Expedia' && expediaHostAllowed(host);
   if (!allowed || url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) {
     throw new Error('HOTEL_PRICE_SOURCE_REDIRECT_MISMATCH');
   }
@@ -22,6 +37,44 @@ export function propertyKey(value, provider) {
   return /\.h(\d+)\.Hotel-Information/i.exec(url.pathname)?.[1] || null;
 }
 
+export function safePropertyKey(value, provider) {
+  try { return propertyKey(value, provider); } catch (_) { return null; }
+}
+
+function cleanISODate(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const ms = Date.parse(`${text}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === text ? text : null;
+}
+
+function dateAt(now, offsetDays) {
+  return new Date(now + offsetDays * DAY).toISOString().slice(0, 10);
+}
+
+function normalizeQuoteParams(url, provider) {
+  const p = url.searchParams;
+  if (provider === 'Booking') {
+    for (const [key, value] of Object.entries({
+      selected_currency: 'USD', cur_currency: 'USD', lang: 'en-us',
+      group_adults: '2', req_adults: '2', group_children: '0', req_children: '0',
+      no_rooms: '1', room1: 'A,A'
+    })) p.set(key, value);
+    for (const key of ['age', 'req_age', 'checkin_year', 'checkin_month', 'checkin_monthday', 'checkout_year', 'checkout_month', 'checkout_monthday']) p.delete(key);
+  } else {
+    for (const key of [...p.keys()]) if (/^rm\d+$/.test(key)) p.delete(key);
+    // Expedia currently understands top_cur more consistently than currency on
+    // lodging property pages. Keep both so SSR and the SPA agree on USD.
+    for (const [key, value] of Object.entries({
+      rm1: 'a2', adults: '2', rooms: '1', currency: 'USD', top_cur: 'USD',
+      langid: '1033', locale: 'en_US', useRewards: 'false'
+    })) p.set(key, value);
+    p.delete('children');
+  }
+  url.hash = '';
+  return url;
+}
+
 // A catalogue rate is a benchmark for one room / two adults, not a trip quote.
 // Preserve valid future source dates. Missing/expired dates roll to tomorrow for
 // one night. Never alter the immutable imported link in hotel_price_sources.
@@ -31,28 +84,62 @@ export function preparePriceURL(value, provider, now = Date.now()) {
   const p = url.searchParams;
   const inKey = provider === 'Booking' ? 'checkin' : 'chkin';
   const outKey = provider === 'Booking' ? 'checkout' : 'chkout';
-  const validDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') &&
-    Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
-  const start = p.get(inKey), end = p.get(outKey);
+  const start = cleanISODate(p.get(inKey));
+  const end = cleanISODate(p.get(outKey));
   const today = new Date(now).toISOString().slice(0, 10);
-  if (!validDate(start) || !validDate(end) || start <= today || end <= start || Date.parse(end) - Date.parse(start) > 30 * DAY) {
-    p.set(inKey, new Date(now + DAY).toISOString().slice(0, 10));
-    p.set(outKey, new Date(now + 2 * DAY).toISOString().slice(0, 10));
+  if (!start || !end || start <= today || end <= start || Date.parse(end) - Date.parse(start) > 30 * DAY) {
+    p.set(inKey, dateAt(now, 1));
+    p.set(outKey, dateAt(now, 2));
   }
-  if (provider === 'Booking') {
-    for (const [key, value] of Object.entries({ selected_currency: 'USD', cur_currency: 'USD', lang: 'en-us', group_adults: '2', req_adults: '2', group_children: '0', req_children: '0', no_rooms: '1', room1: 'A,A' })) p.set(key, value);
-    for (const key of ['age', 'req_age', 'checkin_year', 'checkin_month', 'checkin_monthday', 'checkout_year', 'checkout_month', 'checkout_monthday']) p.delete(key);
-  } else {
-    for (const key of [...p.keys()]) if (/^rm\d+$/.test(key)) p.delete(key);
-    for (const [key, value] of Object.entries({ rm1: 'a2', adults: '2', rooms: '1', currency: 'USD', langid: '1033', useRewards: 'false' })) p.set(key, value);
-    p.delete('children');
-  }
-  url.hash = '';
+  normalizeQuoteParams(url, provider);
   return url.toString();
 }
 
+// Expedia refresh is property-bound, not room-bound. The imported URL/property ID
+// remains the identity anchor, while availability may move between room types and
+// dates. We first keep a still-valid source stay, then probe a small rolling window.
+export function expediaPriceProbeURLs(value, now = Date.now()) {
+  const source = priceSourceURL(value, 'Expedia');
+  const key = propertyKey(source, 'Expedia');
+  if (!key) throw new Error('HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH');
+
+  // Regional Expedia pages share the same .h<propertyID> identity. Normalizing to
+  // www.expedia.com gives the browser a stable rendering target without changing
+  // the hotel identity or searching by hotel name.
+  const base = new URL(source.toString());
+  base.hostname = 'www.expedia.com';
+  base.hash = '';
+
+  const output = [];
+  const seen = new Set();
+  const push = url => {
+    normalizeQuoteParams(url, 'Expedia');
+    if (propertyKey(url, 'Expedia') !== key) return;
+    const text = url.toString();
+    if (!seen.has(text)) { seen.add(text); output.push(text); }
+  };
+
+  const originalIn = cleanISODate(source.searchParams.get('chkin'));
+  const originalOut = cleanISODate(source.searchParams.get('chkout'));
+  const today = new Date(now).toISOString().slice(0, 10);
+  if (originalIn && originalOut && originalIn > today && originalOut > originalIn && Date.parse(originalOut) - Date.parse(originalIn) <= 30 * DAY) {
+    const original = new URL(base.toString());
+    original.searchParams.set('chkin', originalIn);
+    original.searchParams.set('chkout', originalOut);
+    push(original);
+  }
+
+  for (const offset of EXPEDIA_PROBE_OFFSETS) {
+    const probe = new URL(base.toString());
+    probe.searchParams.set('chkin', dateAt(now, offset));
+    probe.searchParams.set('chkout', dateAt(now, offset + 1));
+    push(probe);
+  }
+  return output;
+}
+
 function challenge(html) {
-  return /<title[^>]*>[^<]*(?:access denied|just a moment|robot|captcha)|verify you are human|enable javascript and cookies to continue|px-captcha|awsWafCookieDomainList|AwsWafIntegration/i.test(html);
+  return /<title[^>]*>[^<]*(?:access denied|just a moment|robot|captcha)|verify you are human|enable javascript and cookies to continue|px-captcha|awsWafCookieDomainList|AwsWafIntegration/i.test(String(html || ''));
 }
 
 function quoteContextMatches(expectedValue, actualValue, provider) {
@@ -87,6 +174,20 @@ function quoteContextMatches(expectedValue, actualValue, provider) {
   }
 }
 
+function extractedFromSnapshot(snapshot) {
+  const normalized = normalizeImportedHotelPriceSnapshot(snapshot);
+  if (!normalized) return null;
+  return {
+    amount: normalized.amountOriginal,
+    currency: normalized.currencyOriginal,
+    priceBasis: normalized.priceBasis,
+    nightlyUSD: normalized.nightlyUSD,
+    stayTotalUSD: normalized.stayTotalUSD,
+    confidence: normalized.confidence,
+    method: normalized.method
+  };
+}
+
 function extractPage(page, provider, expectedKey, now) {
   const finalURL = priceSourceURL(page.finalURL, provider);
   if (challenge(page.html)) throw new Error('HOTEL_PRICE_SOURCE_CHALLENGE');
@@ -95,28 +196,24 @@ function extractPage(page, provider, expectedKey, now) {
 
   // The quote context is the URL we intentionally requested, not the literal URL
   // left in the address bar after Booking/Expedia canonicalize their SPA route.
-  // Direct HTTP reads still have to preserve dates in the final URL; browser reads
-  // are allowed to rewrite the visible URL because the rendered price is collected
-  // from the page opened with quoteURL.
   const quoteURL = priceSourceURL(page.quoteURL || page.finalURL, provider);
   const quoteKey = propertyKey(quoteURL, provider);
   if (!quoteKey || quoteKey !== key) throw new Error('HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH');
-  if (preparePriceURL(quoteURL, provider, now) !== quoteURL.toString()) throw new Error('HOTEL_PRICE_QUOTE_CONTEXT_MISMATCH');
+  const normalizedQuoteURL = new URL(preparePriceURL(quoteURL, provider, now));
+  const actualQuoteURL = new URL(quoteURL.toString());
+  normalizedQuoteURL.searchParams.sort();
+  actualQuoteURL.searchParams.sort();
+  if (normalizedQuoteURL.toString() !== actualQuoteURL.toString()) throw new Error('HOTEL_PRICE_QUOTE_CONTEXT_MISMATCH');
   const finalContextMatches = quoteContextMatches(quoteURL, finalURL, provider);
   if (page.transport === 'browser') {
-    // Booking/Expedia may canonicalize the visible SPA URL and drop quote params.
-    // Only our own browser renderer may explicitly attest that the rendered DOM
-    // was collected after navigating the prepared quote URL. A generic/custom
-    // renderer still has to preserve the quote context in its final URL.
-    if (!finalContextMatches && page.contextVerified !== true) {
-      throw new Error('HOTEL_PRICE_QUOTE_CONTEXT_MISMATCH');
-    }
+    if (!finalContextMatches && page.contextVerified !== true) throw new Error('HOTEL_PRICE_QUOTE_CONTEXT_MISMATCH');
   } else if (!finalContextMatches) {
     throw new Error('HOTEL_PRICE_QUOTE_CONTEXT_MISMATCH');
   }
 
   const quote = quoteContextFromProbeURL(quoteURL, provider);
-  const extracted = extractHotelPriceFromHTML(page.html, provider, quote.nights);
+  const extracted = extractedFromSnapshot(page.priceSnapshot)
+    || extractHotelPriceFromHTML(page.html, provider, quote.nights);
   if (!extracted) throw new Error('HOTEL_PRICE_NOT_FOUND_ON_SOURCE');
   return { ...page, quote, extracted };
 }
@@ -128,7 +225,13 @@ async function directPage(url, provider, fetcher) {
   try {
     for (let hop = 0; hop < 6; hop++) {
       const response = await fetcher(current, {
-        headers: { accept: 'text/html', 'accept-language': 'en-US,en;q=0.9', 'cache-control': 'no-cache' },
+        headers: {
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'accept-language': 'en-US,en;q=0.9',
+          'cache-control': 'no-cache',
+          pragma: 'no-cache',
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+        },
         redirect: 'manual', signal: controller.signal, cf: { cacheTtl: 0, cacheEverything: false }
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -147,6 +250,172 @@ async function directPage(url, provider, fetcher) {
   } finally { clearTimeout(timeout); }
 }
 
+async function configureBrowserPage(page, provider) {
+  await page.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+  await page.setCacheEnabled(false);
+  await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36');
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9', 'Cache-Control': 'no-cache', Pragma: 'no-cache' });
+  if (provider === 'Booking') {
+    await page.setCookie(
+      { name: 'selected_currency', value: 'USD', domain: '.booking.com', path: '/', secure: true },
+      { name: 'currency', value: 'USD', domain: '.booking.com', path: '/', secure: true },
+      { name: 'cur_curr', value: 'USD', domain: '.booking.com', path: '/', secure: true },
+      { name: 'b_selected_currency', value: 'USD', domain: '.booking.com', path: '/', secure: true }
+    ).catch(() => {});
+  }
+  await page.setRequestInterception(true);
+  page.on('request', request => {
+    try {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) priceSourceURL(request.url(), provider);
+      if (['image', 'media', 'font'].includes(request.resourceType())) { void request.abort().catch(() => {}); return; }
+      void request.continue().catch(() => {});
+    } catch { void request.abort().catch(() => {}); }
+  });
+}
+
+async function activateAvailability(page) {
+  await page.evaluate(async () => {
+    const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const actions = [...document.querySelectorAll('button,a,[role="button"]')].filter(el =>
+      /see availability|show prices|check availability|view prices|select room|room options|choose your room/i.test(clean(`${el.innerText || ''} ${el.getAttribute?.('aria-label') || ''}`))
+    );
+    for (const action of actions.slice(0, 2)) {
+      try { if (action.offsetParent !== null) action.click(); } catch (_) {}
+    }
+    const target = document.querySelector('#hprt-table, [data-testid="availability-table"], [data-testid*="availability"], [data-stid="property-offers"], [data-stid*="room"]');
+    try { target?.scrollIntoView({ block: 'center' }); } catch (_) {}
+    for (let i = 0; i < 4; i += 1) {
+      try { window.scrollBy(0, Math.max(500, window.innerHeight * 0.7)); } catch (_) {}
+      await new Promise(resolve => setTimeout(resolve, 180));
+    }
+  }).catch(() => {});
+}
+
+async function expediaDOMPriceSnapshot(page, quoteURL) {
+  const quote = quoteContextFromProbeURL(quoteURL, 'Expedia');
+  const value = await page.evaluate(({ checkIn, checkOut, nights }) => {
+    const clean = input => String(input || '').replace(/\s+/g, ' ').trim();
+    const currencyOf = input => {
+      const token = clean(input).toUpperCase().replace(/\s+/g, '');
+      if (token === 'USD' || token === 'US$' || token === '$') return 'USD';
+      if (token === 'SAR' || token === 'SR' || token.includes('ر.س')) return 'SAR';
+      if (token === 'AED' || token.includes('د.إ')) return 'AED';
+      return null;
+    };
+    const amountOf = input => {
+      let text = clean(input).replace(/[\u00a0\u202f\s]/g, '').replace(/[^0-9.,]/g, '');
+      if (!text) return null;
+      const comma = text.lastIndexOf(',');
+      const dot = text.lastIndexOf('.');
+      if (comma >= 0 && dot >= 0) text = dot > comma ? text.replace(/,/g, '') : text.replace(/\./g, '').replace(',', '.');
+      else if (comma >= 0) {
+        const after = text.length - comma - 1;
+        text = (after === 1 || after === 2) ? text.replace(',', '.') : text.replace(/,/g, '');
+      } else if (dot >= 0) {
+        const after = text.length - dot - 1;
+        if (after !== 1 && after !== 2) text = text.replace(/\./g, '');
+      }
+      const amount = Number(text);
+      return Number.isFinite(amount) && amount > 0 ? amount : null;
+    };
+    const moneyValues = input => {
+      const text = clean(input);
+      const out = [];
+      const before = /(?:US\$|USD|\$|SAR|SR|ر\.?س\.?|AED|د\.?إ\.?)\s*([0-9][0-9.,\s]*)/gi;
+      const after = /([0-9][0-9.,\s]*)\s*(US\$|USD|\$|SAR|SR|ر\.?س\.?|AED|د\.?إ\.?)/gi;
+      let match;
+      while ((match = before.exec(text)) !== null && out.length < 12) {
+        const token = match[0].slice(0, match[0].indexOf(match[1]));
+        const amount = amountOf(match[1]); const currency = currencyOf(token);
+        if (amount && currency) out.push({ amount, currency, index: match.index });
+      }
+      while ((match = after.exec(text)) !== null && out.length < 12) {
+        const amount = amountOf(match[1]); const currency = currencyOf(match[2]);
+        if (amount && currency) out.push({ amount, currency, index: match.index });
+      }
+      return out.sort((a, b) => a.index - b.index);
+    };
+    const excluded = el => {
+      for (let node = el; node && node !== document.body; node = node.parentElement) {
+        const marker = `${node.getAttribute?.('data-stid') || ''} ${node.getAttribute?.('data-testid') || ''} ${node.id || ''} ${node.className || ''}`;
+        const heading = clean(node.querySelector?.('h1,h2,h3,[role="heading"]')?.innerText || '');
+        if (/(recommend|similar|related|other-property|cross-sell|upsell|search-result)/i.test(marker)) return true;
+        if (/(similar properties|you may also like|other properties|recommended|more places to stay)/i.test(heading)) return true;
+      }
+      return false;
+    };
+    const roomName = el => {
+      for (let node = el, depth = 0; node && depth < 8; node = node.parentElement, depth += 1) {
+        const heading = clean(node.querySelector?.('h2,h3,h4,[role="heading"],[data-testid*="room-name"]')?.innerText || '');
+        if (heading && heading.length >= 3 && heading.length <= 180 && !/(recommended|similar|about this property|policies)/i.test(heading)) return heading;
+      }
+      return null;
+    };
+    const candidates = [];
+    const selectors = [
+      '[data-stid*="price-lockup"]','[data-stid*="price"]','[data-testid*="price"]',
+      '[class*="uitk-lockup-price"]','[class*="price-lockup"]'
+    ];
+    const elements = [...new Set(selectors.flatMap(selector => [...document.querySelectorAll(selector)]))];
+    const add = (el, scoreBase) => {
+      if (!el || excluded(el)) return;
+      const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) return;
+      let context = clean(el.innerText || el.textContent || '');
+      let node = el;
+      for (let depth = 0; node && depth < 4 && context.length < 100; depth += 1, node = node.parentElement) {
+        const candidate = clean(node.innerText || node.textContent || '');
+        if (candidate.length > context.length && candidate.length <= 800) context = candidate;
+      }
+      if (!context || !/(SAR|SR|ر\.?س\.?|AED|د\.?إ\.?|USD|US\$|\$)/i.test(context)) return;
+      if (/(deposit|parking|breakfast fee|airport shuttle|taxi|damage deposit)/i.test(context) && !/(room|suite|night|total|reserve|select|price)/i.test(context)) return;
+      let money = moneyValues(context).filter(item => item.amount >= 15 && item.amount <= 100000);
+      if (!money.length) return;
+      const totalIndex = context.toLowerCase().indexOf('total');
+      let total = null;
+      if (totalIndex >= 0) {
+        const afterTotal = money.filter(item => item.index >= totalIndex);
+        if (afterTotal.length) total = afterTotal[afterTotal.length - 1];
+        const beforeTotal = money.filter(item => item.index < totalIndex);
+        if (beforeTotal.length) money = beforeTotal;
+      }
+      // Expedia often renders an old struck price before the active rate. Prefer the
+      // last non-total amount in the visible price lockup, matching the displayed rate.
+      const base = money[money.length - 1];
+      const name = roomName(el);
+      let score = scoreBase;
+      if (name) score += 12;
+      if (/per\s+night|\/\s*night|nightly/i.test(context)) score += 22;
+      if (/member price|sign in|reward/i.test(context)) score -= 4;
+      const basis = (/per\s+night|\/\s*night|nightly/i.test(context) || Number(nights) === 1) ? 'nightly' : (/total/i.test(context) ? 'stay_total' : 'nightly');
+      candidates.push({ amount: base.amount, currency: base.currency, totalAmount: total?.amount || null, totalCurrency: total?.currency || null,
+        priceBasis: basis, checkIn, checkOut, nights: Number(nights) || 1, adults: 2, rooms: 1, roomName: name,
+        method: 'expedia-browser-any-room', confidence: Math.max(0.72, Math.min(0.995, score / 100)), score,
+        domIndex: elements.indexOf(el) });
+    };
+    elements.forEach(el => add(el, 78));
+    if (!candidates.length) {
+      for (const el of [...document.querySelectorAll('span,div,p,strong')].slice(0, 4500)) {
+        const text = clean(el.innerText || el.textContent || '');
+        if (text.length < 3 || text.length > 140 || !/(SAR|SR|ر\.?س\.?|AED|د\.?إ\.?|USD|US\$|\$)/i.test(text)) continue;
+        add(el, 56);
+        if (candidates.length >= 80) break;
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score || a.domIndex - b.domIndex || a.amount - b.amount);
+    if (!candidates.length) return null;
+    const bestScore = candidates[0].score;
+    const pool = candidates.filter(item => item.score >= bestScore - 3);
+    // Any room is acceptable: choose the lowest sellable rate among equally strong
+    // room-card candidates, rather than requiring Double/Twin room naming.
+    pool.sort((a, b) => a.amount - b.amount || a.domIndex - b.domIndex);
+    const chosen = pool[0];
+    delete chosen.score; delete chosen.domIndex;
+    return chosen;
+  }, quote).catch(() => null);
+  return value || null;
+}
+
 export async function renderPricePage(env, sourceURL, provider, expectedKey, now) {
   if (!env.BROWSER) throw new Error('HOTEL_PRICE_BROWSER_UNAVAILABLE');
   const { default: puppeteer } = await import('@cloudflare/puppeteer');
@@ -154,31 +423,10 @@ export async function renderPricePage(env, sourceURL, provider, expectedKey, now
   try {
     browser = await puppeteer.launch(env.BROWSER);
     const page = await browser.newPage();
-    await page.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
-    await page.setCacheEnabled(false);
-    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36');
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9', 'Cache-Control': 'no-cache' });
-    if (provider === 'Booking') {
-      await page.setCookie(
-        { name: 'selected_currency', value: 'USD', domain: '.booking.com', path: '/', secure: true },
-        { name: 'currency', value: 'USD', domain: '.booking.com', path: '/', secure: true },
-        { name: 'cur_curr', value: 'USD', domain: '.booking.com', path: '/', secure: true },
-        { name: 'b_selected_currency', value: 'USD', domain: '.booking.com', path: '/', secure: true }
-      ).catch(() => {});
-    }
-    await page.setRequestInterception(true);
-    page.on('request', request => {
-      try {
-        if (request.isNavigationRequest() && request.frame() === page.mainFrame()) priceSourceURL(request.url(), provider);
-        if (['image', 'media', 'font'].includes(request.resourceType())) { void request.abort().catch(() => {}); return; }
-        void request.continue().catch(() => {});
-      } catch { void request.abort().catch(() => {}); }
-    });
+    await configureBrowserPage(page, provider);
     let response = await page.goto(sourceURL, { waitUntil: 'domcontentloaded', timeout: 18000 });
     let resolved = priceSourceURL(page.url(), provider);
     if (!propertyKey(resolved, provider)) {
-      // A Share URL can resolve through client-side navigation after DOM load.
-      // Let the site's own JavaScript run; never solve/bypass a CAPTCHA.
       await page.waitForFunction(() => /\/hotel\/.*\.html|\.h\d+\.Hotel-Information/i.test(location.pathname), { timeout: 10000 }).catch(() => {});
       resolved = priceSourceURL(page.url(), provider);
       if (challenge(await page.content())) throw new Error('HOTEL_PRICE_SOURCE_CHALLENGE');
@@ -188,38 +436,122 @@ export async function renderPricePage(env, sourceURL, provider, expectedKey, now
     const prepared = preparePriceURL(resolved, provider, now);
     if (prepared !== resolved.toString()) response = await page.goto(prepared, { waitUntil: 'domcontentloaded', timeout: 16000 });
     if (response && !response.ok()) throw new Error(`HOTEL_PRICE_SOURCE_HTTP_${response.status()}`);
-
-    // Availability widgets are frequently lazy-rendered. Trigger only the site's
-    // ordinary availability controls and then wait for an explicit sellable price.
-    await page.evaluate(() => {
-      const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-      const action = [...document.querySelectorAll('button,a,[role="button"]')].find(el =>
-        /see availability|show prices|check availability|view prices|select room/i.test(clean(`${el.innerText || ''} ${el.getAttribute?.('aria-label') || ''}`))
-      );
-      try { if (action && action.offsetParent !== null) action.click(); } catch (_) {}
-      const target = document.querySelector('#hprt-table, [data-testid="availability-table"], [data-testid*="availability"], [data-stid="property-offers"]');
-      try { target?.scrollIntoView({ block: 'center' }); } catch (_) {}
-    }).catch(() => {});
-
+    await activateAvailability(page);
     await page.waitForFunction(() => {
       const text = document.body?.innerText || '';
       return /(?:USD|US\$|SAR|AED|\$)\s*[0-9]/.test(text) &&
         !!document.querySelector('[data-testid="price-and-discounted-price"], [data-testid="price-for-x-nights"], .prco-valign-middle-helper, .bui-price-display__value, .uitk-lockup-price, [data-stid*="price-lockup"], [data-stid="price-lockup"]');
-    }, { timeout: 8000 }).catch(() => {});
+    }, { timeout: 7000 }).catch(() => {});
+    const html = await page.content();
     const result = {
-      html: await page.content(),
+      html,
       finalURL: page.url(),
       quoteURL: prepared,
       httpStatus: response?.status() || 200,
       transport: 'browser',
-      contextVerified: true
+      contextVerified: true,
+      priceSnapshot: provider === 'Expedia' ? await expediaDOMPriceSnapshot(page, prepared) : null
     };
     if (result.html.length > 8_000_000) throw new Error('HOTEL_PRICE_SOURCE_PAGE_TOO_LARGE');
     return result;
   } finally { if (browser) await browser.close().catch(() => {}); }
 }
 
+async function renderExpediaPricePages(env, probeURLs, expectedKey, now) {
+  if (!env.BROWSER) throw new Error('HOTEL_PRICE_BROWSER_UNAVAILABLE');
+  const { default: puppeteer } = await import('@cloudflare/puppeteer');
+  let browser;
+  let lastError = new Error('HOTEL_PRICE_NOT_FOUND_ON_SOURCE');
+  try {
+    browser = await puppeteer.launch(env.BROWSER);
+    const page = await browser.newPage();
+    await configureBrowserPage(page, 'Expedia');
+
+    for (const probeURL of probeURLs.slice(0, EXPEDIA_BROWSER_PROBE_LIMIT)) {
+      try {
+        const prepared = preparePriceURL(probeURL, 'Expedia', now);
+        const response = await page.goto(prepared, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        if (response && !response.ok()) throw new Error(`HOTEL_PRICE_SOURCE_HTTP_${response.status()}`);
+        const resolved = priceSourceURL(page.url(), 'Expedia');
+        const key = propertyKey(resolved, 'Expedia');
+        if (!key || key !== expectedKey) throw new Error('HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH');
+
+        await activateAvailability(page);
+        await page.waitForFunction(() => {
+          const text = document.body?.innerText || '';
+          return /(?:USD|US\$|SAR|AED|\$)\s*[0-9]/.test(text) || /sold out|not available|no rooms/i.test(text);
+        }, { timeout: 5500 }).catch(() => {});
+
+        const priceSnapshot = await expediaDOMPriceSnapshot(page, prepared);
+        const html = await page.content();
+        if (challenge(html)) throw new Error('HOTEL_PRICE_SOURCE_CHALLENGE');
+        if (html.length > 8_000_000) throw new Error('HOTEL_PRICE_SOURCE_PAGE_TOO_LARGE');
+        const rendered = {
+          html,
+          finalURL: page.url(),
+          quoteURL: prepared,
+          httpStatus: response?.status() || 200,
+          transport: 'browser',
+          contextVerified: true,
+          priceSnapshot
+        };
+        // Validate identity/date context and require an actual sellable rate before
+        // leaving the shared browser session.
+        return extractPage(rendered, 'Expedia', expectedKey, now);
+      } catch (error) {
+        lastError = error;
+        if (/PROPERTY_MISMATCH|REDIRECT_MISMATCH|BAD_REDIRECT/.test(String(error?.message || ''))) throw error;
+      }
+    }
+    throw lastError;
+  } finally { if (browser) await browser.close().catch(() => {}); }
+}
+
+async function obtainExpediaHotelPrice(env, sourceURL, dependencies = {}) {
+  const now = dependencies.now ?? Date.now();
+  const expectedKey = propertyKey(sourceURL, 'Expedia');
+  if (!expectedKey) throw new Error('HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH');
+  const probes = expediaPriceProbeURLs(sourceURL, now);
+  const fetcher = dependencies.fetcher || fetch;
+  let lastError = new Error('HOTEL_PRICE_NOT_FOUND_ON_SOURCE');
+
+  // Static/SSR Expedia HTML is cheap. Try the complete same-property date ladder
+  // first so a sold-out tomorrow does not force an expensive browser session.
+  for (const probeURL of probes) {
+    try {
+      const page = await directPage(probeURL, 'Expedia', fetcher);
+      page.quoteURL = probeURL;
+      return extractPage(page, 'Expedia', expectedKey, now);
+    } catch (error) {
+      lastError = error;
+      if (/PROPERTY_MISMATCH|REDIRECT_MISMATCH|BAD_REDIRECT/.test(String(error?.message || ''))) throw error;
+    }
+  }
+
+  const renderMany = dependencies.renderMany || renderExpediaPricePages;
+  try {
+    return await renderMany(env, probes, expectedKey, now);
+  } catch (error) {
+    // Backward-compatible single-page renderer injection for unit tests/custom callers.
+    if (dependencies.render && !dependencies.renderMany) {
+      for (const probeURL of probes.slice(0, EXPEDIA_BROWSER_PROBE_LIMIT)) {
+        try {
+          const page = await dependencies.render(env, probeURL, 'Expedia', expectedKey, now);
+          if (!page.quoteURL) page.quoteURL = probeURL;
+          if (!page.transport) page.transport = 'browser';
+          return extractPage(page, 'Expedia', expectedKey, now);
+        } catch (singleError) { lastError = singleError; }
+      }
+    } else {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 export async function obtainHotelPrice(env, sourceURL, provider, dependencies = {}) {
+  if (provider === 'Expedia') return obtainExpediaHotelPrice(env, sourceURL, dependencies);
+
   const now = dependencies.now ?? Date.now();
   const expectedKey = propertyKey(sourceURL, provider);
   const probeURL = preparePriceURL(sourceURL, provider, now);
@@ -238,10 +570,19 @@ export async function obtainHotelPrice(env, sourceURL, provider, dependencies = 
     return extractPage(page, provider, expectedKey, now);
   } catch (error) {
     if (/MISMATCH|BAD_REDIRECT/.test(error.message) && !/QUOTE_CONTEXT/.test(error.message)) throw error;
-    // Browser rendering is a fresh read, never a cached importer snapshot.
     const page = await render(env, browserURL, provider, expectedKey, now);
     if (!page.quoteURL) page.quoteURL = browserURL;
     if (!page.transport) page.transport = 'browser';
     return extractPage(page, provider, expectedKey, now);
   }
+}
+
+// Kept internal for source-entry diagnostics. Expedia Share links are valid import
+// inputs, but price refresh should operate on the canonical property URL saved by
+// the importer rather than trying to price the tracking link itself.
+export function isKnownExpediaShareURL(value) {
+  try {
+    const url = value instanceof URL ? value : new URL(String(value));
+    return url.protocol === 'https:' && !url.username && !url.password && expediaShareHost(url.hostname);
+  } catch (_) { return false; }
 }

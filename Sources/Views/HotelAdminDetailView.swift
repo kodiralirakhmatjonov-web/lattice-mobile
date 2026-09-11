@@ -573,8 +573,9 @@ struct HotelAdminDetailView: View {
 
         defer { refreshingPrice = false }
         do {
-            // One server path for the button and scheduled refresh. Always reads
-            // the provider now; the server renders JavaScript when necessary.
+            // The server response is deliberately strict: success means a live
+            // source snapshot was obtained and persisted during THIS request. A
+            // preserved stale price is never rendered as a successful refresh.
             let response = try await APIClient.shared.refreshHotelPrice(id: hotelID)
 
             let latest = try await APIClient.shared.hotelDetail(id: hotelID)
@@ -582,33 +583,57 @@ struct HotelAdminDetailView: View {
             manualPriceText = editablePrice(latest.price?.nightlyUSD)
             editingManualPrice = false
 
-            if let warning = response.error, !warning.isEmpty {
+            let refreshConfirmed = response.ok && response.refreshed != false && response.error == nil
+            if !refreshConfirmed {
+                let warning = response.error ?? "HOTEL_PRICE_REFRESH_NOT_CONFIRMED"
                 if preferredSource(latest)?.provider.lowercased().contains("booking") == true,
                    let deviceLatest = await refreshBookingPriceOnDevice(from: latest) {
                     hotel = deviceLatest
                     manualPriceText = editablePrice(deviceLatest.price?.nightlyUSD)
                     if let current = deviceLatest.price?.sourceNightlyUSD ?? deviceLatest.price?.nightlyUSD, current > 0 {
-                        priceSuccessMessage = sourceRefreshSuccessMessage(previous: previousSourceNightly, current: current)
+                        priceSuccessMessage = sourceRefreshSuccessMessage(
+                            previous: previousSourceNightly,
+                            current: current,
+                            provider: "Booking",
+                            changed: nil
+                        )
                     } else {
-                        priceSuccessMessage = "Booking проверен на устройстве. Цена в базе обновлена."
+                        priceNotice = "Booking был проверен на устройстве, но подтверждённая цена не получена."
                     }
                     onChanged()
                     errorMessage = nil
                     return
-                } else if warning == "PRICE_CHANGE_AWAITING_CONFIRMATION" {
+                }
+
+                if warning == "PRICE_CHANGE_AWAITING_CONFIRMATION" {
                     priceNotice = "Цена источника сильно изменилась. Нажмите обновление ещё раз для повторной проверки; до подтверждения сохранена прежняя цена."
                 } else if warning == "HOTEL_PRICE_BROWSER_UNAVAILABLE" {
-                    priceNotice = "Облачный браузер цен недоступен. Проверьте развёртывание Hotels Cloud; сохранённая цена остаётся активной."
+                    priceNotice = "Облачный браузер цен недоступен. Сохранённая цена остаётся активной; система повторит автообновление."
+                } else if warning == "HOTEL_PRICE_REFRESH_IN_PROGRESS" {
+                    priceNotice = "Цена уже обновляется. Дождитесь завершения текущей проверки и повторите при необходимости."
                 } else {
                     priceNotice = latest.price?.hasUsablePrice == true
-                        ? "Источник сейчас не подтвердил новую цену. Последняя рабочая цена сохранена; система повторит автообновление."
-                        : "Источник пока не вернул цену. Повторите проверку немного позже."
+                        ? "Expedia сейчас не подтвердила новую цену. Последняя рабочая цена сохранена; система повторит автообновление."
+                        : "Expedia пока не вернула подтверждённую цену этого отеля. Повторите проверку немного позже."
                 }
-            } else if let currentSourceNightly = latest.price?.sourceNightlyUSD ?? latest.price?.nightlyUSD,
-                      currentSourceNightly > 0 {
-                priceSuccessMessage = sourceRefreshSuccessMessage(previous: previousSourceNightly, current: currentSourceNightly)
+                onChanged()
+                errorMessage = nil
+                return
+            }
+
+            if let currentSourceNightly = latest.price?.sourceNightlyUSD ?? latest.price?.nightlyUSD,
+               currentSourceNightly > 0 {
+                let provider = preferredSource(latest)?.provider ?? latest.price?.provider ?? "Expedia"
+                priceSuccessMessage = sourceRefreshSuccessMessage(
+                    previous: previousSourceNightly,
+                    current: currentSourceNightly,
+                    provider: provider,
+                    changed: response.changed
+                )
             } else {
-                priceSuccessMessage = "Источник проверен. Цена в базе обновлена."
+                // Defensive: the Worker should never return refreshed=true without
+                // a persisted rate. Keep the UI truthful if the contract regresses.
+                priceNotice = "Источник ответил, но подтверждённая цена не была сохранена. Повторите проверку."
             }
 
             onChanged()
@@ -622,9 +647,14 @@ struct HotelAdminDetailView: View {
                         hotel = deviceLatest
                         manualPriceText = editablePrice(deviceLatest.price?.nightlyUSD)
                         if let current = deviceLatest.price?.sourceNightlyUSD ?? deviceLatest.price?.nightlyUSD, current > 0 {
-                            priceSuccessMessage = sourceRefreshSuccessMessage(previous: previousSourceNightly, current: current)
+                            priceSuccessMessage = sourceRefreshSuccessMessage(
+                                previous: previousSourceNightly,
+                                current: current,
+                                provider: "Booking",
+                                changed: nil
+                            )
                         } else {
-                            priceSuccessMessage = "Booking проверен на устройстве. Цена в базе обновлена."
+                            priceNotice = "Booking был проверен на устройстве, но подтверждённая цена не получена."
                         }
                         onChanged()
                         errorMessage = nil
@@ -635,7 +665,10 @@ struct HotelAdminDetailView: View {
                             : "Booking сейчас не отдал подтверждённую USD-цену. Повторите проверку немного позже."
                     }
                 } else {
-                    errorMessage = error.localizedDescription
+                    errorMessage = nil
+                    priceNotice = latest.price?.hasUsablePrice == true
+                        ? "Expedia сейчас не удалось проверить. Последняя рабочая цена сохранена; автообновление повторится."
+                        : "Не удалось получить подтверждённую цену Expedia. Повторите попытку немного позже."
                 }
             } else {
                 errorMessage = "Не удалось обновить цену. Повторите попытку чуть позже."
@@ -643,14 +676,21 @@ struct HotelAdminDetailView: View {
         }
     }
 
-    private func sourceRefreshSuccessMessage(previous: Double?, current: Double) -> String {
-        if let previous, abs(previous - current) < 0.01 {
-            return "Цена проверена в источнике и подтверждена: \(priceText(current)) / ночь. Цена не изменилась."
+    private func sourceRefreshSuccessMessage(
+        previous: Double?,
+        current: Double,
+        provider: String,
+        changed: Bool?
+    ) -> String {
+        let source = provider.lowercased().contains("expedia") ? "Expedia" : provider
+        let didChange = changed ?? (previous.map { abs($0 - current) >= 0.01 } ?? false)
+        if let previous, previous > 0, didChange {
+            return "Цена обновилась в \(source): \(priceText(previous)) → \(priceText(current)) / ночь."
         }
-        if let previous, previous > 0 {
-            return "Цена обновлена из источника: \(priceText(previous)) → \(priceText(current)) / ночь."
+        if previous != nil {
+            return "Цена проверена в \(source): \(priceText(current)) / ночь. Цена не изменилась."
         }
-        return "Цена проверена и сохранена из источника: \(priceText(current)) / ночь."
+        return "Цена получена из \(source): \(priceText(current)) / ночь."
     }
 
     @MainActor

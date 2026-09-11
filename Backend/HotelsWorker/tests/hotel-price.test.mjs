@@ -28,6 +28,15 @@ test('Expedia explicit per-night price stays nightly', () => {
   assert.equal(price?.stayTotalUSD, 360);
 });
 
+
+test('Expedia property FAQ one-night starting price is accepted as a nightly hotel rate', () => {
+  const html = `<html><body>${padding}<section>Prices found for a 1-night stay for 2 adults start from $115, excluding taxes and fees.</section></body></html>`;
+  const price = extractHotelPriceFromHTML(html, 'Expedia', 1);
+  assert.equal(price?.currency, 'USD');
+  assert.equal(price?.nightlyUSD, 115);
+  assert.equal(price?.method, 'expedia-property-faq-nightly');
+});
+
 test('SAR price is normalized using the Saudi peg', () => {
   const html = `<html><body>${padding}<div data-testid="price-for-x-nights"><span>SAR 750</span><span>2 nights</span></div></body></html>`;
   const price = extractHotelPriceFromHTML(html, 'Booking', 2);

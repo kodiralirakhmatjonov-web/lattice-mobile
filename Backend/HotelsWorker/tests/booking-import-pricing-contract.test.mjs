@@ -42,7 +42,8 @@ test('Booking source refresh persists only a device-verified USD price into the 
   assert.match(hotelDetail, /canonicalURL/);
   assert.match(hotelDetail, /price\.currency\.uppercased\(\) == "USD"/);
   assert.match(hotelDetail, /APIClient.shared.refreshHotelPrice/);
-  assert.match(hotelDetail, /Цена проверена в источнике и подтверждена/);
+  assert.match(hotelDetail, /Цена проверена в/);
+  assert.match(hotelDetail, /Цена обновилась в/);
 });
 
 test('Booking and Expedia source refresh share the server price reader', () => {

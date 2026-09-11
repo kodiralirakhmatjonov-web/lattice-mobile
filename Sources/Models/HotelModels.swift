@@ -469,6 +469,8 @@ struct HotelCachedPrice: Codable, Hashable {
 
 struct HotelPriceResponse: Codable {
     let ok: Bool
+    let refreshed: Bool?
+    let changed: Bool?
     let price: HotelCachedPrice?
     let error: String?
 }

@@ -172,10 +172,14 @@ function collectBookingCandidates(html, readable, out, nights) {
 function collectExpediaCandidates(html, readable, out, nights) {
   const text = readable.replace(/\u00a0/g, ' ');
   const nightlyPatterns = [
-    new RegExp(`${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}[^\\n]{0,45}per\\s+night`, 'gi'),
-    new RegExp(`per\\s+night[^\\n]{0,45}${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi')
+    { regex: new RegExp(`${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}[^\\n]{0,45}per\\s+night`, 'gi'), confidence: 0.99, method: 'expedia-explicit-nightly' },
+    { regex: new RegExp(`per\\s+night[^\\n]{0,45}${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi'), confidence: 0.99, method: 'expedia-explicit-nightly' },
+    // Expedia frequently exposes this property-specific sentence in SSR/FAQ
+    // markup even when room offers are rendered later by JavaScript.
+    { regex: new RegExp(`prices?[^\\n]{0,90}(?:1|one)[-\\s]?night[^\\n]{0,120}(?:start|starting)\\s+from\\s+${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi'), confidence: 0.985, method: 'expedia-property-faq-nightly' },
+    { regex: new RegExp(`(?:1|one)[-\\s]?night\\s+stay[^\\n]{0,120}(?:start|starting)\\s+from\\s+${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi'), confidence: 0.985, method: 'expedia-property-faq-nightly' }
   ];
-  for (const pattern of nightlyPatterns) collectPatternMoney(text, pattern, out, 'nightly', 0.99, 'expedia-explicit-nightly');
+  for (const item of nightlyPatterns) collectPatternMoney(text, item.regex, out, 'nightly', item.confidence, item.method);
 
   const totalPatterns = [
     new RegExp(`${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}[^\\n]{0,80}(?:total|for\\s+${nights}\\s+nights?)`, 'gi'),
