@@ -67,8 +67,8 @@ enum BusinessSessionVault {
 
 
     static func hotelSyncAccessURL(city: String) -> URL? {
-        guard let account = hotelSyncAccount(city: city),
-              let value = read(account), !value.isEmpty else { return nil }
+        let account = hotelSyncAccount(city: city)
+        guard let account, let value = read(account), !value.isEmpty else { return nil }
         return URL(string: value)
     }
 
@@ -88,10 +88,11 @@ enum BusinessSessionVault {
     }
 
     private static func hotelSyncAccount(city: String) -> String? {
-        let raw = city.lowercased()
-        if raw.contains("makkah") || raw.contains("mecca") { return hotelSyncMakkahURLAccount }
-        if raw.contains("madinah") || raw.contains("medina") { return hotelSyncMadinahURLAccount }
-        return nil
+        switch city.lowercased() {
+        case "makkah", "mecca": return hotelSyncMakkahURLAccount
+        case "madinah", "medina": return hotelSyncMadinahURLAccount
+        default: return nil
+        }
     }
 
     private static func read(_ account: String) -> String? {

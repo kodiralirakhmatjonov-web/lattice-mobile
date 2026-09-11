@@ -101,10 +101,7 @@ struct HotelsView: View {
 
     private var priceMonitoringEntry: some View {
         NavigationLink {
-            HotelPriceMonitoringView(
-                makkahCount: hotels.filter { catalogCity(for: $0.city) == "Makkah" }.count,
-                madinahCount: hotels.filter { catalogCity(for: $0.city) == "Madinah" }.count
-            )
+            HotelPriceMonitoringView(hotels: $hotels)
         } label: {
             HStack(spacing: 13) {
                 ZStack {
@@ -118,7 +115,7 @@ struct HotelsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Обновление цен")
                         .font(.headline)
-                    Text("Makkah / Madinah ссылки → проверка источников → JSON")
+                    Text("Текущий каталог → ссылка ChatGPT → JSON → предпросмотр")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)

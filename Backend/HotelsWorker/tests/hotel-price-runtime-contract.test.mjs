@@ -11,7 +11,7 @@ test('Hotels Worker exposes manual hotel price refresh route', () => {
 
 test('Hotels Worker no longer runs automatic Cloudflare price maintenance', () => {
   assert.doesNotMatch(worker, /async scheduled\(controller,\s*env,\s*ctx\)/);
-  assert.match(worker, /businessHotelSyncStatus/);
+  assert.match(worker, /saveBusinessHotelSyncSnapshot/);
 });
 
 test('imported WKWebView price is persisted into hotel_price_cache', () => {

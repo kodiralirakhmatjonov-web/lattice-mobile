@@ -51,7 +51,10 @@ export default {
       console.error('HOTELS_API_UNHANDLED', error);
       return json({ ok: false, error: 'INTERNAL_ERROR' }, 500);
     }
-  }
+  },
+
+  // Hotel price monitoring is intentionally user-driven through Hotel ChatGPT
+  // Sync. There is no scheduled Browser/Workflow price updater.
 };
 
 async function handleAdmin(request, env, url, user, businessSession = null) {
@@ -127,11 +130,6 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
   if (parts.length === 3 && parts[1] === 'price' && parts[2] === 'browser') {
     if (request.method !== 'PUT') return methodNotAllowed();
     return saveBrowserHotelPrice(request, env, hotelID);
-  }
-
-  if (parts.length === 3 && parts[1] === 'price' && parts[2] === 'verified') {
-    if (request.method !== 'PUT') return methodNotAllowed();
-    return saveVerifiedChatGPTHotelPrice(request, env, hotelID, user);
   }
 
   if (parts.length === 1) {
@@ -967,8 +965,11 @@ async function handleBusinessOperations(request, env, url, parts, user, business
   }
 
   if (parts[0] === 'hotel-sync') {
-    const city = businessHotelSyncCity(parts[1]);
-    if (!city) return json({ ok: false, error: 'INVALID_HOTEL_SYNC_CITY' }, 400);
+    if (parts.length === 2 && parts[1] === 'apply' && request.method === 'POST') {
+      return applyBusinessHotelSyncUpdates(request, env, user);
+    }
+    const city = normalizedHotelSyncCity(parts[1]);
+    if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
     if (parts.length === 2 && request.method === 'GET') return businessHotelSyncStatus(env, user, city);
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'POST') return rotateBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'DELETE') return revokeBusinessHotelSyncAccess(env, user, city);
@@ -1014,7 +1015,6 @@ async function handleBusinessOperations(request, env, url, parts, user, business
     if (parts.length === 2 && request.method === 'GET') return operationsBookingDetail(request, env, bookingID);
     if (parts.length === 2 && request.method === 'PATCH') return updateOperationsBooking(request, env, bookingID, user);
     if (parts.length === 2 && request.method === 'DELETE') return deleteOperationsBooking(request, env, bookingID, user);
-    if (parts.length === 3 && parts[2] === 'price-lock' && request.method === 'POST') return restartBookingPriceLock(request, env, bookingID, user);
     if (parts.length === 3 && parts[2] === 'security' && request.method === 'GET') return adminSecuritySubmissionResponse(env, bookingID);
     if (parts.length === 4 && parts[2] === 'security' && parts[3] === 'passport' && request.method === 'GET') return serveAdminSecurityPassport(env, bookingID);
     if (parts.length === 4 && parts[2] === 'security' && parts[3] === 'review' && request.method === 'POST') return reviewSecuritySubmission(request, env, bookingID, user);
@@ -1099,6 +1099,551 @@ async function adminIgnavUsage(env) {
       trackingNote: 'Серверный счётчик iumrah: учитываются успешные Ignav-запросы, записанные в общий D1.'
     }
   });
+}
+
+
+const BUSINESS_HOTEL_SYNC_VERSION = 2;
+const BUSINESS_HOTEL_SYNC_MAX_HOTELS = 120;
+
+function normalizedHotelSyncCity(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/[-_]+/g, ' ');
+  if (raw.includes('makkah') || raw.includes('mecca') || raw.includes('مكة')) return 'Makkah';
+  if (raw.includes('madinah') || raw.includes('medina') || raw.includes('المدينة')) return 'Madinah';
+  return '';
+}
+
+function hotelSyncCitySlug(value) {
+  const city = normalizedHotelSyncCity(value);
+  if (city === 'Makkah') return 'makkah';
+  if (city === 'Madinah') return 'madinah';
+  return '';
+}
+
+function businessHotelSyncOwner(user) {
+  return businessStaffLogin(user);
+}
+
+function businessHotelSyncPublicURL(city, token) {
+  return `https://iumrah.app/api/catalog/hotels/hotel-sync/${hotelSyncCitySlug(city)}/${encodeURIComponent(token)}`;
+}
+
+function normalizedHotelSyncProvider(value, sourceURL) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw.includes('booking')) return 'Booking';
+  if (raw.includes('expedia')) return 'Expedia';
+  try {
+    const host = new URL(String(sourceURL || '')).hostname.toLowerCase();
+    if (host === 'booking.com' || host.endsWith('.booking.com')) return 'Booking';
+    if (host === 'expedia.com' || host.endsWith('.expedia.com') || host.includes('expedia.')) return 'Expedia';
+  } catch {}
+  return null;
+}
+
+function safeHotelSyncSourceURL(value) {
+  const raw = cleanText(value, 7000);
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:') return null;
+    const provider = normalizedHotelSyncProvider(null, raw);
+    return provider ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut) {
+  if (!sourceURL) return null;
+  try {
+    const url = new URL(sourceURL);
+    const resolved = normalizedHotelSyncProvider(provider, sourceURL);
+    if (resolved === 'Booking') {
+      url.searchParams.set('checkin', checkIn);
+      url.searchParams.set('checkout', checkOut);
+      url.searchParams.set('group_adults', '2');
+      url.searchParams.set('group_children', '0');
+      url.searchParams.set('no_rooms', '1');
+      url.searchParams.set('req_adults', '2');
+      url.searchParams.set('req_children', '0');
+      url.searchParams.set('room1', 'A,A');
+      url.searchParams.set('selected_currency', 'USD');
+      return url.toString();
+    }
+    if (resolved === 'Expedia') {
+      url.searchParams.set('chkin', checkIn);
+      url.searchParams.set('chkout', checkOut);
+      url.searchParams.set('startDate', checkIn);
+      url.searchParams.set('endDate', checkOut);
+      url.searchParams.set('rm1', 'a2');
+      url.searchParams.set('currency', 'USD');
+      return url.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function hotelSyncPropertyIdentity(value, providerHint = null) {
+  try {
+    const url = new URL(String(value || ''));
+    const provider = normalizedHotelSyncProvider(providerHint, url.toString());
+    if (provider === 'Expedia') {
+      const propertyID = providerPropertyIDFromURL(url, 'Expedia');
+      return propertyID ? `expedia:${propertyID}` : null;
+    }
+    if (provider === 'Booking') {
+      const explicit = url.searchParams.get('app_hotel_id') || url.searchParams.get('hotel_id');
+      if (explicit && /^[0-9]{3,}$/.test(explicit)) return `booking:${explicit}`;
+      const pathKey = bookingHotelIdentityKey(url.toString());
+      return pathKey ? `booking:${pathKey}` : null;
+    }
+  } catch {}
+  return null;
+}
+
+function hotelSyncSameProperty(a, b, provider) {
+  const first = hotelSyncPropertyIdentity(a, provider);
+  const second = hotelSyncPropertyIdentity(b, provider);
+  return !!first && first === second;
+}
+
+function hotelSyncURLContainsDates(value, providerHint, checkIn, checkOut) {
+  try {
+    const url = new URL(String(value || ''));
+    const provider = normalizedHotelSyncProvider(providerHint, value);
+    if (provider === 'Booking') {
+      return url.searchParams.get('checkin') === checkIn && url.searchParams.get('checkout') === checkOut;
+    }
+    if (provider === 'Expedia') {
+      const compact = url.searchParams.get('chkin') === checkIn && url.searchParams.get('chkout') === checkOut;
+      const long = url.searchParams.get('startDate') === checkIn && url.searchParams.get('endDate') === checkOut;
+      return compact || long;
+    }
+  } catch {}
+  return false;
+}
+
+function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
+  if (!value || typeof value !== 'object') return null;
+  const hotelID = cleanText(value.hotel_id || value.hotelID, 220);
+  const hotelName = safeHumanText(value.hotel_name || value.hotelName, 300);
+  const city = normalizedHotelSyncCity(value.city);
+  if (!hotelID || !hotelName || city !== expectedCity) return null;
+
+  const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
+  const provider = normalizedHotelSyncProvider(value.provider, sourceURL);
+  if (!sourceURL || !provider || !hotelSyncPropertyIdentity(sourceURL, provider)) return null;
+
+  const rawPrice = value.current_nightly_usd ?? value.currentNightlyUSD;
+  const price = rawPrice === null || rawPrice === undefined || rawPrice === '' ? null : Number(rawPrice);
+  if (price !== null && (!Number.isFinite(price) || price <= 0 || price > 100000)) return null;
+
+  return {
+    hotel_id: hotelID,
+    hotel_name: hotelName,
+    city,
+    stars: Number.isFinite(Number(value.stars)) ? Math.max(1, Math.min(5, Math.trunc(Number(value.stars)))) : null,
+    current_nightly_usd: price === null ? null : Math.round(price * 100) / 100,
+    currency: 'USD',
+    catalog_status: cleanText(value.catalog_status || value.catalogStatus, 40) || 'published',
+    price_status: cleanText(value.price_status || value.priceStatus, 40) || null,
+    is_manual_override: Boolean(value.is_manual_override ?? value.isManualOverride),
+    provider,
+    source_url: sourceURL,
+    monitoring_url: hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut),
+    last_price_fetched_at: cleanText(value.last_price_fetched_at || value.lastPriceFetchedAt, 80) || null
+  };
+}
+
+async function businessHotelSyncStatus(env, user, cityValue) {
+  const owner = businessHotelSyncOwner(user);
+  const city = normalizedHotelSyncCity(cityValue);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT enabled, snapshot_id, hotel_count, check_in, check_out, snapshot_updated_at, created_at, updated_at
+    FROM business_hotel_sync_feeds WHERE owner_login=? AND city=? LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+  return json({
+    ok: true,
+    city,
+    configured: Boolean(row),
+    enabled: Boolean(row && Number(row.enabled) === 1),
+    readOnly: true,
+    source: 'iumrah_business_live_app_state',
+    snapshotID: row?.snapshot_id || null,
+    hotelCount: Number(row?.hotel_count || 0),
+    checkIn: row?.check_in || null,
+    checkOut: row?.check_out || null,
+    snapshotUpdatedAt: row?.snapshot_updated_at || null,
+    createdAt: row?.created_at || null,
+    updatedAt: row?.updated_at || null
+  });
+}
+
+async function rotateBusinessHotelSyncAccess(env, user, cityValue) {
+  const owner = businessHotelSyncOwner(user);
+  const city = normalizedHotelSyncCity(cityValue);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+  const token = randomToken(32);
+  const tokenHash = await sha256Hex(token);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_hotel_sync_feeds (
+      owner_login, city, token_hash, enabled, snapshot_json, hotel_count,
+      snapshot_id, check_in, check_out, snapshot_updated_at, created_at, updated_at
+    ) VALUES (?, ?, ?, 1, '{"version":2,"hotels":[]}', 0, NULL, NULL, NULL, NULL, ?, ?)
+    ON CONFLICT(owner_login, city) DO UPDATE SET
+      token_hash=excluded.token_hash,
+      enabled=1,
+      updated_at=excluded.updated_at
+  `).bind(owner, city, tokenHash, now, now).run();
+  return json({
+    ok: true,
+    city,
+    readOnly: true,
+    accessURL: businessHotelSyncPublicURL(city, token),
+    rotatedAt: now,
+    note: 'This URL can only read the hotel snapshot uploaded by iumrah Business. It cannot edit prices or access staff data.'
+  });
+}
+
+async function revokeBusinessHotelSyncAccess(env, user, cityValue) {
+  const owner = businessHotelSyncOwner(user);
+  const city = normalizedHotelSyncCity(cityValue);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    UPDATE business_hotel_sync_feeds SET enabled=0, updated_at=? WHERE owner_login=? AND city=?
+  `).bind(now, owner, city).run();
+  return json({ ok: true, city, enabled: false, revokedAt: now });
+}
+
+async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
+  const owner = businessHotelSyncOwner(user);
+  const city = normalizedHotelSyncCity(cityValue);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+
+  const existing = await env.HOTELS_DB.prepare(`
+    SELECT enabled FROM business_hotel_sync_feeds WHERE owner_login=? AND city=? LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+  if (!existing || Number(existing.enabled) !== 1) {
+    return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_NOT_ENABLED' }, 409);
+  }
+
+  const raw = await request.text();
+  if (raw.length > 800_000) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_TOO_LARGE' }, 413);
+  let payload;
+  try { payload = JSON.parse(raw); } catch { return json({ ok: false, error: 'INVALID_JSON' }, 400); }
+
+  const payloadCity = normalizedHotelSyncCity(payload?.city);
+  const checkIn = validLocalDate(payload?.check_in || payload?.checkIn);
+  const checkOut = validLocalDate(payload?.check_out || payload?.checkOut);
+  if (payloadCity !== city) return json({ ok: false, error: 'HOTEL_SYNC_CITY_MISMATCH' }, 400);
+  if (!checkIn || !checkOut || checkOut <= checkIn) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_DATES' }, 400);
+  if (Number(payload?.rooms) !== 1 || Number(payload?.adults) !== 2 || Number(payload?.children || 0) !== 0) {
+    return json({ ok: false, error: 'HOTEL_SYNC_INVALID_OCCUPANCY' }, 400);
+  }
+  if (!Array.isArray(payload?.hotels) || payload.hotels.length < 1) return json({ ok: false, error: 'HOTEL_SYNC_HOTELS_REQUIRED' }, 400);
+  if (payload.hotels.length > BUSINESS_HOTEL_SYNC_MAX_HOTELS) return json({ ok: false, error: 'HOTEL_SYNC_TOO_MANY_HOTELS' }, 400);
+
+  const hotels = payload.hotels.map(item => normalizedHotelSyncItem(item, city, checkIn, checkOut)).filter(Boolean);
+  if (hotels.length !== payload.hotels.length) {
+    return json({ ok: false, error: 'HOTEL_SYNC_INVALID_HOTEL', accepted: hotels.length, received: payload.hotels.length }, 400);
+  }
+
+  const now = new Date().toISOString();
+  const snapshotID = `hotel-sync-${hotelSyncCitySlug(city)}-${crypto.randomUUID()}`;
+  const snapshot = {
+    version: BUSINESS_HOTEL_SYNC_VERSION,
+    snapshot_id: snapshotID,
+    source: 'iumrah_business_live_app_state',
+    generated_at: cleanText(payload.generated_at || payload.generatedAt, 80) || now,
+    city,
+    check_in: checkIn,
+    check_out: checkOut,
+    rooms: 1,
+    adults: 2,
+    children: 0,
+    currency: 'USD',
+    hotels
+  };
+
+  await env.HOTELS_DB.prepare(`
+    UPDATE business_hotel_sync_feeds
+    SET snapshot_id=?, snapshot_json=?, hotel_count=?, check_in=?, check_out=?, snapshot_updated_at=?, updated_at=?
+    WHERE owner_login=? AND city=? AND enabled=1
+  `).bind(snapshotID, JSON.stringify(snapshot), hotels.length, checkIn, checkOut, now, now, owner, city).run();
+
+  return json({
+    ok: true,
+    city,
+    readOnly: true,
+    source: 'iumrah_business_live_app_state',
+    snapshotID,
+    hotelCount: hotels.length,
+    checkIn,
+    checkOut,
+    snapshotUpdatedAt: now
+  });
+}
+
+async function publicBusinessHotelSyncFeed(env, citySlug, token) {
+  const city = normalizedHotelSyncCity(citySlug);
+  const cleanToken = cleanText(token, 512);
+  if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+  const tokenHash = await sha256Hex(cleanToken);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    FROM business_hotel_sync_feeds
+    WHERE token_hash=? AND city=? AND enabled=1
+    LIMIT 1
+  `).bind(tokenHash, city).first().catch(() => null);
+  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+
+  let snapshot = { version: BUSINESS_HOTEL_SYNC_VERSION, hotels: [] };
+  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
+  const payload = {
+    ok: true,
+    type: 'iumrah_business_hotel_prices',
+    read_only: true,
+    source: 'iumrah_business_live_app_state',
+    version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
+    snapshot_id: row.snapshot_id || snapshot.snapshot_id || null,
+    updated_at: row.snapshot_updated_at || null,
+    city,
+    check_in: row.check_in || snapshot.check_in || null,
+    check_out: row.check_out || snapshot.check_out || null,
+    rooms: 1,
+    adults: 2,
+    children: 0,
+    currency: 'USD',
+    hotel_count: Number(row.hotel_count || 0),
+    monitoring_rules: {
+      primary_method: 'Open monitoring_url for each hotel. It is the exact stored Expedia/Booking property with the feed dates applied.',
+      fallback_method: 'If monitoring_url cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
+      exact_property_only: true,
+      exact_dates_required: true,
+      occupancy: '1 room, 2 adults, 0 children, 1 night',
+      unverified_when_not_provable: true,
+      result_schema: 'iumrah.hotel-price-update.v2',
+      price_basis: 'Use the sellable nightly room rate shown for the exact stay. Do not mix another date, another property, crossed-out savings, or recommendation-card prices.',
+      currency_rule: 'Prefer USD. If only SAR is directly shown, convert with 1 USD = 3.75 SAR and preserve the observed SAR amount in the result.'
+    },
+    result_template: {
+      schema: 'iumrah.hotel-price-update.v2',
+      version: 2,
+      snapshot_id: row.snapshot_id || null,
+      city,
+      check_in: row.check_in || null,
+      check_out: row.check_out || null,
+      rooms: 1,
+      adults: 2,
+      currency: 'USD',
+      checked_at: 'ISO-8601 timestamp',
+      hotels: [{
+        hotel_id: 'copy from feed',
+        hotel_name: 'copy from feed',
+        status: 'changed | unchanged | unverified',
+        old_nightly_usd: 'copy current_nightly_usd from feed',
+        new_nightly_usd: 'verified USD nightly price or null',
+        observed_nightly_amount: 'exact displayed amount or null',
+        observed_currency: 'USD | SAR | other exact displayed currency',
+        provider: 'copy from feed',
+        source_url: 'copy from feed',
+        monitoring_url: 'copy from feed',
+        checked_source_url: 'actual verified provider URL containing exact dates, or null',
+        check_in: row.check_in || null,
+        check_out: row.check_out || null,
+        rooms: 1,
+        adults: 2,
+        currency: 'USD',
+        confidence: 'high | none',
+        reason: 'short reason or null',
+        checked_at: 'ISO-8601 timestamp'
+      }]
+    },
+    hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
+  };
+
+  // This is intentionally identical to the already-proven Flight Sync delivery
+  // contract: pretty-printed valid JSON served as plain UTF-8 text. No HTML,
+  // redirect, cache layer or Browser Rendering is involved.
+  return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
+    status: 200,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'x-content-type-options': 'nosniff',
+      'cache-control': 'no-store, max-age=0'
+    }
+  });
+}
+
+function normalizedHotelSyncUpdateItem(value) {
+  if (!value || typeof value !== 'object') return null;
+  const hotelID = cleanText(value.hotel_id || value.hotelID, 220);
+  const status = cleanText(value.status, 40)?.toLowerCase();
+  if (!hotelID || !['changed', 'unchanged', 'unverified'].includes(status)) return null;
+  const oldPrice = value.old_nightly_usd ?? value.oldNightlyUSD;
+  const newPrice = value.new_nightly_usd ?? value.newNightlyUSD;
+  return {
+    hotel_id: hotelID,
+    hotel_name: safeHumanText(value.hotel_name || value.hotelName, 300) || null,
+    status,
+    old_nightly_usd: oldPrice == null ? null : Number(oldPrice),
+    new_nightly_usd: newPrice == null ? null : Number(newPrice),
+    provider: normalizedHotelSyncProvider(value.provider, value.source_url || value.sourceURL),
+    source_url: safeHotelSyncSourceURL(value.source_url || value.sourceURL),
+    monitoring_url: safeHotelSyncSourceURL(value.monitoring_url || value.monitoringURL),
+    checked_source_url: safeHotelSyncSourceURL(value.checked_source_url || value.checkedSourceURL),
+    check_in: validLocalDate(value.check_in || value.checkIn),
+    check_out: validLocalDate(value.check_out || value.checkOut),
+    rooms: Number(value.rooms),
+    adults: Number(value.adults),
+    currency: normalizedCurrency(value.currency || 'USD'),
+    confidence: cleanText(value.confidence, 40)?.toLowerCase() || 'none',
+    reason: safeHumanText(value.reason, 500) || null,
+    checked_at: cleanText(value.checked_at || value.checkedAt, 80) || null
+  };
+}
+
+async function applyBusinessHotelSyncUpdates(request, env, user) {
+  const owner = businessHotelSyncOwner(user);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  const payload = await readJSON(request, 1_500_000);
+  if (!payload.ok) return payload.response;
+  const document = payload.value?.result;
+  const selectedIDs = Array.isArray(payload.value?.hotel_ids) ? payload.value.hotel_ids.map(x => cleanText(x, 220)).filter(Boolean) : [];
+  if (!document || document.schema !== 'iumrah.hotel-price-update.v2') return json({ ok: false, error: 'HOTEL_SYNC_INVALID_RESULT_SCHEMA' }, 400);
+  if (!selectedIDs.length) return json({ ok: false, error: 'HOTEL_SYNC_NO_SELECTION' }, 400);
+
+  const city = normalizedHotelSyncCity(document.city);
+  const snapshotID = cleanText(document.snapshot_id || document.snapshotID, 260);
+  const checkIn = validLocalDate(document.check_in || document.checkIn);
+  const checkOut = validLocalDate(document.check_out || document.checkOut);
+  if (!city || !snapshotID || !checkIn || !checkOut || checkOut <= checkIn) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_RESULT_CONTEXT' }, 400);
+  if (Number(document.rooms) !== 1 || Number(document.adults) !== 2 || normalizedCurrency(document.currency) !== 'USD') {
+    return json({ ok: false, error: 'HOTEL_SYNC_INVALID_RESULT_OCCUPANCY' }, 400);
+  }
+
+  const feed = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_id, snapshot_json, check_in, check_out
+    FROM business_hotel_sync_feeds
+    WHERE owner_login=? AND city=? AND enabled=1
+    LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+  if (!feed || feed.snapshot_id !== snapshotID || feed.check_in !== checkIn || feed.check_out !== checkOut) {
+    return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_CHANGED' }, 409);
+  }
+
+  let snapshot;
+  try { snapshot = JSON.parse(feed.snapshot_json || '{}'); } catch { snapshot = null; }
+  if (!snapshot || !Array.isArray(snapshot.hotels)) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_INVALID' }, 409);
+  const baselineByID = new Map(snapshot.hotels.map(item => [item.hotel_id, item]));
+  const updates = Array.isArray(document.hotels) ? document.hotels.map(normalizedHotelSyncUpdateItem).filter(Boolean) : [];
+  const updateByID = new Map(updates.map(item => [item.hotel_id, item]));
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + HOTEL_PRICE_TTL_MS).toISOString();
+  const applied = [];
+  const rejected = [];
+
+  for (const hotelID of selectedIDs) {
+    const baseline = baselineByID.get(hotelID);
+    const update = updateByID.get(hotelID);
+    if (!baseline || !update) { rejected.push({ hotelID, error: 'HOTEL_SYNC_ITEM_NOT_FOUND' }); continue; }
+    if (update.status !== 'changed' || update.confidence !== 'high') { rejected.push({ hotelID, error: 'HOTEL_SYNC_ITEM_NOT_VERIFIED' }); continue; }
+    const nextPrice = Number(update.new_nightly_usd);
+    const oldPrice = Number(update.old_nightly_usd);
+    if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'HOTEL_SYNC_INVALID_NEW_PRICE' }); continue; }
+    if (!Number.isFinite(oldPrice) || !Number.isFinite(Number(baseline.current_nightly_usd)) || Math.abs(oldPrice - Number(baseline.current_nightly_usd)) >= 0.01) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_BASELINE_MISMATCH' }); continue;
+    }
+    if (update.check_in !== checkIn || update.check_out !== checkOut || update.rooms !== 1 || update.adults !== 2 || update.currency !== 'USD') {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH' }); continue;
+    }
+    if (!update.source_url || !update.checked_source_url || !update.provider) { rejected.push({ hotelID, error: 'HOTEL_SYNC_SOURCE_NOT_VERIFIED' }); continue; }
+    if (!hotelSyncSameProperty(baseline.source_url, update.source_url, update.provider) || !hotelSyncSameProperty(baseline.source_url, update.checked_source_url, update.provider)) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_PROPERTY_MISMATCH' }); continue;
+    }
+    if (!hotelSyncURLContainsDates(update.checked_source_url, update.provider, checkIn, checkOut)) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH' }); continue;
+    }
+
+    const currentRow = await readHotelPriceRow(env, hotelID);
+    const currentPrice = Number(hotelPriceFromRow(currentRow)?.nightlyUSD);
+    if (!Number.isFinite(currentPrice) || Math.abs(currentPrice - Number(baseline.current_nightly_usd)) >= 0.01) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_PRICE_CHANGED_AFTER_SNAPSHOT' }); continue;
+    }
+    const source = await ensureHotelPriceSourceLock(env, hotelID);
+    const currentProvider = normalizedHotelSyncProvider(source?.provider, source?.source_url);
+    if (!source?.source_url || currentProvider !== update.provider || !hotelSyncSameProperty(source.source_url, baseline.source_url, currentProvider)) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_SOURCE_CHANGED_AFTER_SNAPSHOT' }); continue;
+    }
+
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO hotel_price_cache (
+        hotel_id, source_id, provider, source_url, resolved_url,
+        amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+        quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+        confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
+        last_http_status, error, pending_nightly_price_usd, pending_seen_count,
+        pending_first_seen_at, pending_last_seen_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'USD', 'nightly', ?, ?, ?, ?, 1, 2, 1, 0.99, 'chatgpt-admin-exact-source', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
+      ON CONFLICT(hotel_id) DO UPDATE SET
+        source_id=excluded.source_id,
+        provider=excluded.provider,
+        source_url=excluded.source_url,
+        resolved_url=excluded.resolved_url,
+        amount_original=excluded.amount_original,
+        currency_original='USD',
+        price_basis='nightly',
+        nightly_price_usd=excluded.nightly_price_usd,
+        quote_total_usd=excluded.quote_total_usd,
+        quote_check_in=excluded.quote_check_in,
+        quote_check_out=excluded.quote_check_out,
+        quote_nights=1,
+        quote_adults=2,
+        quote_rooms=1,
+        confidence=0.99,
+        method='chatgpt-admin-exact-source',
+        status='fresh',
+        fetched_at=excluded.fetched_at,
+        expires_at=excluded.expires_at,
+        last_attempt_at=excluded.last_attempt_at,
+        next_retry_at=NULL,
+        last_http_status=200,
+        error=NULL,
+        pending_nightly_price_usd=NULL,
+        pending_seen_count=0,
+        pending_first_seen_at=NULL,
+        pending_last_seen_at=NULL,
+        updated_at=excluded.updated_at
+    `).bind(
+      hotelID,
+      source.source_id || null,
+      currentProvider,
+      source.source_url,
+      update.checked_source_url,
+      Math.round(nextPrice * 100) / 100,
+      Math.round(nextPrice * 100) / 100,
+      Math.round(nextPrice * 100) / 100,
+      checkIn,
+      checkOut,
+      now,
+      expiresAt,
+      now,
+      now,
+      now
+    ).run();
+    await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+    applied.push(hotelID);
+  }
+
+  return json({ ok: true, city, snapshotID, applied, rejected, appliedCount: applied.length, rejectedCount: rejected.length });
 }
 
 
@@ -1313,284 +1858,6 @@ async function publicBusinessFlightSyncFeed(env, token) {
   });
 }
 
-
-
-const BUSINESS_HOTEL_SYNC_VERSION = 2;
-const BUSINESS_HOTEL_SYNC_MAX_HOTELS = 250;
-
-function businessHotelSyncCity(value) {
-  const raw = String(value || '').trim().toLowerCase();
-  if (raw === 'makkah' || raw === 'mecca') return 'Makkah';
-  if (raw === 'madinah' || raw === 'medina') return 'Madinah';
-  return null;
-}
-
-function businessHotelSyncSlug(city) {
-  return city === 'Makkah' ? 'makkah' : city === 'Madinah' ? 'madinah' : '';
-}
-
-function businessHotelSyncOwner(user) {
-  return businessStaffLogin(user);
-}
-
-function businessHotelSyncPublicURL(city, token) {
-  return `https://iumrah.app/api/catalog/hotels/hotel-sync/${businessHotelSyncSlug(city)}/${encodeURIComponent(token)}`;
-}
-
-function normalizedHotelSyncMonitoring(value) {
-  const checkIn = validLocalDate(value?.checkIn);
-  const checkOut = validLocalDate(value?.checkOut);
-  if (!checkIn || !checkOut) return null;
-  const start = Date.parse(`${checkIn}T00:00:00Z`);
-  const end = Date.parse(`${checkOut}T00:00:00Z`);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
-  const nights = Math.round((end - start) / 86400000);
-  if (nights !== 1) return null;
-  const rooms = Number(value?.rooms || 0);
-  const adults = Number(value?.adults || 0);
-  const children = Number(value?.children || 0);
-  if (rooms !== 1 || adults !== 2 || children !== 0) return null;
-  return {
-    checkIn,
-    checkOut,
-    rooms: 1,
-    adults: 2,
-    children: 0,
-    currency: 'USD',
-    priceBasis: 'nightly'
-  };
-}
-
-function normalizedHotelSyncItem(value, city) {
-  if (!value || typeof value !== 'object') return null;
-  const hotelID = safeID(value.hotelID);
-  const hotelName = safeHumanText(value.hotelName, 260);
-  if (!hotelID || !hotelName || businessHotelSyncCity(value.city) !== city) return null;
-
-  const sourceURL = cleanURL(value.sourceURL);
-  const provider = normalizedHotelPriceProvider(value.provider, sourceURL || '');
-  if (!sourceURL || !provider || !['Booking','Expedia'].includes(provider)) return null;
-  const sourceKey = safePropertyKey(sourceURL, provider);
-  if (!sourceKey) return null;
-
-  let monitoringURL = cleanURL(value.monitoringURL) || sourceURL;
-  const monitorProvider = normalizedHotelPriceProvider(provider, monitoringURL);
-  const monitorKey = safePropertyKey(monitoringURL, monitorProvider || provider);
-  if (!monitorProvider || monitorProvider !== provider || !monitorKey || monitorKey !== sourceKey) return null;
-
-  const current = Number(value.currentNightlyUSD);
-  const currentNightlyUSD = Number.isFinite(current) && current > 0 && current <= 10000
-    ? Math.round(current * 100) / 100
-    : null;
-  const stars = Number(value.stars);
-
-  return {
-    hotelID,
-    hotelName,
-    city,
-    stars: Number.isInteger(stars) && stars >= 1 && stars <= 5 ? stars : null,
-    currentNightlyUSD,
-    currency: 'USD',
-    catalogStatus: cleanText(value.catalogStatus, 40) || null,
-    priceStatus: cleanText(value.priceStatus, 40) || null,
-    isManualOverride: value.isManualOverride === true,
-    provider,
-    sourceURL,
-    monitoringURL,
-    lastPriceFetchedAt: cleanText(value.lastPriceFetchedAt, 80) || null
-  };
-}
-
-async function businessHotelSyncStatus(env, user, city) {
-  const owner = businessHotelSyncOwner(user);
-  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
-  const row = await env.HOTELS_DB.prepare(`
-    SELECT enabled, snapshot_id, hotel_count, check_in, check_out,
-           snapshot_updated_at, created_at, updated_at
-    FROM business_hotel_sync_feeds
-    WHERE owner_login=? AND city=? LIMIT 1
-  `).bind(owner, city).first().catch(() => null);
-  return json({
-    ok: true,
-    city,
-    configured: Boolean(row),
-    enabled: Boolean(row && Number(row.enabled) === 1),
-    hotelCount: Number(row?.hotel_count || 0),
-    snapshotID: row?.snapshot_id || null,
-    snapshotUpdatedAt: row?.snapshot_updated_at || null,
-    checkIn: row?.check_in || null,
-    checkOut: row?.check_out || null,
-    createdAt: row?.created_at || null,
-    updatedAt: row?.updated_at || null,
-    readOnly: true
-  });
-}
-
-async function rotateBusinessHotelSyncAccess(env, user, city) {
-  const owner = businessHotelSyncOwner(user);
-  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
-  const token = randomToken(32);
-  const tokenHash = await sha256Hex(token);
-  const now = new Date().toISOString();
-  await env.HOTELS_DB.prepare(`
-    INSERT INTO business_hotel_sync_feeds (
-      owner_login, city, token_hash, enabled, snapshot_json, hotel_count,
-      created_at, updated_at
-    ) VALUES (?, ?, ?, 1, '{"version":2,"hotels":[]}', 0, ?, ?)
-    ON CONFLICT(owner_login, city) DO UPDATE SET
-      token_hash=excluded.token_hash,
-      enabled=1,
-      updated_at=excluded.updated_at
-  `).bind(owner, city, tokenHash, now, now).run();
-  return json({
-    ok: true,
-    readOnly: true,
-    city,
-    accessURL: businessHotelSyncPublicURL(city, token),
-    rotatedAt: now,
-    note: 'Read-only snapshot of the hotel catalog shown in iumrah Business for this city. No write/admin access.'
-  });
-}
-
-async function revokeBusinessHotelSyncAccess(env, user, city) {
-  const owner = businessHotelSyncOwner(user);
-  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
-  const now = new Date().toISOString();
-  await env.HOTELS_DB.prepare(`
-    UPDATE business_hotel_sync_feeds
-    SET enabled=0, updated_at=?
-    WHERE owner_login=? AND city=?
-  `).bind(now, owner, city).run();
-  return json({ ok: true, city, enabled: false, revokedAt: now });
-}
-
-async function saveBusinessHotelSyncSnapshot(request, env, user, city) {
-  const owner = businessHotelSyncOwner(user);
-  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
-  const existing = await env.HOTELS_DB.prepare(`
-    SELECT enabled FROM business_hotel_sync_feeds
-    WHERE owner_login=? AND city=? LIMIT 1
-  `).bind(owner, city).first().catch(() => null);
-  if (!existing || Number(existing.enabled) !== 1) {
-    return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_NOT_ENABLED' }, 409);
-  }
-
-  const raw = await request.text();
-  if (raw.length > 1_500_000) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_TOO_LARGE' }, 413);
-  let payload;
-  try { payload = JSON.parse(raw); } catch { return json({ ok: false, error: 'INVALID_JSON' }, 400); }
-  if (Number(payload?.version) !== BUSINESS_HOTEL_SYNC_VERSION) return json({ ok: false, error: 'HOTEL_SYNC_VERSION_REQUIRED' }, 400);
-  if (businessHotelSyncCity(payload?.city) !== city) return json({ ok: false, error: 'HOTEL_SYNC_CITY_MISMATCH' }, 400);
-  const snapshotID = cleanText(payload?.snapshotID, 180);
-  if (!snapshotID) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_ID_REQUIRED' }, 400);
-  const monitoring = normalizedHotelSyncMonitoring(payload?.monitoring);
-  if (!monitoring) return json({ ok: false, error: 'HOTEL_SYNC_MONITORING_INVALID' }, 400);
-  if (!Array.isArray(payload?.hotels)) return json({ ok: false, error: 'HOTEL_SYNC_HOTELS_REQUIRED' }, 400);
-  if (payload.hotels.length > BUSINESS_HOTEL_SYNC_MAX_HOTELS) {
-    return json({ ok: false, error: 'HOTEL_SYNC_TOO_MANY_HOTELS', max: BUSINESS_HOTEL_SYNC_MAX_HOTELS }, 400);
-  }
-
-  const hotels = payload.hotels.map(item => normalizedHotelSyncItem(item, city)).filter(Boolean);
-  if (hotels.length !== payload.hotels.length) {
-    return json({ ok: false, error: 'HOTEL_SYNC_INVALID_HOTEL', accepted: hotels.length, received: payload.hotels.length }, 400);
-  }
-
-  const now = new Date().toISOString();
-  const snapshot = JSON.stringify({
-    version: BUSINESS_HOTEL_SYNC_VERSION,
-    city,
-    snapshotID,
-    generatedAt: now,
-    monitoring,
-    hotels
-  });
-  await env.HOTELS_DB.prepare(`
-    UPDATE business_hotel_sync_feeds
-    SET snapshot_id=?, snapshot_json=?, hotel_count=?, check_in=?, check_out=?,
-        snapshot_updated_at=?, updated_at=?
-    WHERE owner_login=? AND city=? AND enabled=1
-  `).bind(snapshotID, snapshot, hotels.length, monitoring.checkIn, monitoring.checkOut, now, now, owner, city).run();
-
-  return json({
-    ok: true,
-    city,
-    snapshotID,
-    hotelCount: hotels.length,
-    snapshotUpdatedAt: now,
-    checkIn: monitoring.checkIn,
-    checkOut: monitoring.checkOut
-  });
-}
-
-async function publicBusinessHotelSyncFeed(env, cityValue, token) {
-  const city = businessHotelSyncCity(cityValue);
-  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  const cleanToken = cleanText(token, 512);
-  if (!cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  const tokenHash = await sha256Hex(cleanToken);
-  const row = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
-    FROM business_hotel_sync_feeds
-    WHERE token_hash=? AND city=? AND enabled=1
-    LIMIT 1
-  `).bind(tokenHash, city).first().catch(() => null);
-  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-
-  let snapshot = { version: BUSINESS_HOTEL_SYNC_VERSION, hotels: [] };
-  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
-  const monitoring = snapshot.monitoring || {
-    checkIn: row.check_in || null,
-    checkOut: row.check_out || null,
-    rooms: 1,
-    adults: 2,
-    children: 0,
-    currency: 'USD',
-    priceBasis: 'nightly'
-  };
-  const payload = {
-    ok: true,
-    type: 'iumrah_business_hotel_price_monitor',
-    read_only: true,
-    version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
-    city,
-    snapshotID: row.snapshot_id || snapshot.snapshotID || null,
-    updatedAt: row.snapshot_updated_at || null,
-    hotelCount: Number(row.hotel_count || 0),
-    monitoring,
-    method: {
-      primary: 'Open each hotel.monitoringURL and verify the exact property on the exact check-in/check-out dates shown above.',
-      sourceIdentity: 'hotel.sourceURL is the locked property source. monitoringURL is derived from that same property with the monitoring dates and occupancy applied.',
-      searchFallback: 'Google/open web search may only help locate the same provider property page. Do not use a search snippet or a different property as final price evidence.',
-      failureRule: 'If the direct provider page does not expose a verifiable price for the exact dates and occupancy, return status unverified. Never invent or substitute a price.',
-      compare: 'Compare the verified USD nightly rate with currentNightlyUSD.'
-    },
-    returnContract: {
-      schema: 'iumrah.hotel-price-update.v2',
-      sourceSnapshotID: row.snapshot_id || snapshot.snapshotID || null,
-      city,
-      checkIn: monitoring.checkIn,
-      checkOut: monitoring.checkOut,
-      rooms: 1,
-      adults: 2,
-      requiredHotelFields: [
-        'hotelID','status','oldNightlyUSD','newNightlyUSD','provider','sourceURL',
-        'checkedSourceURL','checkIn','checkOut','rooms','adults','confidence','checkedAt'
-      ],
-      allowedStatuses: ['changed','unchanged','unverified'],
-      publishRule: 'Only changed rows with confidence high and a direct checkedSourceURL for the same provider property AND the exact monitoring dates are eligible for update.'
-    },
-    hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
-  };
-
-  return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
-    status: 200,
-    headers: {
-      'content-type': 'text/plain; charset=utf-8',
-      'x-content-type-options': 'nosniff',
-      'cache-control': 'no-store, max-age=0'
-    }
-  });
-}
 const FLIGHT_DIRECTIONS = new Set(['outbound','return']);
 
 function normalizedFlightNumber(value) {
@@ -2443,25 +2710,6 @@ function bookingPublicNumber(value) {
   if (!Number.isFinite(number) || number <= 0) return null;
   return `#${String(Math.trunc(number)).padStart(4, '0')}`;
 }
-function lifecycleDeadline(startISO, seconds) {
-  const start = Date.parse(String(startISO || ''));
-  if (!Number.isFinite(start)) return null;
-  return new Date(start + (Number(seconds || 0) * 1000)).toISOString();
-}
-
-function initialLifecycleTimestamps(status, now) {
-  const normalized = normalizedTripStatus(status);
-  return {
-    availabilityStartedAt: normalized === 'availability_check' ? now : null,
-    availabilityDeadlineAt: normalized === 'availability_check' ? lifecycleDeadline(now, 6 * 60 * 60) : null,
-    priceLockStartedAt: normalized === 'payment_pending' ? now : null,
-    priceLockExpiresAt: normalized === 'payment_pending' ? lifecycleDeadline(now, 30 * 60) : null,
-    paymentReceivedAt: null,
-    paymentConfirmationDeadlineAt: null,
-    documentsStartedAt: normalized === 'booking_confirmed' ? now : null,
-    documentsDeadlineAt: normalized === 'booking_confirmed' ? lifecycleDeadline(now, 24 * 60 * 60) : null
-  };
-}
 async function allocateBookingNumber(env) {
   const row = await env.HOTELS_DB.prepare('UPDATE booking_number_sequence SET next_number=next_number+1 WHERE id=1 RETURNING next_number-1 AS booking_number').first();
   const number = Number(row?.booking_number || 0);
@@ -2471,21 +2719,7 @@ async function allocateBookingNumber(env) {
 
 function tripMap(row) {
   if (!row) return null;
-  const status = normalizedTripStatus(row.status);
-  const availabilityStartedAt = row.availability_started_at || (status === 'availability_check' ? row.created_at : null);
-  const availabilityDeadlineAt = row.availability_deadline_at || (availabilityStartedAt ? lifecycleDeadline(availabilityStartedAt, 6 * 60 * 60) : null);
-  const priceLockStartedAt = row.price_lock_started_at || null;
-  const priceLockExpiresAt = row.price_lock_expires_at || (priceLockStartedAt ? lifecycleDeadline(priceLockStartedAt, 30 * 60) : null);
-  const paymentReceivedAt = row.payment_received_at || null;
-  const paymentConfirmationDeadlineAt = row.payment_confirmation_deadline_at || (paymentReceivedAt ? lifecycleDeadline(paymentReceivedAt, 10 * 60) : null);
-  const documentsStartedAt = row.documents_started_at || null;
-  const documentsDeadlineAt = row.documents_deadline_at || (documentsStartedAt ? lifecycleDeadline(documentsStartedAt, 24 * 60 * 60) : null);
-  return {
-    tripID:row.id, bookingID:row.booking_id, bookingNumber:Number(row.booking_number||0)||null, bookingDisplayNumber:bookingPublicNumber(row.booking_number), pilgrimID:pilgrimPublicID(row.pilgrim_id),
-    status, paymentStatus:row.payment_status||'', confirmationNumber:row.confirmation_number||'', internalNotes:row.internal_notes||'', startDate:row.start_date||null, endDate:row.end_date||null,
-    createdAt:row.created_at, updatedAt:row.updated_at, completedAt:row.completed_at||null,
-    availabilityStartedAt, availabilityDeadlineAt, priceLockStartedAt, priceLockExpiresAt, paymentReceivedAt, paymentConfirmationDeadlineAt, documentsStartedAt, documentsDeadlineAt
-  };
+  return { tripID:row.id, bookingID:row.booking_id, bookingNumber:Number(row.booking_number||0)||null, bookingDisplayNumber:bookingPublicNumber(row.booking_number), pilgrimID:pilgrimPublicID(row.pilgrim_id), status:normalizedTripStatus(row.status), paymentStatus:row.payment_status||'', confirmationNumber:row.confirmation_number||'', internalNotes:row.internal_notes||'', startDate:row.start_date||null, endDate:row.end_date||null, createdAt:row.created_at, updatedAt:row.updated_at, completedAt:row.completed_at||null };
 }
 
 async function sourceBookingPayload(env, bookingID) {
@@ -2526,18 +2760,8 @@ async function syncBookingTrip(env, raw) {
   if (!trip) {
     pilgrim = await createPilgrim(env, identity); if (!pilgrim) return null;
     const bookingNumber = await allocateBookingNumber(env);
-    const initialStatus = tripStatusFromBooking(effectiveRaw);
-    const lifecycle = initialLifecycleTimestamps(initialStatus, now);
-    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (
-      id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at,
-      availability_started_at,availability_deadline_at,price_lock_started_at,price_lock_expires_at,
-      payment_received_at,payment_confirmation_deadline_at,documents_started_at,documents_deadline_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(
-        `trip-${crypto.randomUUID()}`,bookingID,bookingNumber,pilgrim.id,initialStatus,startDate,endDate,JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now,
-        lifecycle.availabilityStartedAt,lifecycle.availabilityDeadlineAt,lifecycle.priceLockStartedAt,lifecycle.priceLockExpiresAt,
-        lifecycle.paymentReceivedAt,lifecycle.paymentConfirmationDeadlineAt,lifecycle.documentsStartedAt,lifecycle.documentsDeadlineAt
-      ).run();
+    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,pilgrim.id,tripStatusFromBooking(effectiveRaw),startDate,endDate,JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
   } else {
     pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
     pilgrim = await updatePilgrimIdentityFields(env,pilgrim,identity);
@@ -4349,54 +4573,11 @@ async function updateOperationsBooking(request, env, bookingID, user) {
   }
 
   if (nextStatus !== currentStatus) {
-    if (nextStatus === 'availability_check') {
-      await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET
-        availability_started_at=?, availability_deadline_at=?,
-        price_lock_started_at=NULL, price_lock_expires_at=NULL,
-        payment_received_at=NULL, payment_confirmation_deadline_at=NULL,
-        documents_started_at=NULL, documents_deadline_at=NULL
-        WHERE booking_id=?`)
-        .bind(now, lifecycleDeadline(now, 6 * 60 * 60), bookingID).run();
-    } else if (nextStatus === 'payment_pending') {
-      await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET
-        price_lock_started_at=?, price_lock_expires_at=?,
-        payment_received_at=NULL, payment_confirmation_deadline_at=NULL,
-        documents_started_at=NULL, documents_deadline_at=NULL
-        WHERE booking_id=?`)
-        .bind(now, lifecycleDeadline(now, 30 * 60), bookingID).run();
-    } else if (nextStatus === 'booking_confirmed') {
-      await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET
-        payment_status=CASE WHEN payment_status='receipt_submitted' THEN 'confirmed' ELSE payment_status END,
-        documents_started_at=?, documents_deadline_at=?
-        WHERE booking_id=?`)
-        .bind(now, lifecycleDeadline(now, 24 * 60 * 60), bookingID).run();
-    }
-  }
-
-  if (nextStatus !== currentStatus) {
     await env.HOTELS_DB.prepare('INSERT INTO booking_status_history (id, booking_id, old_status, new_status, changed_by, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(crypto.randomUUID(), bookingID, currentStatus, nextStatus, cleanText(user?.login, 180), now).run();
     await sendClientStatusPush(env, bookingID, nextStatus).catch(error => console.warn('CLIENT_STATUS_PUSH_FAILED', bookingID, error));
   }
 
-  return operationsBookingDetail(request, env, bookingID);
-}
-
-async function restartBookingPriceLock(request, env, bookingID, user) {
-  const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
-  if (!trip) return json({ ok:false, error:'BOOKING_NOT_SYNCED' }, 404);
-  if (normalizedTripStatus(trip.status) !== 'payment_pending') return json({ ok:false, error:'PRICE_LOCK_NOT_AVAILABLE' }, 409);
-  if (trip.payment_received_at) return json({ ok:false, error:'PAYMENT_ALREADY_SUBMITTED' }, 409);
-  const now = new Date().toISOString();
-  const expiresAt = lifecycleDeadline(now, 30 * 60);
-  await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET price_lock_started_at=?, price_lock_expires_at=?, updated_at=? WHERE booking_id=?`)
-    .bind(now, expiresAt, now, bookingID).run();
-  await sendClientPush(
-    env, bookingID, 'Цена пакета обновлена',
-    'Стоимость повторно проверена и зафиксирована ещё на 30 минут.',
-    { type:'booking_price_lock', bookingID, expiresAt }
-  ).catch(()=>{});
-  console.log('BOOKING_PRICE_LOCK_RESTARTED', bookingID, cleanText(user?.login, 180) || 'staff', expiresAt);
   return operationsBookingDetail(request, env, bookingID);
 }
 
@@ -4958,17 +5139,8 @@ async function handleClientAccount(request,env,parts){
   let trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   if(!trip){
     const sourcePayload=await sourceBookingPayload(env,bookingID);const effectiveRaw=mergeSourceBooking(boot.booking,sourcePayload);const pricing=extractPricingSnapshot(effectiveRaw);const bookingNumber=await allocateBookingNumber(env);
-    const initialStatus=tripStatusFromBooking(effectiveRaw);const lifecycle=initialLifecycleTimestamps(initialStatus,now);
-    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (
-      id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at,
-      availability_started_at,availability_deadline_at,price_lock_started_at,price_lock_expires_at,
-      payment_received_at,payment_confirmation_deadline_at,documents_started_at,documents_deadline_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(
-        `trip-${crypto.randomUUID()}`,bookingID,bookingNumber,canonicalID,initialStatus,cleanText(effectiveRaw?.startDate,64),cleanText(effectiveRaw?.endDate,64),JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now,
-        lifecycle.availabilityStartedAt,lifecycle.availabilityDeadlineAt,lifecycle.priceLockStartedAt,lifecycle.priceLockExpiresAt,
-        lifecycle.paymentReceivedAt,lifecycle.paymentConfirmationDeadlineAt,lifecycle.documentsStartedAt,lifecycle.documentsDeadlineAt
-      ).run();
+    await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,canonicalID,tripStatusFromBooking(effectiveRaw),cleanText(effectiveRaw?.startDate,64),cleanText(effectiveRaw?.endDate,64),JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
   }else if(Number(trip.pilgrim_id)!==canonicalID){
     const oldID=Number(trip.pilgrim_id||0);
     await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?,updated_at=? WHERE booking_id=?').bind(canonicalID,now,bookingID).run();
@@ -5054,22 +5226,7 @@ function travelerComplete(v,hasPassport){return !!(v.firstName&&v.lastName&&v.ge
 async function saveTravelerForm(request,env,bookingID,position,auth){if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'TRAVELER_EDITING_CLOSED'},409);if(!Number.isInteger(position)||position<1)return json({ok:false,error:'INVALID_TRAVELER'},400);const p=await request.json().catch(()=>null);if(!p)return json({ok:false,error:'INVALID_JSON'},400);const row=await env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first();if(!row)return json({ok:false,error:'TRAVELER_NOT_FOUND'},404);const val={firstName:safeHumanText(p.firstName,120)||'',middleName:safeHumanText(p.middleName,120)||'',lastName:safeHumanText(p.lastName,120)||'',gender:cleanText(p.gender,20)||'',dateOfBirth:cleanText(p.dateOfBirth,20)||'',placeOfBirth:safeHumanText(p.placeOfBirth,160)||'',nationality:safeHumanText(p.nationality,100)||'',residenceCountry:safeHumanText(p.residenceCountry,100)||'',passportNumber:cleanText(p.passportNumber,80)||'',passportIssueDate:cleanText(p.passportIssueDate,20)||'',passportExpiryDate:cleanText(p.passportExpiryDate,20)||'',passportIssuingCountry:safeHumanText(p.passportIssuingCountry,100)||'',phone:cleanText(p.phone,100)||'',email:cleanText(p.email,220)||'',emergencyName:safeHumanText(p.emergencyName,160)||'',emergencyPhone:cleanText(p.emergencyPhone,100)||'',emergencyRelation:safeHumanText(p.emergencyRelation,80)||''};const complete=travelerComplete(val,!!row.passport_object_key);await env.HOTELS_DB.prepare(`UPDATE booking_travelers SET first_name=?,middle_name=?,last_name=?,gender=?,date_of_birth=?,place_of_birth=?,nationality=?,residence_country=?,passport_number=?,passport_issue_date=?,passport_expiry_date=?,passport_issuing_country=?,phone=?,email=?,emergency_name=?,emergency_phone=?,emergency_relation=?,completed=?,updated_at=? WHERE booking_id=? AND position=?`).bind(val.firstName,val.middleName,val.lastName,val.gender,val.dateOfBirth,val.placeOfBirth,val.nationality,val.residenceCountry,val.passportNumber,val.passportIssueDate,val.passportExpiryDate,val.passportIssuingCountry,val.phone,val.email,val.emergencyName,val.emergencyPhone,val.emergencyRelation,complete?1:0,new Date().toISOString(),bookingID,position).run();return json({ok:true,traveler:travelerMap(await env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first())});}
 async function privateImageUpload(request,env,keyPrefix){const ct=String(request.headers.get('content-type')||'').split(';')[0].toLowerCase();if(!ct.startsWith('image/'))return {ok:false,response:json({ok:false,error:'IMAGE_REQUIRED'},415)};const bytes=await request.arrayBuffer();if(!bytes.byteLength||bytes.byteLength>10_000_000)return {ok:false,response:json({ok:false,error:'IMAGE_TOO_LARGE'},413)};const ext=ct.includes('png')?'png':ct.includes('heic')?'heic':'jpg';const key=`private/${keyPrefix}/${crypto.randomUUID()}.${ext}`;await env.HOTELS_MEDIA.put(key,bytes,{httpMetadata:{contentType:ct}});return {ok:true,key,ct,size:bytes.byteLength};}
 async function uploadTravelerPassport(request,env,bookingID,position,auth){if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'TRAVELER_EDITING_CLOSED'},409);const row=await env.HOTELS_DB.prepare('SELECT * FROM booking_travelers WHERE booking_id=? AND position=?').bind(bookingID,position).first();if(!row)return json({ok:false,error:'TRAVELER_NOT_FOUND'},404);const up=await privateImageUpload(request,env,`passports/${bookingID}`);if(!up.ok)return up.response;if(row.passport_object_key){const securityPhoto=await env.HOTELS_DB.prepare('SELECT passport_object_key FROM iumrah_security_submissions WHERE booking_id=? LIMIT 1').bind(bookingID).first().catch(()=>null);if(securityPhoto?.passport_object_key!==row.passport_object_key)await env.HOTELS_MEDIA.delete(row.passport_object_key).catch(()=>{});}const complete=travelerComplete({firstName:row.first_name,lastName:row.last_name,gender:row.gender,dateOfBirth:row.date_of_birth,placeOfBirth:row.place_of_birth,nationality:row.nationality,residenceCountry:row.residence_country,passportNumber:row.passport_number,passportIssueDate:row.passport_issue_date,passportExpiryDate:row.passport_expiry_date,passportIssuingCountry:row.passport_issuing_country,phone:row.phone,emergencyName:row.emergency_name,emergencyPhone:row.emergency_phone,emergencyRelation:row.emergency_relation},true);await env.HOTELS_DB.prepare('UPDATE booking_travelers SET passport_object_key=?,passport_content_type=?,completed=?,updated_at=? WHERE booking_id=? AND position=?').bind(up.key,up.ct,complete?1:0,new Date().toISOString(),bookingID,position).run();return json({ok:true,hasPassport:true});}
-async function uploadPaymentReceipt(request,env,bookingID,auth){
- if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'PAYMENT_SUBMISSION_CLOSED'},409);
- const method=cleanText(request.headers.get('x-payment-method') || new URL(request.url).searchParams.get('method'),20)||'other';
- if(!['visa','payme','humo','other'].includes(method))return json({ok:false,error:'INVALID_PAYMENT_METHOD'},400);
- const up=await privateImageUpload(request,env,`receipts/${bookingID}`);if(!up.ok)return up.response;
- const id=crypto.randomUUID();const now=new Date().toISOString();
- await env.HOTELS_DB.prepare('INSERT INTO booking_payment_receipts(id,booking_id,payment_method,object_key,content_type,byte_size) VALUES(?,?,?,?,?,?)').bind(id,bookingID,method,up.key,up.ct,up.size).run();
- await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET
-   payment_status='receipt_submitted',
-   payment_received_at=COALESCE(payment_received_at,?),
-   payment_confirmation_deadline_at=COALESCE(payment_confirmation_deadline_at,?),
-   updated_at=? WHERE booking_id=?`)
-   .bind(now,lifecycleDeadline(now,10*60),now,bookingID).run();
- await sendStaffPush(env,'Новый чек оплаты',`Бронь ${bookingID} · iumrah ID ${pilgrimPublicID(auth.pilgrim.id)}`,{type:'payment_receipt',bookingID}).catch(()=>{});
- return json({ok:true,id});
-}
+async function uploadPaymentReceipt(request,env,bookingID,auth){if(normalizedTripStatus(auth.trip?.status)!=='payment_pending')return json({ok:false,error:'PAYMENT_SUBMISSION_CLOSED'},409);const method=cleanText(request.headers.get('x-payment-method') || new URL(request.url).searchParams.get('method'),20)||'other';if(!['visa','payme','humo','other'].includes(method))return json({ok:false,error:'INVALID_PAYMENT_METHOD'},400);const up=await privateImageUpload(request,env,`receipts/${bookingID}`);if(!up.ok)return up.response;const id=crypto.randomUUID();await env.HOTELS_DB.prepare('INSERT INTO booking_payment_receipts(id,booking_id,payment_method,object_key,content_type,byte_size) VALUES(?,?,?,?,?,?)').bind(id,bookingID,method,up.key,up.ct,up.size).run();await env.HOTELS_DB.prepare("UPDATE pilgrim_trips SET payment_status='receipt_submitted',updated_at=? WHERE booking_id=?").bind(new Date().toISOString(),bookingID).run();await sendStaffPush(env,'Новый чек оплаты',`Бронь ${bookingID} · iumrah ID ${pilgrimPublicID(auth.pilgrim.id)}`,{type:'payment_receipt',bookingID}).catch(()=>{});return json({ok:true,id});}
 async function serveClientPrivateMedia(env,bookingID,mediaID){let key=null,ct='application/octet-stream';if(mediaID==='payment-qr'){const r=await env.HOTELS_DB.prepare('SELECT payme_qr_object_key,payme_qr_content_type FROM booking_payment_instructions WHERE booking_id=?').bind(bookingID).first();key=r?.payme_qr_object_key;ct=r?.payme_qr_content_type||'image/png';}else if(mediaID.startsWith('document-')){const id=mediaID.slice(9);const r=await env.HOTELS_DB.prepare('SELECT object_key,content_type FROM booking_travel_documents WHERE id=? AND booking_id=?').bind(id,bookingID).first();key=r?.object_key;ct=r?.content_type||ct;}if(!key)return json({ok:false,error:'MEDIA_NOT_FOUND'},404);const obj=await env.HOTELS_MEDIA.get(key);if(!obj)return json({ok:false,error:'MEDIA_NOT_FOUND'},404);return new Response(obj.body,{headers:{'content-type':ct,'cache-control':'private, no-store'}});}
 
 async function sendClientChatMessage(request, env, bookingID, user) {
@@ -5501,161 +5658,6 @@ async function runHotelPriceMaintenance(env) {
       console.warn('HOTEL_PRICE_BACKGROUND_REFRESH_FAILED', hotelID, code);
     }
   }
-}
-
-
-function hotelSyncCheckedURLMatchesDates(urlValue, provider, checkIn, checkOut) {
-  try {
-    const parsed = new URL(urlValue);
-    const params = new Map();
-    for (const [key, value] of parsed.searchParams.entries()) params.set(String(key).toLowerCase(), String(value));
-    if (provider === 'Booking') {
-      return params.get('checkin') === checkIn && params.get('checkout') === checkOut;
-    }
-    if (provider === 'Expedia') {
-      const inDate = params.get('chkin') || params.get('startdate') || '';
-      const outDate = params.get('chkout') || params.get('enddate') || '';
-      return inDate === checkIn && outDate === checkOut;
-    }
-  } catch (_) {}
-  return false;
-}
-
-async function saveVerifiedChatGPTHotelPrice(request, env, hotelID, user) {
-  const hotel = await env.HOTELS_DB.prepare('SELECT id, city FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
-  if (!hotel) return json({ ok: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
-
-  const payload = await readJSON(request, 180_000);
-  if (!payload.ok) return payload.response;
-  const value = payload.value || {};
-  const owner = businessHotelSyncOwner(user);
-  const city = businessHotelSyncCity(hotel.city);
-  if (!owner || !city) return json({ ok: false, price: null, error: 'HOTEL_SYNC_CONTEXT_REQUIRED' }, 409);
-
-  const sync = await env.HOTELS_DB.prepare(`
-    SELECT enabled, snapshot_id, check_in, check_out
-    FROM business_hotel_sync_feeds
-    WHERE owner_login=? AND city=? LIMIT 1
-  `).bind(owner, city).first().catch(() => null);
-  if (!sync || Number(sync.enabled) !== 1) return json({ ok: false, price: null, error: 'HOTEL_SYNC_ACCESS_NOT_ENABLED' }, 409);
-
-  const sourceSnapshotID = cleanText(value.sourceSnapshotID, 180);
-  if (!sourceSnapshotID || sourceSnapshotID !== sync.snapshot_id) {
-    return json({ ok: false, price: null, error: 'HOTEL_SYNC_SNAPSHOT_CHANGED' }, 409);
-  }
-
-  const checkIn = validLocalDate(value.checkIn);
-  const checkOut = validLocalDate(value.checkOut);
-  if (!checkIn || !checkOut || checkIn !== sync.check_in || checkOut !== sync.check_out) {
-    return json({ ok: false, price: null, error: 'HOTEL_SYNC_DATES_CHANGED' }, 409);
-  }
-  if (Number(value.rooms) !== 1 || Number(value.adults) !== 2) {
-    return json({ ok: false, price: null, error: 'HOTEL_SYNC_OCCUPANCY_MISMATCH' }, 422);
-  }
-  if (String(value.confidence || '').trim().toLowerCase() !== 'high') {
-    return json({ ok: false, price: null, error: 'HOTEL_SYNC_HIGH_CONFIDENCE_REQUIRED' }, 422);
-  }
-
-  const nightlyUSD = Number(value.nightlyUSD);
-  if (!Number.isFinite(nightlyUSD) || nightlyUSD < 1 || nightlyUSD > 10_000) {
-    return json({ ok: false, price: null, error: 'INVALID_HOTEL_PRICE' }, 422);
-  }
-  const rounded = Math.round(nightlyUSD * 100) / 100;
-
-  const before = hotelPriceFromRow(await readHotelPriceRow(env, hotelID));
-  const oldNightlyUSD = value.oldNightlyUSD == null ? null : Number(value.oldNightlyUSD);
-  const currentNightlyUSD = Number(before?.nightlyUSD);
-  const oldMatches = oldNightlyUSD == null
-    ? !Number.isFinite(currentNightlyUSD)
-    : Number.isFinite(oldNightlyUSD) && Number.isFinite(currentNightlyUSD)
-      && Math.abs(Math.round(oldNightlyUSD * 100) / 100 - Math.round(currentNightlyUSD * 100) / 100) < 0.01;
-  if (!oldMatches) return json({ ok: false, price: before, error: 'PRICE_CHANGED_AFTER_SNAPSHOT' }, 409);
-
-  const source = await ensureHotelPriceSourceLock(env, hotelID);
-  if (!source?.source_url) return json({ ok: false, price: before, error: 'HOTEL_PRICE_SOURCE_MISSING' }, 409);
-  const provider = normalizedHotelPriceProvider(value.provider, value.sourceURL || source.source_url);
-  const lockedProvider = normalizedHotelPriceProvider(source.provider, source.source_url);
-  if (!provider || !lockedProvider || provider !== lockedProvider) {
-    return json({ ok: false, price: before, error: 'HOTEL_PRICE_PROVIDER_MISMATCH' }, 409);
-  }
-
-  const suppliedSourceURL = cleanURL(value.sourceURL);
-  const checkedSourceURL = cleanURL(value.checkedSourceURL);
-  if (!suppliedSourceURL || !checkedSourceURL) {
-    return json({ ok: false, price: before, error: 'DIRECT_SOURCE_NOT_VERIFIED' }, 422);
-  }
-  const lockedKey = safePropertyKey(source.source_url, lockedProvider);
-  const suppliedKey = safePropertyKey(suppliedSourceURL, provider);
-  const checkedKey = safePropertyKey(checkedSourceURL, provider);
-  if (!lockedKey || suppliedKey !== lockedKey || checkedKey !== lockedKey) {
-    return json({ ok: false, price: before, error: 'HOTEL_PRICE_PROPERTY_MISMATCH' }, 409);
-  }
-  if (!hotelSyncCheckedURLMatchesDates(checkedSourceURL, provider, checkIn, checkOut)) {
-    return json({ ok: false, price: before, error: 'CHECKED_SOURCE_DATES_NOT_VERIFIED' }, 422);
-  }
-
-  const nowDate = new Date();
-  const now = nowDate.toISOString();
-  const expiresAt = new Date(nowDate.getTime() + HOTEL_PRICE_TTL_MS).toISOString();
-  await env.HOTELS_DB.prepare(`
-    INSERT INTO hotel_price_cache (
-      hotel_id, source_id, provider, source_url, resolved_url,
-      amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
-      quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
-      confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
-      last_http_status, error, pending_nightly_price_usd, pending_seen_count,
-      pending_first_seen_at, pending_last_seen_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'USD', 'nightly', ?, ?, ?, ?, 1, 2, 1, 0.98, 'chatgpt-direct-source-v2', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
-    ON CONFLICT(hotel_id) DO UPDATE SET
-      source_id=excluded.source_id,
-      provider=excluded.provider,
-      source_url=excluded.source_url,
-      resolved_url=excluded.resolved_url,
-      amount_original=excluded.amount_original,
-      currency_original='USD',
-      price_basis='nightly',
-      nightly_price_usd=excluded.nightly_price_usd,
-      quote_total_usd=excluded.quote_total_usd,
-      quote_check_in=excluded.quote_check_in,
-      quote_check_out=excluded.quote_check_out,
-      quote_nights=1,
-      quote_adults=2,
-      quote_rooms=1,
-      confidence=0.98,
-      method='chatgpt-direct-source-v2',
-      status='fresh',
-      fetched_at=excluded.fetched_at,
-      expires_at=excluded.expires_at,
-      last_attempt_at=excluded.last_attempt_at,
-      next_retry_at=NULL,
-      last_http_status=200,
-      error=NULL,
-      pending_nightly_price_usd=NULL,
-      pending_seen_count=0,
-      pending_first_seen_at=NULL,
-      pending_last_seen_at=NULL,
-      updated_at=excluded.updated_at
-  `).bind(
-    hotelID,
-    source.source_id || null,
-    provider,
-    source.source_url,
-    checkedSourceURL,
-    rounded,
-    rounded,
-    rounded,
-    checkIn,
-    checkOut,
-    now,
-    expiresAt,
-    now,
-    now,
-    now
-  ).run();
-
-  await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
-  const row = await readHotelPriceRow(env, hotelID);
-  return json({ ok: true, price: hotelPriceFromRow(row), error: null });
 }
 
 async function setManualHotelPrice(request, env, hotelID, user) {
