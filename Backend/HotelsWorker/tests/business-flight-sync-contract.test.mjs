@@ -31,3 +31,12 @@ test('flight sync feed exports a stable comparison key and current fare', () => 
   assert.match(source, /FLIGHT_SYNC_INVALID_FLIGHT/);
   assert.match(source, /BUSINESS_FLIGHT_SYNC_MAX_FLIGHTS = 500/);
 });
+
+
+test('public flight sync feed is pretty-printed plain UTF-8 JSON for external readers', () => {
+  assert.match(source, /JSON\.stringify\(payload, null, 2\)/);
+  assert.match(source, /'content-type': 'text\/plain; charset=utf-8'/);
+  assert.match(source, /'x-content-type-options': 'nosniff'/);
+  assert.match(source, /flight_count:/);
+  assert.match(source, /flights:/);
+});

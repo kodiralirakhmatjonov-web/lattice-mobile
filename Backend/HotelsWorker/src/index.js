@@ -2,7 +2,7 @@ import { obtainHotelPrice, propertyKey, safePropertyKey } from './hotel-price-so
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
-import { handlePriceJSONAdmin } from './price-json.js';
+import { handlePriceMonitorAdmin, handleChatGPTLinksAdmin, handleChatGPTPublic, runHotelPriceMonitorWorkflow } from './price-monitor.js';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -25,6 +25,9 @@ export default {
         });
       }
 
+      if (url.pathname.startsWith('/api/iumrah/chatgpt/')) {
+        return withCors(await handleChatGPTPublic(request, env, url), request);
+      }
 
       if (url.pathname.startsWith('/api/admin/ziyarats')) {
         const staff = await requireStaff(request, env);
@@ -55,6 +58,9 @@ export default {
     }
   },
 
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runHotelPriceMaintenance(env));
+  }
 };
 
 async function handleAdmin(request, env, url, user, businessSession = null) {
@@ -97,8 +103,12 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
     return methodNotAllowed();
   }
 
-  if (parts[0] === 'price-json') {
-    return handlePriceJSONAdmin(request, env, url, parts.slice(1), user);
+  if (parts[0] === 'price-monitor') {
+    return handlePriceMonitorAdmin(request, env, url, parts.slice(1), user);
+  }
+
+  if (parts[0] === 'chatgpt-links') {
+    return handleChatGPTLinksAdmin(request, env, user);
   }
 
   if (parts[0] === 'chats') {
@@ -867,6 +877,11 @@ async function handleCatalog(request, env, url) {
     return publicPrimaryHotels(env, url);
   }
 
+  if (parts[0] === 'flight-sync') {
+    if (parts.length !== 2 || request.method !== 'GET') return methodNotAllowed();
+    return publicBusinessFlightSyncFeed(env, parts[1]);
+  }
+
   if (parts[0] === 'client') {
     return handleClientOperations(request, env, parts.slice(1));
   }
@@ -948,6 +963,14 @@ async function handleBusinessOperations(request, env, url, parts, user, business
   if (parts.length === 1 && parts[0] === 'ignav-usage') {
     if (request.method !== 'GET') return methodNotAllowed();
     return adminIgnavUsage(env);
+  }
+
+  if (parts[0] === 'flight-sync') {
+    if (parts.length === 1 && request.method === 'GET') return businessFlightSyncStatus(env, user);
+    if (parts.length === 2 && parts[1] === 'access' && request.method === 'POST') return rotateBusinessFlightSyncAccess(env, user);
+    if (parts.length === 2 && parts[1] === 'access' && request.method === 'DELETE') return revokeBusinessFlightSyncAccess(env, user);
+    if (parts.length === 2 && parts[1] === 'snapshot' && request.method === 'POST') return saveBusinessFlightSyncSnapshot(request, env, user);
+    return methodNotAllowed();
   }
 
   if (parts[0] === 'flight-verify') {
@@ -1070,6 +1093,218 @@ async function adminIgnavUsage(env) {
       firstSuccessAt: row?.first_success_at || null,
       lastSuccessAt: row?.last_success_at || null,
       trackingNote: 'Серверный счётчик iumrah: учитываются успешные Ignav-запросы, записанные в общий D1.'
+    }
+  });
+}
+
+
+const BUSINESS_FLIGHT_SYNC_VERSION = 1;
+const BUSINESS_FLIGHT_SYNC_MAX_FLIGHTS = 500;
+
+function businessFlightSyncOwner(user) {
+  return businessStaffLogin(user);
+}
+
+function businessFlightSyncPublicURL(token) {
+  return `https://iumrah.app/api/catalog/hotels/flight-sync/${encodeURIComponent(token)}`;
+}
+
+function normalizedIATA(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : '';
+}
+
+function normalizedCurrency(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : '';
+}
+
+function normalizedStringArray(value, limit, itemLimit = 80) {
+  if (!Array.isArray(value)) return [];
+  const result = [];
+  for (const item of value) {
+    const text = safeHumanText(item, itemLimit);
+    if (!text || result.includes(text)) continue;
+    result.push(text);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function normalizedFlightSyncLeg(value) {
+  if (!value || typeof value !== 'object') return null;
+  const origin = normalizedIATA(value.origin);
+  const destination = normalizedIATA(value.destination);
+  const flightNumber = cleanText(value.flight_number || value.flightNumber, 40)?.toUpperCase() || '';
+  if (!origin || !destination || !flightNumber) return null;
+  return {
+    airline: safeHumanText(value.airline || '', 160) || null,
+    airline_code: cleanText(value.airline_code || value.airlineCode, 12)?.toUpperCase() || null,
+    flight_number: flightNumber,
+    origin,
+    destination,
+    departure_at: cleanText(value.departure_at || value.departureAt, 80) || null,
+    arrival_at: cleanText(value.arrival_at || value.arrivalAt, 80) || null,
+    stops: Number.isFinite(Number(value.stops)) ? Math.max(0, Math.trunc(Number(value.stops))) : 0,
+    cabin_class: cleanText(value.cabin_class || value.cabinClass, 40)?.toLowerCase() || 'economy'
+  };
+}
+
+function normalizedFlightSyncItem(value) {
+  if (!value || typeof value !== 'object') return null;
+  const origin = normalizedIATA(value.from || value.origin);
+  const destination = normalizedIATA(value.to || value.destination);
+  const date = validLocalDate(value.date || value.outbound_date || value.outboundDate);
+  const amount = Number(value?.price?.amount ?? value.per_traveler_fare ?? value.perTravelerFare);
+  const currency = normalizedCurrency(value?.price?.currency ?? value.currency);
+  if (!origin || !destination || !date || !Number.isFinite(amount) || amount < 0 || !currency) return null;
+
+  const legs = Array.isArray(value.legs)
+    ? value.legs.map(normalizedFlightSyncLeg).filter(Boolean).slice(0, 4)
+    : [];
+
+  return {
+    id: cleanText(value.id, 180) || crypto.randomUUID(),
+    comparison_key: cleanText(value.comparison_key || value.comparisonKey, 260) || null,
+    from: origin,
+    to: destination,
+    date,
+    airline_codes: normalizedStringArray(value.airline_codes || value.airlineCodes, 8, 12).map(x => x.toUpperCase()),
+    airline_names: normalizedStringArray(value.airline_names || value.airlineNames, 8, 160),
+    flight_numbers: normalizedStringArray(value.flight_numbers || value.flightNumbers, 8, 40).map(x => x.toUpperCase().replace(/\s+/g, '')),
+    offer_type: cleanText(value.offer_type || value.offerType, 40)?.toLowerCase() || 'one_way',
+    journey_role: cleanText(value.journey_role || value.journeyRole, 40)?.toLowerCase() || 'outbound',
+    fare_scope: cleanText(value.fare_scope || value.fareScope, 40)?.toLowerCase() || null,
+    price_type: cleanText(value.price_type || value.priceType, 40)?.toLowerCase() || null,
+    price: { amount: Math.round(amount * 100) / 100, currency },
+    observed_at: cleanText(value.observed_at || value.observedAt, 80) || null,
+    legs
+  };
+}
+
+async function businessFlightSyncStatus(env, user) {
+  const owner = businessFlightSyncOwner(user);
+  if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT enabled, flight_count, snapshot_updated_at, created_at, updated_at
+    FROM business_flight_sync_feeds WHERE owner_login=? LIMIT 1
+  `).bind(owner).first().catch(() => null);
+  return json({
+    ok: true,
+    configured: Boolean(row),
+    enabled: Boolean(row && Number(row.enabled) === 1),
+    flightCount: Number(row?.flight_count || 0),
+    snapshotUpdatedAt: row?.snapshot_updated_at || null,
+    createdAt: row?.created_at || null,
+    updatedAt: row?.updated_at || null,
+    readOnly: true
+  });
+}
+
+async function rotateBusinessFlightSyncAccess(env, user) {
+  const owner = businessFlightSyncOwner(user);
+  if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
+  const token = randomToken(32);
+  const tokenHash = await sha256Hex(token);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_flight_sync_feeds (
+      owner_login, token_hash, enabled, snapshot_json, flight_count,
+      snapshot_updated_at, created_at, updated_at
+    ) VALUES (?, ?, 1, '{"version":1,"flights":[]}', 0, NULL, ?, ?)
+    ON CONFLICT(owner_login) DO UPDATE SET
+      token_hash=excluded.token_hash,
+      enabled=1,
+      updated_at=excluded.updated_at
+  `).bind(owner, tokenHash, now, now).run();
+  return json({
+    ok: true,
+    readOnly: true,
+    accessURL: businessFlightSyncPublicURL(token),
+    rotatedAt: now,
+    note: 'This URL can only read the published-flight snapshot. It cannot publish, edit, or delete flights.'
+  });
+}
+
+async function revokeBusinessFlightSyncAccess(env, user) {
+  const owner = businessFlightSyncOwner(user);
+  if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    UPDATE business_flight_sync_feeds SET enabled=0, updated_at=? WHERE owner_login=?
+  `).bind(now, owner).run();
+  return json({ ok: true, enabled: false, revokedAt: now });
+}
+
+async function saveBusinessFlightSyncSnapshot(request, env, user) {
+  const owner = businessFlightSyncOwner(user);
+  if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
+  const existing = await env.HOTELS_DB.prepare(`
+    SELECT enabled FROM business_flight_sync_feeds WHERE owner_login=? LIMIT 1
+  `).bind(owner).first().catch(() => null);
+  if (!existing || Number(existing.enabled) !== 1) {
+    return json({ ok: false, error: 'FLIGHT_SYNC_ACCESS_NOT_ENABLED' }, 409);
+  }
+
+  const raw = await request.text();
+  if (raw.length > 600_000) return json({ ok: false, error: 'FLIGHT_SYNC_SNAPSHOT_TOO_LARGE' }, 413);
+  let payload;
+  try { payload = JSON.parse(raw); } catch { return json({ ok: false, error: 'INVALID_JSON' }, 400); }
+  if (!Array.isArray(payload?.flights)) return json({ ok: false, error: 'FLIGHT_SYNC_FLIGHTS_REQUIRED' }, 400);
+  if (payload.flights.length > BUSINESS_FLIGHT_SYNC_MAX_FLIGHTS) {
+    return json({ ok: false, error: 'FLIGHT_SYNC_TOO_MANY_FLIGHTS', max: BUSINESS_FLIGHT_SYNC_MAX_FLIGHTS }, 400);
+  }
+
+  const flights = payload.flights.map(normalizedFlightSyncItem).filter(Boolean);
+  if (flights.length !== payload.flights.length) {
+    return json({ ok: false, error: 'FLIGHT_SYNC_INVALID_FLIGHT', accepted: flights.length, received: payload.flights.length }, 400);
+  }
+
+  const now = new Date().toISOString();
+  const snapshot = JSON.stringify({ version: BUSINESS_FLIGHT_SYNC_VERSION, generated_at: now, flights });
+  await env.HOTELS_DB.prepare(`
+    UPDATE business_flight_sync_feeds
+    SET snapshot_json=?, flight_count=?, snapshot_updated_at=?, updated_at=?
+    WHERE owner_login=? AND enabled=1
+  `).bind(snapshot, flights.length, now, now, owner).run();
+  return json({ ok: true, flightCount: flights.length, snapshotUpdatedAt: now });
+}
+
+async function publicBusinessFlightSyncFeed(env, token) {
+  const cleanToken = cleanText(token, 512);
+  if (!cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'FLIGHT_SYNC_NOT_FOUND' }, 404);
+  const tokenHash = await sha256Hex(cleanToken);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_json, flight_count, snapshot_updated_at
+    FROM business_flight_sync_feeds
+    WHERE token_hash=? AND enabled=1
+    LIMIT 1
+  `).bind(tokenHash).first().catch(() => null);
+  if (!row) return json({ ok: false, error: 'FLIGHT_SYNC_NOT_FOUND' }, 404);
+
+  let snapshot = { version: BUSINESS_FLIGHT_SYNC_VERSION, flights: [] };
+  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
+  const payload = {
+    ok: true,
+    type: 'iumrah_business_published_flights',
+    read_only: true,
+    version: Number(snapshot.version || BUSINESS_FLIGHT_SYNC_VERSION),
+    updated_at: row.snapshot_updated_at || null,
+    flight_count: Number(row.flight_count || 0),
+    comparison_key: 'comparison_key identifies the same published physical flight; compare price.amount for fare changes.',
+    flights: Array.isArray(snapshot.flights) ? snapshot.flights : []
+  };
+
+  // Keep the secret URL human/agent-readable. Some external readers intentionally
+  // do not expose application/json API bodies, while they do expose plain UTF-8
+  // text. The body itself remains valid JSON, only pretty-printed as text/plain.
+  // This endpoint is still strictly read-only and non-cacheable.
+  return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
+    status: 200,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'x-content-type-options': 'nosniff',
+      'cache-control': 'no-store, max-age=0'
     }
   });
 }
@@ -6769,6 +7004,12 @@ function importJobRow(row) {
     lastErrorCode: row.last_error_code || null,
     cancelRequestedAt: row.cancel_requested_at || null
   };
+}
+
+export class HotelPriceMonitorWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    return runHotelPriceMonitorWorkflow(this.env, event, step);
+  }
 }
 
 export class HotelImportWorkflow extends WorkflowEntrypoint {
