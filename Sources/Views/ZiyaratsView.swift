@@ -85,7 +85,7 @@ struct ZiyaratsView: View {
             HStack(spacing: 16) {
                 metric("\(routes.reduce(0) { $0 + $1.stopCount })", "мест")
                 metric("3", "города")
-                metric("5", "фото max")
+                metric("∞", "фото без лимита")
             }
         }
         .padding(18)
@@ -147,7 +147,7 @@ struct ZiyaratsView: View {
         VStack(spacing: 12) {
             Image(systemName: "map").font(.system(size: 34)).foregroundStyle(.secondary)
             Text("Пока нет мест").font(.headline)
-            Text("Добавьте точку, укажите точные координаты и загрузите до пяти фотографий.")
+            Text("Добавьте точку, укажите точные координаты и загрузите нужное количество фотографий.")
                 .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Button("Добавить место") { isCreating = true }
                 .buttonStyle(.borderedProminent).tint(BusinessDesign.primaryControl)
@@ -317,12 +317,12 @@ private struct ZiyaratEditorView: View {
 
     private var galleryCard: some View {
         VStack(alignment: .leading, spacing: 13) {
-            HStack { cardTitle("Галерея", "photo.on.rectangle.angled"); Spacer(); Text("\(totalImages)/5").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+            HStack { cardTitle("Галерея", "photo.on.rectangle.angled"); Spacer(); Text("\(totalImages) фото").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
             Text("Перед отправкой iPhone сохраняет HD-разрешение до 2048 px и оптимизирует JPEG. Cloudflare дополнительно хранит эффективную WebP-версию без заметной потери экранного качества.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if totalImages > 0 {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
+                    LazyHStack(spacing: 10) {
                         ForEach(existingImages) { image in
                             ZStack(alignment: .topTrailing) {
                                 ZiyaratAdminImage(path: image.url).frame(width: 132, height: 110).clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -341,10 +341,10 @@ private struct ZiyaratEditorView: View {
                     }
                 }
             }
-            PhotosPicker(selection: $photoItems, maxSelectionCount: max(1, 5 - existingImages.count), matching: .images) {
-                Label(totalImages >= 5 ? "Лимит 5 фотографий" : "Добавить фотографии", systemImage: "plus.circle.fill")
+            PhotosPicker(selection: $photoItems, maxSelectionCount: nil, matching: .images) {
+                Label("Добавить фотографии", systemImage: "plus.circle.fill")
                     .font(.headline).frame(maxWidth: .infinity).frame(height: 50).background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }.disabled(totalImages >= 5)
+            }
         }.padding(17).businessCard(radius: 28)
     }
 
@@ -435,8 +435,7 @@ private struct ZiyaratEditorView: View {
 
     @MainActor private func loadPending(_ items: [PhotosPickerItem]) async {
         var loaded: [Data] = []
-        let limit = max(0, 5 - existingImages.count)
-        for item in items.prefix(limit) { if let data = try? await item.loadTransferable(type: Data.self) { loaded.append(data) } }
+        for item in items { if let data = try? await item.loadTransferable(type: Data.self) { loaded.append(data) } }
         pendingPhotos = loaded
     }
 
@@ -518,7 +517,7 @@ private struct ZiyaratEditorView: View {
             let saved = place == nil ? try await APIClient.shared.createZiyarat(payload) : try await APIClient.shared.updateZiyarat(id: place!.id, payload: payload)
             for imageID in removedImageIDs { try await APIClient.shared.deleteZiyaratImage(placeID: saved.id, imageID: imageID) }
             let start = max(0, existingImages.count)
-            for (index, data) in pendingPhotos.prefix(max(0, 5 - existingImages.count)).enumerated() { try await APIClient.shared.uploadZiyaratImage(placeID: saved.id, imageData: data, position: start + index) }
+            for (index, data) in pendingPhotos.enumerated() { try await APIClient.shared.uploadZiyaratImage(placeID: saved.id, imageData: data, position: start + index) }
             onSaved(); dismiss()
         } catch { errorMessage = error.localizedDescription }
     }

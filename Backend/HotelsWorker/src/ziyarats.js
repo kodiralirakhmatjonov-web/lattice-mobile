@@ -139,7 +139,7 @@ async function hydrateRoute(env, route, publishedOnly) {
 async function mapPlace(env, row, publicMode) {
   const images = await env.HOTELS_DB.prepare(`
     SELECT id, content_type, byte_size, width, height, position
-    FROM ziyarat_images WHERE place_id=? ORDER BY position ASC, created_at ASC LIMIT 5
+    FROM ziyarat_images WHERE place_id=? ORDER BY position ASC, created_at ASC
   `).bind(row.id).all();
   const translations = await loadPlaceTranslations(env, row.id, row);
   return {
@@ -258,7 +258,6 @@ async function uploadPlaceImage(request, env, placeID) {
   const place = await env.HOTELS_DB.prepare('SELECT id FROM ziyarat_places WHERE id=? LIMIT 1').bind(placeID).first();
   if (!place) return json({ ok: false, error: 'ZIYARAT_NOT_FOUND' }, 404);
   const count = await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM ziyarat_images WHERE place_id=?').bind(placeID).first();
-  if (Number(count?.count || 0) >= 5) return json({ ok: false, error: 'ZIYARAT_IMAGE_LIMIT' }, 409);
 
   const contentType = (request.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   if (!['image/jpeg','image/jpg','image/png','image/webp','image/avif'].includes(contentType)) {
@@ -281,7 +280,10 @@ async function uploadPlaceImage(request, env, placeID) {
   if (existing?.id) return json({ ok: true, deduplicated: true, imageID: existing.id });
 
   const imageID = crypto.randomUUID();
-  const position = boundedInteger(request.headers.get('x-iumrah-position'), 0, 4, Number(count?.count || 0));
+  const requestedPosition = Number.parseInt(request.headers.get('x-iumrah-position') || '', 10);
+  const position = Number.isFinite(requestedPosition) && requestedPosition >= 0
+    ? requestedPosition
+    : Number(count?.count || 0);
   const objectKey = `ziyarats/${placeID}/${hash.slice(0, 32)}.${transformed.extension}`;
   await env.HOTELS_MEDIA.put(objectKey, transformed.bytes, {
     httpMetadata: { contentType: transformed.contentType, cacheControl: 'public, max-age=31536000, immutable' },

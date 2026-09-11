@@ -16,10 +16,13 @@ test('Ziyarats exposes authenticated admin and public catalog routes', () => {
   assert.match(ziyarats, /handleZiyaratCatalog/);
 });
 
-test('Ziyarats stores exact coordinates and supports an admin-managed five-photo gallery', () => {
+test('Ziyarats stores exact coordinates and supports an admin-managed unlimited gallery', () => {
   assert.match(migration, /latitude REAL NOT NULL/);
   assert.match(migration, /longitude REAL NOT NULL/);
-  assert.match(ziyarats, />= 5/);
+  assert.doesNotMatch(ziyarats, /ZIYARAT_IMAGE_LIMIT/);
+  assert.doesNotMatch(ziyarats, /ORDER BY position ASC, created_at ASC LIMIT 5/);
+  assert.match(ziyarats, /requestedPosition/);
+  assert.doesNotMatch(ziyarats, /1_000_000/);
   assert.match(ziyarats, /HOTELS_MEDIA\.put\(objectKey/);
   assert.match(ziyarats, /HOTELS_MEDIA\.delete/);
 });
