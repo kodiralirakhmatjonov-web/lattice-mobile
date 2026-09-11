@@ -35,6 +35,8 @@ test('ChatGPT bridge uses short-lived hashed read-only links instead of staff cr
   assert.match(wrangler, /iumrah\.app\/api\/iumrah\/chatgpt\*/);
   assert.match(monitor, /function chatgptText/);
   assert.match(monitor, /'content-type': 'text\/plain; charset=utf-8'/);
+  assert.match(monitor, /# iumrah ChatGPT Bridge v1\.2/);
+  assert.match(monitor, /'x-iumrah-chatgpt-bridge': '1\.2'/);
   const publicStart = monitor.indexOf('export async function handleChatGPTPublic');
   const publicEnd = monitor.indexOf('export async function runHotelPriceMonitorWorkflow', publicStart);
   const publicSection = monitor.slice(publicStart, publicEnd);
