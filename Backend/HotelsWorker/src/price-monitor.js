@@ -10,6 +10,18 @@ function json(value, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(value), { status, headers: { ...JSON_HEADERS, ...extraHeaders } });
 }
 
+function chatgptText(value, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(value, null, 2), {
+    status,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      ...extraHeaders
+    }
+  });
+}
+
 function cleanText(value, maxLength = 1000) {
   if (value == null) return null;
   const text = String(value).replace(/\u0000/g, '').trim();
@@ -411,10 +423,10 @@ export async function handleChatGPTLinksAdmin(request, env, user) {
 }
 
 export async function handleChatGPTPublic(request, env, url) {
-  if (request.method !== 'GET') return json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+  if (request.method !== 'GET') return chatgptText({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405);
   const prefix = '/api/iumrah/chatgpt/';
   const token = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length).replace(/\/+$/, '') : '';
-  if (!/^[a-f0-9]{64}$/i.test(token)) return json({ ok: false, error: 'INVALID_ACCESS_LINK' }, 404);
+  if (!/^[a-f0-9]{64}$/i.test(token)) return chatgptText({ ok: false, error: 'INVALID_ACCESS_LINK' }, 404);
   const tokenHash = await hashToken(token);
   const now = new Date().toISOString();
   const link = await env.HOTELS_DB.prepare(`
@@ -422,13 +434,13 @@ export async function handleChatGPTPublic(request, env, url) {
     WHERE token_hash=? AND revoked_at IS NULL AND expires_at>?
     LIMIT 1
   `).bind(tokenHash, now).first();
-  if (!link) return json({ ok: false, error: 'ACCESS_LINK_EXPIRED' }, 410);
+  if (!link) return chatgptText({ ok: false, error: 'ACCESS_LINK_EXPIRED' }, 410);
   await env.HOTELS_DB.prepare('UPDATE chatgpt_access_links SET last_used_at=? WHERE id=?').bind(now, link.id).run().catch(() => {});
 
   if (link.scope === 'price_monitor_run' && link.run_id) {
     const run = await monitorRunDetail(env, link.run_id);
-    if (!run) return json({ ok: false, error: 'MONITOR_RUN_NOT_FOUND' }, 404);
-    return json({
+    if (!run) return chatgptText({ ok: false, error: 'MONITOR_RUN_NOT_FOUND' }, 404);
+    return chatgptText({
       ok: true,
       type: 'iumrah_price_monitor_run',
       readOnly: true,
@@ -451,7 +463,7 @@ export async function handleChatGPTPublic(request, env, url) {
     ORDER BY CASE LOWER(h.city) WHEN 'makkah' THEN 0 WHEN 'madinah' THEN 1 ELSE 2 END, h.name COLLATE NOCASE
     LIMIT 500
   `).all();
-  return json({
+  return chatgptText({
     ok: true,
     type: 'iumrah_hotel_catalog',
     readOnly: true,

@@ -33,6 +33,13 @@ test('ChatGPT bridge uses short-lived hashed read-only links instead of staff cr
   assert.match(monitor, /request\.method !== 'GET'/);
   assert.match(worker, /\/api\/iumrah\/chatgpt\//);
   assert.match(wrangler, /iumrah\.app\/api\/iumrah\/chatgpt\*/);
+  assert.match(monitor, /function chatgptText/);
+  assert.match(monitor, /'content-type': 'text\/plain; charset=utf-8'/);
+  const publicStart = monitor.indexOf('export async function handleChatGPTPublic');
+  const publicEnd = monitor.indexOf('export async function runHotelPriceMonitorWorkflow', publicStart);
+  const publicSection = monitor.slice(publicStart, publicEnd);
+  assert.match(publicSection, /return chatgptText\(/);
+  assert.doesNotMatch(publicSection, /return json\(/);
 });
 
 test('Cloudflare Workflow and iumrah Business UI expose review and selective publishing', () => {
