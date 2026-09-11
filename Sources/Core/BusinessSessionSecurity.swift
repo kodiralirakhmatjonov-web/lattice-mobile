@@ -11,6 +11,7 @@ enum BusinessSessionVault {
     private static let installationIDAccount = "installation-id-v1"
     private static let installationSecretAccount = "installation-secret-v1"
     private static let sessionTokenAccount = "business-session-token-v1"
+    private static let flightSyncURLAccount = "chatgpt-flight-sync-url-v1"
 
     static func installationIdentity() throws -> BusinessInstallationIdentity {
         if let id = read(installationIDAccount),
@@ -39,6 +40,25 @@ enum BusinessSessionVault {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: sessionTokenAccount
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+
+    static var flightSyncAccessURL: URL? {
+        guard let value = read(flightSyncURLAccount), !value.isEmpty else { return nil }
+        return URL(string: value)
+    }
+
+    static func setFlightSyncAccessURL(_ url: URL) throws {
+        try write(url.absoluteString, account: flightSyncURLAccount)
+    }
+
+    static func clearFlightSyncAccessURL() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: flightSyncURLAccount
         ]
         SecItemDelete(query as CFDictionary)
     }

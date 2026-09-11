@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 struct FlightCurationView: View {
     var tabMode = false
@@ -253,6 +254,9 @@ struct FlightCurationView: View {
     @State private var charterResults: [BusinessFlightCurationItinerary] = []
     @State private var selectedCharterIDs: Set<String> = []
     @State private var isCharterPublishing = false
+    @State private var flightSyncURL: URL?
+    @State private var isFlightSyncing = false
+    @State private var flightSyncMessage: String?
 
     private let api = APIClient.shared
 
@@ -326,7 +330,14 @@ struct FlightCurationView: View {
                 }
             }
         }
-        .task { await loadPublished() }
+        .task {
+            flightSyncURL = BusinessSessionVault.flightSyncAccessURL
+            await loadPublished()
+        }
+        .onChange(of: published) { _, _ in
+            guard flightSyncURL != nil else { return }
+            Task { await syncFlightSnapshot(silent: true) }
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await loadPublished() }
@@ -1084,6 +1095,8 @@ struct FlightCurationView: View {
                 }
             }
 
+            flightSyncCard
+
             if published.isEmpty {
                 Text("Пока ничего не опубликовано. Выберите подходящий результат — он появится в клиентском блоке актуальных рейсов.")
                     .font(.subheadline)
@@ -1160,6 +1173,132 @@ struct FlightCurationView: View {
                 }
             }
         }
+    }
+
+    private var flightSyncCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.blue)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ChatGPT Sync")
+                        .font(.headline)
+                    Text("Read-only доступ только к опубликованным рейсам и их текущим ценам. ChatGPT не получает доступ к админке, публикации или удалению.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+
+                if flightSyncURL != nil {
+                    Menu {
+                        Button("Создать новую ссылку", systemImage: "arrow.clockwise") {
+                            Task { await createFlightSyncAccess() }
+                        }
+                        Button("Отключить доступ", systemImage: "link.badge.minus", role: .destructive) {
+                            Task { await revokeFlightSyncAccess() }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                    }
+                    .disabled(isFlightSyncing)
+                }
+            }
+
+            if let url = flightSyncURL {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text("Доступ включён")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text("\(published.count) рейсов")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(url.absoluteString)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await syncFlightSnapshot(silent: false) }
+                    } label: {
+                        HStack(spacing: 7) {
+                            if isFlightSyncing {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                            }
+                            Text("Синхронизировать")
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isFlightSyncing)
+
+                    Button {
+                        UIPasteboard.general.string = url.absoluteString
+                        flightSyncMessage = "Ссылка скопирована. Отправьте её в ваш чат ChatGPT один раз."
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .frame(width: 44, height: 44)
+                            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up")
+                            .frame(width: 44, height: 44)
+                            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                Button {
+                    Task { await createFlightSyncAccess() }
+                } label: {
+                    HStack {
+                        if isFlightSyncing {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "link.badge.plus")
+                        }
+                        Text("Подключить ChatGPT")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 15)
+                    .frame(height: 46)
+                    .background(Color.black, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isFlightSyncing)
+            }
+
+            if let flightSyncMessage {
+                Text(flightSyncMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .background(BusinessDesign.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(BusinessDesign.line))
     }
 
     private var batchProgressSection: some View {
@@ -2030,6 +2169,60 @@ struct FlightCurationView: View {
         do {
             try await api.deleteCuratedFlight(id: offer.id)
             published.removeAll { $0.id == offer.id }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func createFlightSyncAccess() async {
+        guard !isFlightSyncing else { return }
+        isFlightSyncing = true
+        flightSyncMessage = nil
+        defer { isFlightSyncing = false }
+
+        do {
+            let access = try await api.rotateFlightSyncAccess()
+            guard let url = URL(string: access.accessURL) else {
+                throw APIError.invalidURL
+            }
+            try BusinessSessionVault.setFlightSyncAccessURL(url)
+            flightSyncURL = url
+            let snapshot = try await api.saveFlightSyncSnapshot(offers: published)
+            UIPasteboard.general.string = url.absoluteString
+            flightSyncMessage = "Готово: \(snapshot.flightCount) рейсов синхронизировано. Ссылка скопирована — отправьте её в этот чат ChatGPT один раз."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func syncFlightSnapshot(silent: Bool) async {
+        guard flightSyncURL != nil, !isFlightSyncing else { return }
+        isFlightSyncing = true
+        defer { isFlightSyncing = false }
+        do {
+            let snapshot = try await api.saveFlightSyncSnapshot(offers: published)
+            if !silent {
+                flightSyncMessage = "Синхронизировано: \(snapshot.flightCount) опубликованных рейсов."
+            }
+        } catch {
+            if !silent {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func revokeFlightSyncAccess() async {
+        guard !isFlightSyncing else { return }
+        isFlightSyncing = true
+        defer { isFlightSyncing = false }
+        do {
+            _ = try await api.revokeFlightSyncAccess()
+            BusinessSessionVault.clearFlightSyncAccessURL()
+            flightSyncURL = nil
+            flightSyncMessage = "Read-only ссылка отключена. Старый адрес больше не даёт доступ к списку рейсов."
         } catch {
             errorMessage = error.localizedDescription
         }
