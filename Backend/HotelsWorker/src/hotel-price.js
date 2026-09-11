@@ -109,7 +109,17 @@ export function extractHotelPriceFromHTML(html, provider, nights = HOTEL_PRICE_Q
 
   collectJSONLDCandidates(scoped, candidates, nights);
   if (provider === 'Booking') collectBookingCandidates(scoped, readable, candidates, nights);
-  if (provider === 'Expedia') collectExpediaCandidates(scoped, readable, candidates, nights);
+  if (provider === 'Expedia') {
+    // Expedia places the property's FAQ after the "Similar properties" section on
+    // many hotel pages. That section is intentionally outside `scoped` because it
+    // also contains other hotels' prices. Read only Expedia's very specific
+    // 1-night / 2-adult FAQ sentence from the full document before applying the
+    // recommendation boundary. Expedia describes this number as the lowest nightly
+    // price found in the last 24 hours for stays in the next 30 days, which is an
+    // excellent catalogue benchmark when exact travel dates are irrelevant.
+    collectExpediaRollingPropertyCandidates(raw, candidates);
+    collectExpediaCandidates(scoped, readable, candidates, nights);
+  }
   collectGenericExplicitCandidates(readable, candidates, nights);
 
   const normalized = candidates
@@ -167,6 +177,21 @@ function collectBookingCandidates(html, readable, out, nights) {
     new RegExp(`${nights}\\s+nights?[^\\n]{0,80}${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi')
   ];
   for (const pattern of totalPatterns) collectPatternMoney(escaped, pattern, out, 'stay_total', 0.96, 'booking-explicit-stay');
+}
+
+function collectExpediaRollingPropertyCandidates(html, out) {
+  const text = htmlToReadableText(String(html || '')).replace(/\u00a0/g, ' ');
+  const patterns = [
+    // Current Expedia property FAQ wording (regional storefronts included):
+    // "prices found for a 1-night stay for 2 adults at <hotel> ... start from SAR 1,417 ..."
+    new RegExp(`prices?\\s+found\\s+for\\s+a\\s+(?:1|one)[-\\s]?night\\s+stay\\s+for\\s+2\\s+adults[^\\n]{0,260}?(?:start|starting)\\s+from\\s+${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi'),
+    // Slightly shorter wording seen on some Expedia locales / experiments.
+    new RegExp(`prices?[^\\n]{0,100}(?:1|one)[-\\s]?night[^\\n]{0,100}2\\s+adults[^\\n]{0,180}?(?:start|starting)\\s+from\\s+${MONEY_TOKEN}\\s*${AMOUNT_TOKEN}`, 'gi')
+  ];
+  for (const pattern of patterns) {
+    collectPatternMoney(text, pattern, out, 'nightly', 0.999, 'expedia-property-faq-rolling-30d');
+    if (out.some(item => item.method === 'expedia-property-faq-rolling-30d')) break;
+  }
 }
 
 function collectExpediaCandidates(html, readable, out, nights) {

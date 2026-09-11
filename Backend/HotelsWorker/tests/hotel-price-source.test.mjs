@@ -113,20 +113,24 @@ test('rendered date-less teaser and other property are never accepted', async ()
 });
 
 
-test('Expedia probe ladder stays on one property and normalizes two-adult USD occupancy', () => {
-  const probes = expediaPriceProbeURLs(expedia, now);
-  assert.equal(probes.length, 6);
+test('Expedia probe ladder spans the next two months on one property and normalizes two-adult USD occupancy', () => {
+  const source = 'https://www.expedia.sa/en/Madinah-Hotels-Example.h1234.Hotel-Information?chkin=2027-01-20&chkout=2027-01-24';
+  const probes = expediaPriceProbeURLs(source, now);
+  assert.equal(probes.length, 8);
   assert.deepEqual(probes.map(value => new URL(value).searchParams.get('chkin')), [
-    '2026-09-10', '2026-09-12', '2026-09-16', '2026-09-23', '2026-09-30', '2026-10-09'
+    '2026-09-10', '2026-09-16', '2026-09-23', '2026-09-29',
+    '2026-10-04', '2026-10-09', '2026-10-24', '2026-11-08'
   ]);
   for (const value of probes) {
     const url = new URL(value);
+    assert.equal(url.hostname, 'www.expedia.sa');
     assert.equal(propertyKey(value, 'Expedia'), '1234');
     assert.equal(url.searchParams.get('rm1'), 'a2');
     assert.equal(url.searchParams.get('rooms'), '1');
     assert.equal(url.searchParams.get('currency'), 'USD');
     assert.equal(url.searchParams.get('top_cur'), 'USD');
   }
+  assert.ok(!probes.some(value => value.includes('2027-01-20')));
 });
 
 test('Expedia sold-out first date falls through to a later date for the same hotel before browser rendering', async () => {
@@ -142,7 +146,7 @@ test('Expedia sold-out first date falls through to a later date for the same hot
   });
   assert.equal(result.quote.checkIn, '2026-09-16');
   assert.equal(result.extracted.nightlyUSD, 120);
-  assert.equal(requested.length, 3);
+  assert.equal(requested.length, 2);
   assert.ok(requested.every(value => propertyKey(value, 'Expedia') === '1234'));
 });
 
@@ -154,11 +158,11 @@ test('Expedia browser fallback receives the bounded same-property date ladder on
     renderMany: async (env, probes, expectedKey) => {
       renderManyCalls += 1;
       assert.equal(expectedKey, '1234');
-      assert.equal(probes.length, 6);
+      assert.equal(probes.length, 8);
       const quoteURL = probes[1];
       return {
         html: expediaHTML, finalURL: quoteURL, quoteURL, httpStatus: 200, transport: 'browser', contextVerified: true,
-        quote: { checkIn: '2026-09-12', checkOut: '2026-09-13', nights: 1, adults: 2, rooms: 1 },
+        quote: { checkIn: '2026-09-16', checkOut: '2026-09-17', nights: 1, adults: 2, rooms: 1 },
         extracted: extractHotelPriceFromHTML(expediaHTML, 'Expedia', 1)
       };
     }

@@ -171,6 +171,32 @@ test('large source movement requires a second matching read and leaves manual pr
   assert.equal(second.price.isManualOverride, false);
 });
 
+
+test('strong exact-property Expedia evidence accepts a large live movement on the first read', async () => {
+  let amount = 87;
+  const f = fixture(async () => ({
+    finalURL: 'https://www.expedia.sa/en/Madinah-Hotels-Example.h1234.Hotel-Information?chkin=2026-10-01&chkout=2026-10-02&rm1=a2&rooms=1',
+    httpStatus: 200,
+    transport: 'browser',
+    quote: { checkIn: '2026-10-01', checkOut: '2026-10-02', nights: 1, adults: 2, rooms: 1 },
+    extracted: { amount: amount * 3.75, currency: 'SAR', priceBasis: 'nightly', nightlyUSD: amount, stayTotalUSD: amount, confidence: .995, method: 'expedia-browser-any-room' }
+  }));
+  f.db.exec("UPDATE hotel_sources SET provider='Expedia',source_url='https://www.expedia.sa/en/Madinah-Hotels-Example.h1234.Hotel-Information',canonical_url='https://www.expedia.sa/en/Madinah-Hotels-Example.h1234.Hotel-Information' WHERE id='s1'; UPDATE hotel_price_sources SET provider='Expedia',source_url='https://www.expedia.sa/en/Madinah-Hotels-Example.h1234.Hotel-Information' WHERE hotel_id='h1';");
+  await f.fetchExactHotelSourcePrice(f.env, 'h1');
+  amount = 190;
+  const refreshed = await (await f.refreshHotelPriceResponse(f.env, 'h1')).json();
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.refreshed, true);
+  assert.equal(refreshed.changed, true);
+  assert.equal(refreshed.error, null);
+  assert.equal(refreshed.price.nightlyUSD, 190);
+  const row = f.db.prepare('SELECT status,error,pending_seen_count,nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1');
+  assert.equal(row.status, 'fresh');
+  assert.equal(row.error, null);
+  assert.equal(row.pending_seen_count, 0);
+  assert.equal(row.nightly_price_usd, 190);
+});
+
 test('hotel imported after migration is picked up by cron even before source lock exists', async () => {
   const f = fixture(async () => quote());
   f.db.exec("INSERT INTO hotels VALUES('h2','published','2026-01-01'); INSERT INTO hotel_sources VALUES('s2','h2','Booking','https://www.booking.com/hotel/sa/example.html','2026-01-01',NULL)");

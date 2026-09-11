@@ -4992,6 +4992,25 @@ async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
   }
 }
 
+function expediaPriceEvidenceIsStrongEnoughForImmediateMove(provider, page, extracted) {
+  if (provider !== 'Expedia') return false;
+  const confidence = Number(extracted?.confidence || 0);
+  const method = String(extracted?.method || '');
+  if (confidence < 0.97) return false;
+
+  // These paths are already protected by the exact Expedia .h<propertyID>
+  // validation in extractPage(). Requiring a second read after a large seasonal
+  // price move made legitimate changes (for example $87 -> ~$190) look like a
+  // failed refresh. Strong exact-property Expedia evidence is accepted on the
+  // first read; weaker/generic extraction still keeps the two-hit safety guard.
+  if (method === 'expedia-property-faq-rolling-30d') return true;
+  if (method === 'expedia-property-faq-nightly') return true;
+  if (method === 'expedia-explicit-nightly' && confidence >= 0.99) return true;
+  if (method === 'expedia-price-lockup-one-night' && confidence >= 0.99) return true;
+  if (page?.transport === 'browser' && method === 'expedia-browser-any-room' && confidence >= 0.90) return true;
+  return false;
+}
+
 async function performHotelSourcePriceRefresh(env, hotelID, options = {}) {
   const source = await ensureHotelPriceSourceLock(env, hotelID);
   if (!source?.source_url) throw new Error('HOTEL_PRICE_SOURCE_MISSING');
@@ -5016,7 +5035,9 @@ async function performHotelSourcePriceRefresh(env, hotelID, options = {}) {
   const now = nowDate.toISOString();
   const expiresAt = new Date(nowDate.getTime() + HOTEL_PRICE_TTL_MS).toISOString();
   const previous = await env.HOTELS_DB.prepare('SELECT * FROM hotel_price_cache WHERE hotel_id=? LIMIT 1').bind(hotelID).first();
-  if (hotelPriceMoveNeedsConfirmation(previous?.nightly_price_usd, extracted.nightlyUSD)) {
+  const largeMoveNeedsConfirmation = hotelPriceMoveNeedsConfirmation(previous?.nightly_price_usd, extracted.nightlyUSD)
+    && !expediaPriceEvidenceIsStrongEnoughForImmediateMove(provider, page, extracted);
+  if (largeMoveNeedsConfirmation) {
     const count = hotelPriceCandidatesMatch(previous?.pending_nightly_price_usd, extracted.nightlyUSD)
       ? Number(previous.pending_seen_count || 0) + 1 : 1;
     if (count < 2) {

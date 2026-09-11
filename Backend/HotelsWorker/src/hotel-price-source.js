@@ -1,8 +1,8 @@
 import { extractHotelPriceFromHTML, normalizeImportedHotelPriceSnapshot, quoteContextFromProbeURL } from './hotel-price.js';
 
 const DAY = 86400000;
-const EXPEDIA_PROBE_OFFSETS = [1, 3, 7, 14, 21, 30];
-const EXPEDIA_BROWSER_PROBE_LIMIT = 4;
+const EXPEDIA_PROBE_OFFSETS = [1, 7, 14, 20, 25, 30, 45, 60];
+const EXPEDIA_BROWSER_PROBE_LIMIT = 6;
 
 function expediaHostAllowed(host) {
   const value = String(host || '').toLowerCase();
@@ -97,17 +97,18 @@ export function preparePriceURL(value, provider, now = Date.now()) {
 
 // Expedia refresh is property-bound, not room-bound. The imported URL/property ID
 // remains the identity anchor, while availability may move between room types and
-// dates. We first keep a still-valid source stay, then probe a small rolling window.
+// dates. The refresh ignores imported trip dates and probes a sparse rolling horizon.
 export function expediaPriceProbeURLs(value, now = Date.now()) {
   const source = priceSourceURL(value, 'Expedia');
   const key = propertyKey(source, 'Expedia');
   if (!key) throw new Error('HOTEL_PRICE_SOURCE_PROPERTY_MISMATCH');
 
-  // Regional Expedia pages share the same .h<propertyID> identity. Normalizing to
-  // www.expedia.com gives the browser a stable rendering target without changing
-  // the hotel identity or searching by hotel name.
+  // Keep the exact Expedia storefront that the admin imported (for example
+  // expedia.sa). Regional storefronts can expose different live inventory and
+  // pricing, so changing the host here makes the refresh disagree with the
+  // source page the admin opens manually. The immutable .h<propertyID> remains
+  // the hotel identity boundary.
   const base = new URL(source.toString());
-  base.hostname = 'www.expedia.com';
   base.hash = '';
 
   const output = [];
@@ -119,16 +120,9 @@ export function expediaPriceProbeURLs(value, now = Date.now()) {
     if (!seen.has(text)) { seen.add(text); output.push(text); }
   };
 
-  const originalIn = cleanISODate(source.searchParams.get('chkin'));
-  const originalOut = cleanISODate(source.searchParams.get('chkout'));
-  const today = new Date(now).toISOString().slice(0, 10);
-  if (originalIn && originalOut && originalIn > today && originalOut > originalIn && Date.parse(originalOut) - Date.parse(originalIn) <= 30 * DAY) {
-    const original = new URL(base.toString());
-    original.searchParams.set('chkin', originalIn);
-    original.searchParams.set('chkout', originalOut);
-    push(original);
-  }
-
+  // Refresh dates are always relative to today. Imported trip dates are provenance,
+  // not the catalogue benchmark. This prevents a months-old/far-future imported
+  // stay from repeatedly winning just because it still has availability.
   for (const offset of EXPEDIA_PROBE_OFFSETS) {
     const probe = new URL(base.toString());
     probe.searchParams.set('chkin', dateAt(now, offset));

@@ -29,12 +29,24 @@ test('Expedia explicit per-night price stays nightly', () => {
 });
 
 
-test('Expedia property FAQ one-night starting price is accepted as a nightly hotel rate', () => {
+test('Expedia property FAQ one-night starting price is accepted as a rolling nightly hotel rate', () => {
   const html = `<html><body>${padding}<section>Prices found for a 1-night stay for 2 adults start from $115, excluding taxes and fees.</section></body></html>`;
   const price = extractHotelPriceFromHTML(html, 'Expedia', 1);
   assert.equal(price?.currency, 'USD');
   assert.equal(price?.nightlyUSD, 115);
-  assert.equal(price?.method, 'expedia-property-faq-nightly');
+  assert.equal(price?.method, 'expedia-property-faq-rolling-30d');
+});
+
+test('Expedia rolling property FAQ survives the Similar properties boundary and beats recommendation prices', () => {
+  const html = `<html><body>${padding}
+    <h2>Similar properties</h2><div class="uitk-lockup-price">SAR 314</div>
+    <section>How much does it cost to stay at Anwar Al Madinah Mövenpick Hotel?</section>
+    <p>As of today, prices found for a 1-night stay for 2 adults at Anwar Al Madinah Mövenpick Hotel on 20 September 2026 start from SAR 1,417, excluding taxes and fees. This price is based on the lowest nightly price found in the last 24 hours for stays in the next 30 days.</p>
+  </body></html>`;
+  const price = extractHotelPriceFromHTML(html, 'Expedia', 1);
+  assert.equal(price?.currency, 'SAR');
+  assert.equal(price?.nightlyUSD, 377.87);
+  assert.equal(price?.method, 'expedia-property-faq-rolling-30d');
 });
 
 test('SAR price is normalized using the Saudi peg', () => {

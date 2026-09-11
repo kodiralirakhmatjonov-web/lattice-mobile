@@ -1,49 +1,42 @@
-# Expedia hotel price refresh v2
+# Expedia hotel price refresh v3
 
-## Contract
+Updated: 2026-09-11
 
-The price engine is **hotel-bound, not room-bound**. The imported Expedia property URL (the `.h<propertyID>.Hotel-Information` identity) is the anchor. The Worker never searches Expedia by hotel name and never accepts a different property. For the catalogue benchmark it requests **1 room / 2 adults / USD** and may use any sellable room belonging to that exact property.
+## Goal
 
-A successful refresh has a strict API meaning:
+The catalogue needs a **fresh representative Expedia price for the exact hotel**, not an exact quote for the guest's eventual travel dates. Hotel identity is the Expedia `.h<propertyID>.Hotel-Information` ID. Room type and exact date are secondary: any sellable room for the same property is acceptable.
 
-```json
-{
-  "ok": true,
-  "refreshed": true,
-  "changed": true,
-  "price": {},
-  "error": null
-}
-```
+## What v3 fixes
 
-`ok/refreshed=true` is returned only after a live provider snapshot has been persisted in D1 during that request. A stale fallback can still be returned to keep package generation working, but the response is `ok:false, refreshed:false` and the Business UI shows a warning rather than a false success.
+1. **Large real price moves no longer look like failures.** v2 staged every move below 65% or above 175% of the old rate. A legitimate exact-property Expedia read such as `$87 -> ~$190` therefore returned `PRICE_CHANGE_AWAITING_CONFIRMATION`. v3 accepts a large move immediately when the evidence is strong and property-bound: Expedia rolling FAQ, explicit nightly lockup, or a high-confidence Browser Rendering room card. Weak/generic extraction still needs the two-hit confirmation guard.
+2. **The Browser Rendering fallback now reaches the dates the catalogue actually needs.** Expedia probes are `+1, +7, +14, +20, +25, +30, +45, +60` days. The shared browser session can try the first six probes, so it now reaches `+20`, `+25`, and `+30` instead of stopping around the first two weeks.
+3. **Imported trip dates no longer dominate refreshes.** They remain provenance only. Every Expedia refresh builds a rolling horizon relative to today.
+4. **The imported Expedia storefront is preserved.** An `expedia.sa` source stays on `expedia.sa`; the refresher no longer rewrites it to `www.expedia.com`. This keeps the automated source aligned with the page the admin opens manually.
+5. **Expedia's own rolling 30-day benchmark is now readable even when it appears after “Similar properties”.** Expedia often places the property FAQ below recommendation cards. The generic property scope intentionally stops before recommendations, so v2 could accidentally cut off the FAQ. v3 has a dedicated full-document parser for Expedia's property-specific sentence: “prices found for a 1-night stay for 2 adults … start from …”. This is treated as a high-confidence nightly benchmark because Expedia describes it as the lowest nightly rate found in the last 24 hours for stays in the next 30 days.
 
-## Refresh pipeline
+## Refresh order
 
-1. `hotel_price_sources` prefers an imported Expedia source when one exists.
-2. Opaque Expedia share links are provenance only. The importer-saved canonical property URL is used for pricing.
-3. The property ID is extracted before any request and checked again after navigation. A different `.h<ID>` is rejected.
-4. The Worker normalizes occupancy to 2 adults / 1 room and requests USD (`currency=USD` and `top_cur=USD`).
-5. Expedia availability is probed on a bounded future ladder (valid imported dates first, then +1, +3, +7, +14, +21, +30 days). This solves the “tomorrow is sold out” failure without changing hotels.
-6. Cheap HTML/SSR extraction runs for the full ladder first. Expedia property/FAQ nightly text is accepted when it is clearly property-specific.
-7. If SSR has no usable price, one Cloudflare Browser Rendering session is opened and up to four same-property dates are tried inside that single browser session.
-8. Browser extraction reads visible Expedia room price cards, excludes recommendations/cross-sell blocks, and accepts the lowest sellable rate among equally strong room-card candidates. It does not require a Double Room name.
-9. A successful quote is written as `fresh` for 48 hours. A failure keeps the last accepted rate as `stale` and schedules a retry after 6 hours.
-10. A D1 lease prevents two requests from refreshing the same hotel at the same time.
+`manual button / 15-min cron -> D1 lease -> preferred Expedia source -> canonical exact property -> rolling date ladder -> HTTP/SSR extraction -> one Browser Rendering session if necessary -> exact property validation -> D1 cache`
 
-## Scheduling
+For Expedia, the engine tries the cheap HTTP/SSR path across the full rolling ladder first. If no usable rate is found, one Browser Rendering session checks up to six sparse dates. It never searches Expedia by hotel name and never accepts another property ID.
 
-The existing Worker cron runs every 15 minutes. Each pass refreshes up to four due hotels, preferring Expedia and hotels with no accepted rate. A successful price expires after 48 hours, so each hotel becomes due at least every two days. Migration `0034_expedia_price_refresh_v2.sql` switches eligible locks to Expedia and makes existing Expedia rows due immediately after deployment.
+## Price semantics
 
-## Admin button semantics
+- benchmark: `1 room / 2 adults / 1 night`
+- room type: any sellable room belonging to the exact Expedia property
+- currency: source amount may be USD/SAR/AED and is normalized to USD for the catalogue
+- exact travel date: not required for catalogue pricing
+- freshness: accepted source price expires after 48 hours
+- failed refresh: previous accepted price stays visible and retry remains scheduled
 
-“Обновить из источника” uses the same server path as the cron but bypasses waiting for the next scheduled run. The UI only says **“Цена обновилась”** when the newly persisted source rate differs from the previous accepted source rate. If the live read succeeds with the same amount it says that Expedia was checked and the price did not change. If Expedia cannot confirm a price, the last working price remains visible with an orange warning.
+## Admin button contract
 
-## Safety rules
+- live source read succeeds and amount changed -> `ok:true, refreshed:true, changed:true`
+- live source read succeeds and amount is the same -> `ok:true, refreshed:true, changed:false`
+- no live source price was confirmed -> `ok:false, refreshed:false`; stale price may still be returned for continuity
 
-- Never search by hotel name during price refresh.
-- Never switch to another Expedia property ID.
-- Never treat recommendation/cross-sell prices as the hotel price.
-- Never clear the last accepted rate on source failure.
-- Never report a stale fallback as a successful refresh.
-- Large price jumps still require two matching live reads before replacing the accepted rate.
+A strong exact-property Expedia result is not blocked just because it differs sharply from the old price.
+
+## Tests
+
+The Worker suite covers the rolling Expedia FAQ after a `Similar properties` boundary, the new `+1/+7/+14/+20/+25/+30/+45/+60` ladder, regional storefront preservation, sold-out fallback, exact-property enforcement, and immediate acceptance of a large high-confidence Expedia movement. `npm run check` and the full `npm test` suite must pass before deployment.
