@@ -174,6 +174,14 @@ struct BookingOperation: Codable, Hashable {
     let createdAt: String
     let updatedAt: String
     let completedAt: String?
+    let availabilityStartedAt: String?
+    let availabilityDeadlineAt: String?
+    let priceLockStartedAt: String?
+    let priceLockExpiresAt: String?
+    let paymentReceivedAt: String?
+    let paymentConfirmationDeadlineAt: String?
+    let documentsStartedAt: String?
+    let documentsDeadlineAt: String?
 
     var tripStatus: TripStatus { TripStatus(rawValue: status) ?? .availabilityCheck }
 }

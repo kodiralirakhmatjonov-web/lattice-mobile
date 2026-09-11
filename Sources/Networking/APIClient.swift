@@ -328,6 +328,14 @@ actor APIClient {
         return try decoder.decode(BookingDetailResponse.self, from: data)
     }
 
+    func restartBookingPriceLock(id: String) async throws -> BookingDetailResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(id)/price-lock"))
+        request.httpMethod = "POST"
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BookingDetailResponse.self, from: data)
+    }
+
     func savePaymentInstructions(bookingID: String, payload: BusinessPaymentInstructionsPayload) async throws -> BusinessCheckout {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/payment"))
         request.httpMethod = "PUT"

@@ -18,6 +18,7 @@ struct BookingDetailView: View {
     @State private var editingFlight: BookingFlightDirection?
     @State private var editingHotelCity: String?
     @State private var showGuidePicker = false
+    @State private var restartingPriceLock = false
 
     var body: some View {
         ScrollView {
@@ -72,7 +73,14 @@ struct BookingDetailView: View {
                 else { Button("Сохранить") { Task { await save() } }.fontWeight(.semibold).disabled(detail?.operation == nil) }
             }
         }
-        .task { await load(showLoading: true) }
+        .task {
+            await load(showLoading: true)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { break }
+                await load(showLoading: false)
+            }
+        }
         .refreshable { await load(showLoading: false) }
         .sheet(item: $editingFlight) { direction in
             if let detail {
@@ -207,6 +215,8 @@ struct BookingDetailView: View {
                 .buttonStyle(.plain)
             }
 
+            lifecycleTimerCard(detail.operation)
+
             labeledField("Статус оплаты", text: $paymentStatus, placeholder: "Например: оплачено полностью")
             labeledField("Номер бронирования / подтверждения", text: $confirmationNumber, placeholder: "Confirmation number")
 
@@ -235,6 +245,83 @@ struct BookingDetailView: View {
             }
         }
         .padding(18).businessCard(radius: 28)
+    }
+
+    @ViewBuilder
+    private func lifecycleTimerCard(_ operation: BookingOperation?) -> some View {
+        if let operation, let info = lifecycleTimerInfo(operation) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: info.icon)
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 38, height: 38)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(info.title)
+                            .font(.subheadline.weight(.semibold))
+                        Text(info.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if let deadlineRaw = info.deadlineRaw, let deadline = lifecycleDate(deadlineRaw) {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let remaining = max(0, deadline.timeIntervalSince(context.date))
+                        let expired = remaining <= 0
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(expired ? lifecycleExpiredLabel(status: info.status, paymentReceived: info.paymentReceived) : "Осталось")
+                                    .font(.caption)
+                                    .foregroundStyle(expired ? Color.orange : Color(uiColor: .secondaryLabel))
+                                Text(lifecycleCountdown(remaining))
+                                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                                    .contentTransition(.numericText())
+                            }
+                            Spacer(minLength: 10)
+                            if info.isPriceLock && expired {
+                                Button { Task { await restartPriceLock() } } label: {
+                                    if restartingPriceLock {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Text("Зафиксировать ещё на 30 мин")
+                                            .font(.caption.weight(.semibold))
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(restartingPriceLock)
+                            }
+                        }
+                    }
+                } else {
+                    Text("Срок синхронизируется с сервером")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(14)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private func lifecycleTimerInfo(_ operation: BookingOperation) -> (status: TripStatus, paymentReceived: Bool, title: String, subtitle: String, deadlineRaw: String?, icon: String, isPriceLock: Bool)? {
+        let status = operation.tripStatus
+        let paymentReceived = operation.paymentReceivedAt != nil
+        switch status {
+        case .availabilityCheck:
+            return (status, paymentReceived, "Проверка наличия", "Обычно 1–2 часа · максимальный срок проверки — до 6 часов.", operation.availabilityDeadlineAt, "clock.badge.checkmark", false)
+        case .paymentPending where paymentReceived:
+            return (status, paymentReceived, "Подтверждение оплаты", "Оплата получена. Обычно подтверждаем платёж и окончательно фиксируем бронирование в течение 10 минут.", operation.paymentConfirmationDeadlineAt, "creditcard.and.123", false)
+        case .paymentPending:
+            return (status, paymentReceived, "Фиксация цены", "Цена удерживается 30 минут. После окончания периода авиабилеты и другие динамические компоненты могут потребовать повторной проверки.", operation.priceLockExpiresAt, "lock.clock", true)
+        case .bookingConfirmed:
+            return (status, paymentReceived, "Подготовка документов", "Обычно доступные документы готовятся в течение 24 часов. Срок визы может зависеть от доступности официальных визовых систем Саудовской Аравии и внешних ограничений.", operation.documentsDeadlineAt, "doc.badge.clock", false)
+        default:
+            return nil
+        }
     }
 
     private func flightCard(_ direction: BookingFlightDirection, detail: BookingDetailResponse) -> some View {
@@ -745,6 +832,29 @@ struct BookingDetailView: View {
         Text(status.title).padding(.horizontal, 10).padding(.vertical, 6).background(BusinessDesign.secondarySurface, in: Capsule())
     }
 
+    private func lifecycleDate(_ value: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+
+    private func lifecycleCountdown(_ interval: TimeInterval) -> String {
+        let total = max(0, Int(interval.rounded(.down)))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    private func lifecycleExpiredLabel(status: TripStatus, paymentReceived: Bool) -> String {
+        switch status {
+        case .availabilityCheck: return "SLA истёк · требуется внимание"
+        case .paymentPending: return paymentReceived ? "Проверка занимает дольше обычного" : "Срок фиксации завершён"
+        case .bookingConfirmed: return "Подготовка занимает дольше обычного"
+        default: return "Срок завершён"
+        }
+    }
+
     private func shortDate(_ value: String) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -773,6 +883,26 @@ struct BookingDetailView: View {
             return
         } catch {
             guard !Task.isCancelled else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor private func restartPriceLock() async {
+        guard !restartingPriceLock else { return }
+        restartingPriceLock = true
+        defer { restartingPriceLock = false }
+        do {
+            let updated = try await APIClient.shared.restartBookingPriceLock(id: bookingID)
+            detail = updated
+            if let operation = updated.operation {
+                status = operation.tripStatus
+                paymentStatus = operation.paymentStatus
+                confirmationNumber = operation.confirmationNumber
+                internalNotes = operation.internalNotes
+            }
+            NotificationCenter.default.post(name: Notification.Name("iumrah.business.bookingOperationsChanged"), object: bookingID)
+            errorMessage = nil
+        } catch {
             errorMessage = error.localizedDescription
         }
     }
