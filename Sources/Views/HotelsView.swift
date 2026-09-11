@@ -19,6 +19,7 @@ struct HotelsView: View {
                 header
                 cityCounters
                 primaryHotelsEntry
+                priceMonitoringEntry
                 cloudStatus
                 importsSection
                 hotelCatalog
@@ -90,6 +91,39 @@ struct HotelsView: View {
                 }
                 Spacer()
                 Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+    }
+
+    private var priceMonitoringEntry: some View {
+        NavigationLink {
+            HotelPriceMonitoringView()
+        } label: {
+            HStack(spacing: 13) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.orange.opacity(0.12))
+                        .frame(width: 48, height: 48)
+                    Image(systemName: "chart.line.uptrend.xyaxis")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.orange)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Мониторинг цен")
+                        .font(.headline)
+                    Text("Проверить источники → выбрать изменения → опубликовать")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(.tertiary)
             }
             .padding(14)
             .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))

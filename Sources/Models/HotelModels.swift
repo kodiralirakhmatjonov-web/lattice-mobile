@@ -679,3 +679,82 @@ struct HotelCloudHealthResponse: Codable {
     let storage: String
     let hotels: Int
 }
+
+// MARK: - Staged hotel price monitoring
+
+struct HotelPriceMonitorItem: Codable, Identifiable, Hashable {
+    let id: String
+    let runID: String
+    let hotelID: String
+    let hotelName: String
+    let city: String?
+    let stars: Int?
+    let provider: String?
+    let sourceURL: String?
+    let resolvedURL: String?
+    let oldNightlyUSD: Double?
+    let candidateNightlyUSD: Double?
+    let deltaUSD: Double?
+    let deltaPercent: Double?
+    let confidence: Double?
+    let method: String?
+    let status: String
+    let error: String?
+    let checkedAt: String?
+    let publishedAt: String?
+
+    var isPublishable: Bool { status == "changed" || status == "unchanged" }
+    var hasChanged: Bool { status == "changed" }
+}
+
+struct HotelPriceMonitorRun: Codable, Identifiable, Hashable {
+    let id: String
+    let status: String
+    let totalHotels: Int
+    let checkedHotels: Int
+    let changedHotels: Int
+    let unchangedHotels: Int
+    let failedHotels: Int
+    let publishedHotels: Int
+    let error: String?
+    let createdAt: String
+    let startedAt: String?
+    let completedAt: String?
+    let updatedAt: String
+    let items: [HotelPriceMonitorItem]?
+
+    var isActive: Bool { status == "queued" || status == "running" }
+    var isFinished: Bool { status == "completed" || status == "completed_with_errors" || status == "failed" }
+}
+
+struct HotelPriceMonitorRunResponse: Codable {
+    let ok: Bool
+    let reused: Bool?
+    let run: HotelPriceMonitorRun
+}
+
+struct HotelPriceMonitorRunsResponse: Codable {
+    let ok: Bool
+    let runs: [HotelPriceMonitorRun]
+}
+
+struct HotelPriceMonitorPublishPayload: Codable {
+    let hotelIDs: [String]
+}
+
+struct HotelPriceMonitorPublishResponse: Codable {
+    let ok: Bool
+    let published: Int
+    let run: HotelPriceMonitorRun
+}
+
+struct ChatGPTAccessLinkPayload: Codable {
+    let runID: String?
+}
+
+struct ChatGPTAccessLinkResponse: Codable {
+    let ok: Bool
+    let scope: String
+    let expiresAt: String
+    let url: String
+}

@@ -2,6 +2,7 @@ import { obtainHotelPrice, propertyKey, safePropertyKey } from './hotel-price-so
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
+import { handlePriceMonitorAdmin, handleChatGPTLinksAdmin, handleChatGPTPublic, runHotelPriceMonitorWorkflow } from './price-monitor.js';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -22,6 +23,10 @@ export default {
           status: 204,
           headers: corsHeaders(request)
         });
+      }
+
+      if (url.pathname.startsWith('/api/iumrah/chatgpt/')) {
+        return withCors(await handleChatGPTPublic(request, env, url), request);
       }
 
       if (url.pathname.startsWith('/api/admin/ziyarats')) {
@@ -96,6 +101,14 @@ async function handleAdmin(request, env, url, user, businessSession = null) {
     if (parts.length === 3 && parts[2] === 'retry' && request.method === 'POST') return retryImportJob(env, jobID);
     if (parts.length === 3 && parts[2] === 'cancel' && request.method === 'POST') return cancelImportJob(env, jobID);
     return methodNotAllowed();
+  }
+
+  if (parts[0] === 'price-monitor') {
+    return handlePriceMonitorAdmin(request, env, url, parts.slice(1), user);
+  }
+
+  if (parts[0] === 'chatgpt-links') {
+    return handleChatGPTLinksAdmin(request, env, user);
   }
 
   if (parts[0] === 'chats') {
@@ -6768,6 +6781,12 @@ function importJobRow(row) {
   };
 }
 
+export class HotelPriceMonitorWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    return runHotelPriceMonitorWorkflow(this.env, event, step);
+  }
+}
+
 export class HotelImportWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const { jobID, hotelID, images = [], publishWhenComplete = false, snapshotHash = null } = event.payload || {};
@@ -8061,3 +8080,4 @@ function withCors(response, request) {
     headers
   });
 }
+

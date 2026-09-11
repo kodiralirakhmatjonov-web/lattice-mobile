@@ -6,6 +6,10 @@
   "workers_dev": true,
   "routes": [
     {
+      "pattern": "iumrah.app/api/iumrah/chatgpt*",
+      "zone_id": "__ZONE_ID__"
+    },
+    {
       "pattern": "iumrah.app/api/admin/ziyarats*",
       "zone_id": "__ZONE_ID__"
     },
@@ -49,6 +53,11 @@
       "name": "iumrah-hotel-import",
       "binding": "HOTEL_IMPORT_WORKFLOW",
       "class_name": "HotelImportWorkflow"
+    },
+    {
+      "name": "iumrah-hotel-price-monitor",
+      "binding": "HOTEL_PRICE_MONITOR_WORKFLOW",
+      "class_name": "HotelPriceMonitorWorkflow"
     }
   ],
   "vars": {

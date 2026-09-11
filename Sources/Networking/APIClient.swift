@@ -578,6 +578,50 @@ actor APIClient {
         return try decoder.decode(HotelPriceResponse.self, from: data)
     }
 
+    func priceMonitorRuns() async throws -> [HotelPriceMonitorRun] {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceMonitorRunsResponse.self, from: data).runs
+    }
+
+    func startPriceMonitor() async throws -> HotelPriceMonitorRun {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceMonitorRunResponse.self, from: data).run
+    }
+
+    func priceMonitorRun(id: String) async throws -> HotelPriceMonitorRun {
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor/\(id)")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceMonitorRunResponse.self, from: data).run
+    }
+
+    func publishPriceMonitor(runID: String, hotelIDs: [String]) async throws -> HotelPriceMonitorRun {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/price-monitor/\(runID)/publish"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(HotelPriceMonitorPublishPayload(hotelIDs: hotelIDs))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(HotelPriceMonitorPublishResponse.self, from: data).run
+    }
+
+    func createChatGPTAccessLink(runID: String? = nil) async throws -> ChatGPTAccessLinkResponse {
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/chatgpt-links"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(ChatGPTAccessLinkPayload(runID: runID))
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(ChatGPTAccessLinkResponse.self, from: data)
+    }
+
     func hotelCloudHealth() async throws -> HotelCloudHealthResponse {
         let (data, response) = try await perform(from: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/health"))
         try validate(response, data: data)
