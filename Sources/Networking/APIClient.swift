@@ -558,100 +558,65 @@ actor APIClient {
         return try decoder.decode(HotelPriceResponse.self, from: data)
     }
 
-    // MARK: - JSON hotel price exchange
+    // MARK: - ChatGPT hotel price update v2
     //
-    // This workflow intentionally uses only the long-lived hotel admin API.
-    // Export and preview are built locally from /api/admin/hotels, and approved
-    // prices are persisted through the existing per-hotel price endpoint. This
-    // keeps JSON exchange independent from optional Cloudflare price-monitor
-    // routes and Browser/Workflow limits.
-
-    func hotelPriceJSONExport(city: String) async throws -> HotelPriceExportDocument {
-        guard let normalizedCity = canonicalPriceExchangeCity(city) else {
-            throw APIError.server("INVALID_PRICE_UPDATE_CITY")
-        }
-
-        let currentHotels = try await hotels()
-        let selected = currentHotels
-            .filter { canonicalPriceExchangeCity($0.city) == normalizedCity }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-
-        let generatedAt = priceExchangeTimestamp()
-        let exportID = "hotel-monitor-\(normalizedCity.lowercased())-\(UUID().uuidString.lowercased())"
-        let exportHotels = selected.map { hotel in
-            HotelPriceExportHotel(
-                hotelID: hotel.id,
-                hotelName: hotel.name,
-                city: normalizedCity,
-                stars: hotel.stars,
-                currentNightlyUSD: roundedPriceExchangeValue(hotel.price?.nightlyUSD),
-                currency: "USD",
-                catalogStatus: hotel.status,
-                priceStatus: hotel.price?.status,
-                isManualOverride: hotel.price?.isManualOverride ?? false,
-                provider: normalizedPriceExchangeProvider(hotel.sourceProvider ?? hotel.price?.provider, sourceURL: hotel.sourceURL ?? hotel.price?.sourceURL),
-                sourceURL: hotel.sourceURL ?? hotel.price?.sourceURL,
-                lastPriceFetchedAt: hotel.price?.fetchedAt
-            )
-        }
-
-        return HotelPriceExportDocument(
-            schema: "iumrah.hotel-monitor.v1",
-            version: 1,
-            exportID: exportID,
-            city: normalizedCity,
-            generatedAt: generatedAt,
-            currency: "USD",
-            monitoringPolicy: HotelPriceMonitorPolicy(
-                rooms: 1,
-                adults: 2,
-                priceBasis: "nightly",
-                dateStrategy: "same_method_for_every_hotel_nearest_available_future_sample",
-                preferredDateOffsetsDays: [20, 25, 30],
-                sourceRule: "Use the supplied sourceURL for the exact hotel. Do not substitute another property.",
-                comparisonRule: "Compare the newly observed USD nightly rate with currentNightlyUSD.",
-                returnSchema: "iumrah.hotel-price-update.v1"
-            ),
-            instructions: [
-                "Check every hotel with the same monitoring method.",
-                "Preserve hotelID, old price, provider and sourceURL exactly in the result.",
-                "Use status changed, unchanged, or unverified.",
-                "Do not invent a price when the source cannot be verified.",
-                "Return one JSON document using schema iumrah.hotel-price-update.v1."
-            ],
-            hotelCount: exportHotels.count,
-            hotels: exportHotels
-        )
-    }
+    // The public city feed is a read-only mirror of the catalog currently shown
+    // in iumrah Business. ChatGPT returns one strict v2 JSON document which is
+    // pasted into the app. Preview revalidates city, snapshot, dates, source and
+    // old price before a row can be selected. Only high-confidence direct-source
+    // rows can be written to the production price cache.
 
     func previewHotelPriceJSON(_ document: HotelPriceUpdateDocument) async throws -> HotelPriceJSONPreview {
-        guard document.schema == "iumrah.hotel-price-update.v1" else {
+        guard document.schema == "iumrah.hotel-price-update.v2" else {
             throw APIError.server("UNSUPPORTED_PRICE_UPDATE_SCHEMA")
         }
+        let sync = try await hotelSyncStatus(city: document.city)
+        try validateHotelPriceDocument(document, sync: sync)
         let currentHotels = try await hotels()
         return buildLocalHotelPriceJSONPreview(document, currentHotels: currentHotels)
     }
 
     func applyHotelPriceJSON(_ document: HotelPriceUpdateDocument, hotelIDs: [String]) async throws -> HotelPriceJSONApplyResponse {
-        guard document.schema == "iumrah.hotel-price-update.v1" else {
+        guard document.schema == "iumrah.hotel-price-update.v2" else {
             throw APIError.server("UNSUPPORTED_PRICE_UPDATE_SCHEMA")
         }
 
-        // Revalidate against the latest catalog immediately before writing.
+        let sync = try await hotelSyncStatus(city: document.city)
+        try validateHotelPriceDocument(document, sync: sync)
+
+        // Revalidate immediately before writing so a changed catalog/source cannot
+        // be silently overwritten by an older ChatGPT result.
         let latestHotels = try await hotels()
         let latestPreview = buildLocalHotelPriceJSONPreview(document, currentHotels: latestHotels)
         let selected = Set(hotelIDs)
         let ready = latestPreview.items.filter { selected.contains($0.hotelID) && $0.selectable && $0.reviewStatus == "ready" }
+        let updatesByID = Dictionary(uniqueKeysWithValues: document.hotels.map { ($0.hotelID, $0) })
 
         var appliedIDs: [String] = []
         for item in ready {
-            guard let newPrice = roundedPriceExchangeValue(item.newNightlyUSD), newPrice > 0 else { continue }
+            guard let update = updatesByID[item.hotelID],
+                  let newPrice = roundedPriceExchangeValue(item.newNightlyUSD), newPrice > 0 else { continue }
+            let payload = HotelVerifiedPriceUpdatePayload(
+                sourceSnapshotID: document.sourceSnapshotID,
+                oldNightlyUSD: roundedPriceExchangeValue(update.oldNightlyUSD),
+                nightlyUSD: newPrice,
+                provider: update.provider,
+                sourceURL: update.sourceURL,
+                checkedSourceURL: update.checkedSourceURL,
+                checkIn: document.checkIn,
+                checkOut: document.checkOut,
+                rooms: document.rooms,
+                adults: document.adults,
+                confidence: "high",
+                checkedAt: update.checkedAt ?? document.checkedAt,
+                evidence: update.evidence
+            )
             do {
-                _ = try await setManualHotelPrice(id: item.hotelID, nightlyUSD: newPrice)
+                _ = try await setVerifiedHotelPrice(id: item.hotelID, payload: payload)
                 appliedIDs.append(item.hotelID)
             } catch {
-                // Keep already-applied prices and leave this row unapplied in the
-                // returned preview. A later import/apply can safely retry it.
+                // Keep successfully applied rows. Failed rows remain selectable on
+                // the returned preview and can be retried without duplicating data.
                 continue
             }
         }
@@ -668,7 +633,10 @@ actor APIClient {
                 provider: item.provider,
                 sourceURL: item.sourceURL,
                 checkedSourceURL: item.checkedSourceURL,
+                checkIn: item.checkIn,
+                checkOut: item.checkOut,
                 confidence: item.confidence,
+                evidence: item.evidence,
                 reason: item.reason,
                 checkedAt: item.checkedAt,
                 city: item.city,
@@ -676,7 +644,7 @@ actor APIClient {
                 currentNightlyUSD: item.newNightlyUSD,
                 currentProvider: item.currentProvider,
                 currentSourceURL: item.currentSourceURL,
-                isManualOverride: true,
+                isManualOverride: false,
                 reviewStatus: "applied",
                 selectable: false,
                 issue: nil,
@@ -699,6 +667,24 @@ actor APIClient {
         )
     }
 
+    private func validateHotelPriceDocument(_ document: HotelPriceUpdateDocument, sync: BusinessHotelSyncStatusResponse) throws {
+        guard let expectedCity = canonicalPriceExchangeCity(document.city), expectedCity == sync.city else {
+            throw APIError.server("PRICE_UPDATE_CITY_MISMATCH")
+        }
+        guard sync.enabled, sync.configured else {
+            throw APIError.server("HOTEL_SYNC_ACCESS_NOT_ENABLED")
+        }
+        guard let snapshotID = sync.snapshotID, snapshotID == document.sourceSnapshotID else {
+            throw APIError.server("HOTEL_SYNC_SNAPSHOT_CHANGED")
+        }
+        guard sync.checkIn == document.checkIn, sync.checkOut == document.checkOut else {
+            throw APIError.server("HOTEL_SYNC_DATES_CHANGED")
+        }
+        guard document.rooms == 1, document.adults == 2 else {
+            throw APIError.server("HOTEL_SYNC_OCCUPANCY_MISMATCH")
+        }
+    }
+
     private func buildLocalHotelPriceJSONPreview(_ document: HotelPriceUpdateDocument, currentHotels: [HotelListItem]) -> HotelPriceJSONPreview {
         let currentByID = Dictionary(uniqueKeysWithValues: currentHotels.map { ($0.id, $0) })
         let expectedCity = canonicalPriceExchangeCity(document.city)
@@ -713,6 +699,7 @@ actor APIClient {
             let currentSource = hotel.sourceURL ?? hotel.price?.sourceURL
             let currentProvider = normalizedPriceExchangeProvider(hotel.sourceProvider ?? hotel.price?.provider, sourceURL: currentSource)
             let city = canonicalPriceExchangeCity(hotel.city)
+            let updateProvider = normalizedPriceExchangeProvider(update.provider, sourceURL: update.sourceURL)
             let status = update.status.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
             var reviewStatus = "invalid"
@@ -722,12 +709,21 @@ actor APIClient {
             if expectedCity == nil || city != expectedCity {
                 reviewStatus = "conflict"
                 issue = "CITY_CHANGED"
+            } else if update.checkIn != document.checkIn || update.checkOut != document.checkOut {
+                reviewStatus = "invalid"
+                issue = "DATES_NOT_VERIFIED"
+            } else if (update.rooms ?? document.rooms) != document.rooms || (update.adults ?? document.adults) != document.adults {
+                reviewStatus = "invalid"
+                issue = "OCCUPANCY_NOT_VERIFIED"
             } else if !priceExchangePricesMatch(currentPrice, update.oldNightlyUSD) {
                 reviewStatus = "conflict"
-                issue = "PRICE_CHANGED_AFTER_EXPORT"
+                issue = "PRICE_CHANGED_AFTER_SNAPSHOT"
             } else if !priceExchangeSourcesMatch(currentSource, update.sourceURL) {
                 reviewStatus = "conflict"
-                issue = "SOURCE_CHANGED_AFTER_EXPORT"
+                issue = "SOURCE_CHANGED_AFTER_SNAPSHOT"
+            } else if currentProvider != nil && updateProvider != nil && currentProvider != updateProvider {
+                reviewStatus = "conflict"
+                issue = "PROVIDER_MISMATCH"
             } else if status == "unchanged" {
                 reviewStatus = "unchanged"
             } else if status == "unverified" {
@@ -737,12 +733,22 @@ actor APIClient {
                 guard let newPrice = roundedPriceExchangeValue(update.newNightlyUSD), newPrice > 0 else {
                     return previewItem(update, hotel: hotel, confidence: confidence, currentPrice: currentPrice, currentProvider: currentProvider, currentSourceURL: currentSource, reviewStatus: "invalid", selectable: false, issue: "INVALID_NEW_PRICE")
                 }
-                if confidence.label == "high" || confidence.label == "medium" {
-                    reviewStatus = "ready"
-                    selectable = true
+                guard let checked = update.checkedSourceURL, priceExchangeSourcesMatch(update.sourceURL, checked) else {
+                    return previewItem(update, hotel: hotel, confidence: confidence, currentPrice: currentPrice, currentProvider: currentProvider, currentSourceURL: currentSource, reviewStatus: "invalid", selectable: false, issue: "DIRECT_SOURCE_NOT_VERIFIED")
+                }
+                guard priceExchangeCheckedURLMatchesDates(checked, provider: updateProvider, checkIn: document.checkIn, checkOut: document.checkOut) else {
+                    return previewItem(update, hotel: hotel, confidence: confidence, currentPrice: currentPrice, currentProvider: currentProvider, currentSourceURL: currentSource, reviewStatus: "invalid", selectable: false, issue: "CHECKED_SOURCE_DATES_NOT_VERIFIED")
+                }
+                if confidence.label == "high" {
+                    if priceExchangePricesMatch(currentPrice, newPrice) {
+                        reviewStatus = "unchanged"
+                    } else {
+                        reviewStatus = "ready"
+                        selectable = true
+                    }
                 } else {
                     reviewStatus = "needs_review"
-                    issue = "LOW_CONFIDENCE"
+                    issue = "HIGH_CONFIDENCE_REQUIRED"
                 }
             } else {
                 reviewStatus = "invalid"
@@ -788,7 +794,10 @@ actor APIClient {
             provider: normalizedPriceExchangeProvider(update.provider, sourceURL: update.sourceURL),
             sourceURL: update.sourceURL,
             checkedSourceURL: update.checkedSourceURL,
+            checkIn: update.checkIn,
+            checkOut: update.checkOut,
             confidence: confidence,
+            evidence: update.evidence,
             reason: update.reason,
             checkedAt: update.checkedAt,
             city: hotel?.city,
@@ -808,8 +817,10 @@ actor APIClient {
     private func makeHotelPriceJSONPreview(document: HotelPriceUpdateDocument, items: [HotelPriceJSONPreviewItem]) -> HotelPriceJSONPreview {
         HotelPriceJSONPreview(
             schema: document.schema,
-            sourceExportID: document.sourceExportID,
+            sourceSnapshotID: document.sourceSnapshotID,
             city: document.city,
+            checkIn: document.checkIn,
+            checkOut: document.checkOut,
             checkedAt: document.checkedAt,
             total: items.count,
             changed: items.filter { $0.reviewStatus == "ready" }.count,
@@ -850,7 +861,27 @@ actor APIClient {
         guard let ua = URL(string: a), let ub = URL(string: b) else { return false }
         let pathA = ua.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let pathB = ub.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return ua.host?.lowercased() == ub.host?.lowercased() && pathA == pathB
+        let hostA = ua.host?.lowercased().replacingOccurrences(of: "www.", with: "")
+        let hostB = ub.host?.lowercased().replacingOccurrences(of: "www.", with: "")
+        return hostA == hostB && pathA.lowercased() == pathB.lowercased()
+    }
+
+    private func priceExchangeCheckedURLMatchesDates(_ value: String, provider: String?, checkIn: String, checkOut: String) -> Bool {
+        guard let components = URLComponents(string: value) else { return false }
+        let params = Dictionary(
+            (components.queryItems ?? []).map { ($0.name.lowercased(), $0.value ?? "") },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        switch provider {
+        case "Booking":
+            return params["checkin"] == checkIn && params["checkout"] == checkOut
+        case "Expedia":
+            let inDate = params["chkin"] ?? params["startdate"]
+            let outDate = params["chkout"] ?? params["enddate"]
+            return inDate == checkIn && outDate == checkOut
+        default:
+            return false
+        }
     }
 
     private func normalizedPriceExchangeProvider(_ value: String?, sourceURL: String?) -> String? {
@@ -867,7 +898,7 @@ actor APIClient {
 
     private func priceExchangeConfidence(_ value: String?) -> HotelPriceJSONConfidence {
         switch (value ?? "").lowercased() {
-        case "high": return HotelPriceJSONConfidence(label: "high", score: 0.95)
+        case "high": return HotelPriceJSONConfidence(label: "high", score: 0.98)
         case "medium": return HotelPriceJSONConfidence(label: "medium", score: 0.80)
         case "low": return HotelPriceJSONConfidence(label: "low", score: 0.55)
         default: return HotelPriceJSONConfidence(label: "none", score: 0)

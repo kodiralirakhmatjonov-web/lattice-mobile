@@ -680,20 +680,19 @@ struct HotelCloudHealthResponse: Codable {
     let hotels: Int
 }
 
-// MARK: - JSON hotel price exchange
+// MARK: - ChatGPT hotel price sync
 
-struct HotelPriceMonitorPolicy: Codable, Hashable {
+struct BusinessHotelSyncMonitoring: Codable, Hashable {
+    let checkIn: String
+    let checkOut: String
     let rooms: Int
     let adults: Int
+    let children: Int
+    let currency: String
     let priceBasis: String
-    let dateStrategy: String
-    let preferredDateOffsetsDays: [Int]
-    let sourceRule: String
-    let comparisonRule: String
-    let returnSchema: String
 }
 
-struct HotelPriceExportHotel: Codable, Identifiable, Hashable {
+struct BusinessHotelSyncHotel: Codable, Identifiable, Hashable {
     let hotelID: String
     let hotelName: String
     let city: String
@@ -705,22 +704,56 @@ struct HotelPriceExportHotel: Codable, Identifiable, Hashable {
     let isManualOverride: Bool
     let provider: String?
     let sourceURL: String?
+    let monitoringURL: String?
     let lastPriceFetchedAt: String?
 
     var id: String { hotelID }
 }
 
-struct HotelPriceExportDocument: Codable, Hashable {
-    let schema: String
-    let version: Int
-    let exportID: String
+struct BusinessHotelSyncSnapshotPayload: Encodable {
+    let version = 2
     let city: String
-    let generatedAt: String
-    let currency: String
-    let monitoringPolicy: HotelPriceMonitorPolicy
-    let instructions: [String]
+    let snapshotID: String
+    let monitoring: BusinessHotelSyncMonitoring
+    let hotels: [BusinessHotelSyncHotel]
+}
+
+struct BusinessHotelSyncAccessResponse: Decodable {
+    let ok: Bool
+    let readOnly: Bool
+    let city: String
+    let accessURL: String
+    let rotatedAt: String?
+}
+
+struct BusinessHotelSyncSnapshotResponse: Decodable {
+    let ok: Bool
+    let city: String
+    let snapshotID: String
     let hotelCount: Int
-    let hotels: [HotelPriceExportHotel]
+    let snapshotUpdatedAt: String?
+    let checkIn: String
+    let checkOut: String
+}
+
+struct BusinessHotelSyncStatusResponse: Decodable {
+    let ok: Bool
+    let city: String
+    let configured: Bool
+    let enabled: Bool
+    let hotelCount: Int
+    let snapshotID: String?
+    let snapshotUpdatedAt: String?
+    let checkIn: String?
+    let checkOut: String?
+    let readOnly: Bool
+}
+
+struct BusinessHotelSyncRevokeResponse: Decodable {
+    let ok: Bool
+    let city: String
+    let enabled: Bool
+    let revokedAt: String?
 }
 
 struct HotelPriceUpdateItem: Codable, Identifiable, Hashable {
@@ -732,7 +765,12 @@ struct HotelPriceUpdateItem: Codable, Identifiable, Hashable {
     let provider: String?
     let sourceURL: String?
     let checkedSourceURL: String?
+    let checkIn: String?
+    let checkOut: String?
+    let rooms: Int?
+    let adults: Int?
     let confidence: String?
+    let evidence: String?
     let reason: String?
     let checkedAt: String?
 
@@ -741,10 +779,30 @@ struct HotelPriceUpdateItem: Codable, Identifiable, Hashable {
 
 struct HotelPriceUpdateDocument: Codable, Hashable {
     let schema: String
-    let sourceExportID: String
+    let sourceSnapshotID: String
     let city: String
+    let checkIn: String
+    let checkOut: String
+    let rooms: Int
+    let adults: Int
     let checkedAt: String
     let hotels: [HotelPriceUpdateItem]
+}
+
+struct HotelVerifiedPriceUpdatePayload: Encodable {
+    let sourceSnapshotID: String
+    let oldNightlyUSD: Double?
+    let nightlyUSD: Double
+    let provider: String?
+    let sourceURL: String?
+    let checkedSourceURL: String?
+    let checkIn: String
+    let checkOut: String
+    let rooms: Int
+    let adults: Int
+    let confidence: String
+    let checkedAt: String?
+    let evidence: String?
 }
 
 struct HotelPriceJSONConfidence: Codable, Hashable {
@@ -761,7 +819,10 @@ struct HotelPriceJSONPreviewItem: Codable, Identifiable, Hashable {
     let provider: String?
     let sourceURL: String?
     let checkedSourceURL: String?
+    let checkIn: String?
+    let checkOut: String?
     let confidence: HotelPriceJSONConfidence
+    let evidence: String?
     let reason: String?
     let checkedAt: String?
     let city: String?
@@ -782,8 +843,10 @@ struct HotelPriceJSONPreviewItem: Codable, Identifiable, Hashable {
 
 struct HotelPriceJSONPreview: Codable, Hashable {
     let schema: String
-    let sourceExportID: String
+    let sourceSnapshotID: String
     let city: String
+    let checkIn: String
+    let checkOut: String
     let checkedAt: String
     let total: Int
     let changed: Int
@@ -792,16 +855,6 @@ struct HotelPriceJSONPreview: Codable, Hashable {
     let unverified: Int
     let invalid: Int
     let items: [HotelPriceJSONPreviewItem]
-}
-
-struct HotelPriceJSONPreviewResponse: Codable {
-    let ok: Bool
-    let preview: HotelPriceJSONPreview
-}
-
-struct HotelPriceJSONApplyPayload: Encodable {
-    let document: HotelPriceUpdateDocument
-    let hotelIDs: [String]
 }
 
 struct HotelPriceJSONApplyResponse: Codable {
@@ -814,4 +867,5 @@ struct HotelPriceJSONApplyResponse: Codable {
     let appliedBy: String?
     let appliedAt: String
 }
+
 

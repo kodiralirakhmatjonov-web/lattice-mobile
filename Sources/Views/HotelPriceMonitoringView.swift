@@ -1,34 +1,19 @@
 import SwiftUI
-import UniformTypeIdentifiers
-
-private struct HotelJSONFileDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.json] }
-    var data: Data
-
-    init(data: Data) {
-        self.data = data
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        data = configuration.file.regularFileContents ?? Data()
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
-    }
-}
+import UIKit
 
 struct HotelPriceMonitoringView: View {
     let makkahCount: Int
     let madinahCount: Int
 
-    @State private var exportingCity: String?
-    @State private var exportDocument: HotelJSONFileDocument?
-    @State private var exportFilename = "iumrah-hotels.json"
-    @State private var showExporter = false
-    @State private var showImporter = false
+    @State private var makkahURL: URL?
+    @State private var madinahURL: URL?
+    @State private var makkahStatus: BusinessHotelSyncStatusResponse?
+    @State private var madinahStatus: BusinessHotelSyncStatusResponse?
+    @State private var makkahDate: Date
+    @State private var madinahDate: Date
+    @State private var busyCity: String?
+    @State private var jsonText = ""
     @State private var importedDocument: HotelPriceUpdateDocument?
-    @State private var importedFilename: String?
     @State private var preview: HotelPriceJSONPreview?
     @State private var selectedHotelIDs = Set<String>()
     @State private var previewing = false
@@ -36,31 +21,47 @@ struct HotelPriceMonitoringView: View {
     @State private var notice: String?
     @State private var errorMessage: String?
 
+    init(makkahCount: Int, madinahCount: Int) {
+        self.makkahCount = makkahCount
+        self.madinahCount = madinahCount
+        let calendar = Calendar.current
+        let base = calendar.startOfDay(for: Date())
+        let defaultDate = calendar.date(byAdding: .day, value: 30, to: base) ?? base
+        _makkahDate = State(initialValue: defaultDate)
+        _madinahDate = State(initialValue: defaultDate)
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18) {
                 introCard
 
-                Text("Экспорт базы")
+                Text("Доступ ChatGPT")
                     .font(.title2.bold())
 
-                cityExportCard(
+                citySyncCard(
                     city: "Makkah",
                     title: "Makkah",
                     subtitle: "Отели Мекки",
                     count: makkahCount,
-                    symbol: "building.2.crop.circle"
+                    symbol: "building.2.crop.circle",
+                    date: $makkahDate,
+                    url: makkahURL,
+                    status: makkahStatus
                 )
 
-                cityExportCard(
+                citySyncCard(
                     city: "Madinah",
                     title: "Madinah",
                     subtitle: "Отели Медины",
                     count: madinahCount,
-                    symbol: "building.columns.circle"
+                    symbol: "building.columns.circle",
+                    date: $madinahDate,
+                    url: madinahURL,
+                    status: madinahStatus
                 )
 
-                importCard
+                jsonInputCard
 
                 if let preview {
                     previewSummary(preview)
@@ -95,31 +96,11 @@ struct HotelPriceMonitoringView: View {
         .background(BusinessDesign.background)
         .navigationTitle("Обновление цен")
         .navigationBarTitleDisplayMode(.inline)
-        .fileExporter(
-            isPresented: $showExporter,
-            document: exportDocument,
-            contentType: .json,
-            defaultFilename: exportFilename
-        ) { result in
-            switch result {
-            case .success:
-                notice = "JSON сохранён. Загрузите этот файл в наш чат ChatGPT для проверки цен."
-                errorMessage = nil
-            case .failure(let error):
-                errorMessage = error.localizedDescription
-            }
-            exportDocument = nil
-        }
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: [.json],
-            allowsMultipleSelection: false
-        ) { result in
-            guard case .success(let urls) = result, let url = urls.first else {
-                if case .failure(let error) = result { errorMessage = error.localizedDescription }
-                return
-            }
-            Task { await importResult(from: url) }
+        .task {
+            makkahURL = BusinessSessionVault.hotelSyncAccessURL(city: "Makkah")
+            madinahURL = BusinessSessionVault.hotelSyncAccessURL(city: "Madinah")
+            await refreshStatus(city: "Makkah")
+            await refreshStatus(city: "Madinah")
         }
     }
 
@@ -130,30 +111,31 @@ struct HotelPriceMonitoringView: View {
                     RoundedRectangle(cornerRadius: 17, style: .continuous)
                         .fill(BusinessDesign.primaryControl)
                         .frame(width: 52, height: 52)
-                    Image(systemName: "arrow.left.arrow.right.document.fill")
+                    Image(systemName: "link.badge.plus")
                         .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(BusinessDesign.onPrimaryControl)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("JSON Price Update")
+                    Text("ChatGPT Price Sync")
                         .font(.title2.bold())
-                    Text("iumrah Business → ChatGPT → iumrah Business")
+                    Text("Makkah и Madinah работают отдельно")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            Text("Экспортируйте Makkah или Madinah в JSON, загрузите файл в ChatGPT, а затем импортируйте полученный JSON с результатами. Никакой Cloudflare Browser-проверки и автоматической публикации: цена меняется только после Вашего подтверждения.")
+            Text("iumrah Business публикует только read-only снимок отелей выбранного города: текущую цену, точный источник и ссылку на этот же отель с фиксированной датой. ChatGPT проверяет каждый источник по одному и возвращает JSON. Google-поиск — только резерв для поиска той же страницы, не источник финальной цены.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
-                stepPill("1", "Экспорт")
+                stepPill("1", "Ссылка")
                 stepPill("2", "Проверка")
-                stepPill("3", "Импорт")
+                stepPill("3", "JSON")
+                stepPill("4", "Обновление")
             }
         }
         .padding(16)
@@ -161,21 +143,30 @@ struct HotelPriceMonitoringView: View {
     }
 
     private func stepPill(_ number: String, _ title: String) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Text(number)
                 .font(.caption2.bold())
                 .frame(width: 20, height: 20)
                 .background(BusinessDesign.primaryControl, in: Circle())
                 .foregroundStyle(BusinessDesign.onPrimaryControl)
             Text(title)
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
         }
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .background(BusinessDesign.secondarySurface, in: Capsule())
     }
 
-    private func cityExportCard(city: String, title: String, subtitle: String, count: Int, symbol: String) -> some View {
+    private func citySyncCard(
+        city: String,
+        title: String,
+        subtitle: String,
+        count: Int,
+        symbol: String,
+        date: Binding<Date>,
+        url: URL?,
+        status: BusinessHotelSyncStatusResponse?
+    ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 ZStack {
@@ -188,98 +179,237 @@ struct HotelPriceMonitoringView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.headline)
-                    Text("\(count) отелей · полный городской JSON + source URL")
+                    Text("\(count) отелей · отдельная read-only ссылка")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+
+                if url != nil {
+                    Menu {
+                        Button("Создать новую ссылку", systemImage: "arrow.clockwise") {
+                            Task { await createAccess(city: city, date: date.wrappedValue) }
+                        }
+                        Button("Отключить доступ", systemImage: "link.badge.minus", role: .destructive) {
+                            Task { await revokeAccess(city: city) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                    }
+                    .disabled(busyCity != nil)
+                }
             }
 
-            Button {
-                Task { await export(city: city) }
-            } label: {
-                HStack(spacing: 8) {
-                    if exportingCity == city {
-                        ProgressView().tint(BusinessDesign.onPrimaryControl)
-                    } else {
-                        Image(systemName: "square.and.arrow.up")
-                    }
-                    Text(exportingCity == city ? "Формируем JSON…" : "Экспорт JSON")
-                        .fontWeight(.semibold)
-                    Spacer()
-                    Image(systemName: "doc.text")
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Дата проверки")
+                        .font(.caption.weight(.semibold))
+                    Text("1 ночь · 2 взрослых · 1 номер · USD")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 16)
-                .frame(height: 50)
-                .foregroundStyle(BusinessDesign.onPrimaryControl)
-                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                Spacer()
+                DatePicker("", selection: date, in: Date()..., displayedComponents: .date)
+                    .labelsHidden()
+                    .datePickerStyle(.compact)
             }
-            .buttonStyle(.plain)
-            .disabled(exportingCity != nil || previewing || applying)
+
+            if let status, let checkIn = status.checkIn, let checkOut = status.checkOut {
+                HStack(spacing: 7) {
+                    Image(systemName: "calendar.badge.checkmark")
+                        .foregroundStyle(.green)
+                    Text("В ссылке сейчас: \(checkIn) → \(checkOut) · \(status.hotelCount) отелей")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let url {
+                Text(url.absoluteString)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await syncSnapshot(city: city, date: date.wrappedValue) }
+                    } label: {
+                        HStack(spacing: 7) {
+                            if busyCity == city {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                            }
+                            Text("Синхронизировать")
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busyCity != nil)
+
+                    Button {
+                        UIPasteboard.general.string = url.absoluteString
+                        notice = "Ссылка \(title) скопирована. Отправьте её в ChatGPT."
+                        errorMessage = nil
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .frame(width: 44, height: 44)
+                            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up")
+                            .frame(width: 44, height: 44)
+                            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                Button {
+                    Task { await createAccess(city: city, date: date.wrappedValue) }
+                } label: {
+                    HStack {
+                        if busyCity == city {
+                            ProgressView().tint(BusinessDesign.onPrimaryControl)
+                        } else {
+                            Image(systemName: "link.badge.plus")
+                        }
+                        Text("Подключить ChatGPT")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(BusinessDesign.onPrimaryControl)
+                    .padding(.horizontal, 15)
+                    .frame(height: 48)
+                    .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(busyCity != nil)
+            }
         }
         .padding(16)
         .businessCard(radius: 26)
     }
 
-    private var importCard: some View {
+    private var jsonInputCard: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Результат ChatGPT")
+                    Text("JSON от ChatGPT")
                         .font(.title2.bold())
-                    Text(importedFilename ?? "Импортируйте JSON после проверки цен")
+                    Text("Вставьте результат проверки сюда")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
                 }
                 Spacer()
                 if previewing { ProgressView() }
             }
 
-            Button {
-                showImporter = true
-            } label: {
-                Label("Импортировать JSON от ChatGPT", systemImage: "square.and.arrow.down")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 50)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $jsonText)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 190)
+                    .padding(8)
+                    .scrollContentBackground(.hidden)
                     .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+
+                if jsonText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("{\n  \"schema\": \"iumrah.hotel-price-update.v2\",\n  ...\n}")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 16)
+                        .allowsHitTesting(false)
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    if let value = UIPasteboard.general.string { jsonText = value }
+                } label: {
+                    Label("Вставить", systemImage: "doc.on.clipboard")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    jsonText = ""
+                    importedDocument = nil
+                    preview = nil
+                    selectedHotelIDs.removeAll()
+                } label: {
+                    Label("Очистить", systemImage: "xmark")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                Task { await previewPastedJSON() }
+            } label: {
+                HStack(spacing: 8) {
+                    if previewing { ProgressView().tint(BusinessDesign.onPrimaryControl) }
+                    Image(systemName: "checkmark.shield")
+                    Text(previewing ? "Проверяем JSON…" : "Показать предпросмотр")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.primary)
-            .disabled(previewing || applying)
+            .disabled(previewing || applying || jsonText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-            Text("Сначала будет только предпросмотр. Данные из файла не меняют D1, пока Вы не выберете изменения и не нажмёте «Обновить выбранные цены».")
+            Text("Приложение принимает только v2: тот же snapshot ID, тот же город, те же даты, 2 взрослых / 1 номер, тот же отель и прямой provider URL. Если ChatGPT не подтвердил цену непосредственно на Expedia/Booking, строка не сможет обновить каталог.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
-        .businessCard(radius: 28)
+        .businessCard(radius: 26)
     }
 
     private func previewSummary(_ preview: HotelPriceJSONPreview) -> some View {
         VStack(alignment: .leading, spacing: 13) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Предпросмотр")
-                        .font(.headline)
-                    Text("\(preview.city) · \(preview.total) отелей")
+                        .font(.title2.bold())
+                    Text("\(preview.city) · \(preview.checkIn) → \(preview.checkOut)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text("\(preview.changed) изменений")
-                    .font(.caption.weight(.semibold))
+                    .font(.caption.bold())
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 7)
                     .background(Color.orange.opacity(0.10), in: Capsule())
             }
 
             HStack(spacing: 8) {
                 metric("Изменено", preview.changed)
                 metric("Без изменений", preview.unchanged)
-                metric("Проверить", preview.conflicts + preview.unverified + preview.invalid)
+                metric("Не подтверждено", preview.unverified)
+            }
+            HStack(spacing: 8) {
+                metric("Конфликты", preview.conflicts)
+                metric("Невалидно", preview.invalid)
+                metric("Всего", preview.total)
             }
         }
         .padding(16)
@@ -294,7 +424,7 @@ struct HotelPriceMonitoringView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
@@ -313,7 +443,7 @@ struct HotelPriceMonitoringView: View {
             }
 
             HStack(spacing: 10) {
-                Button("Все изменения") {
+                Button("Все подтверждённые") {
                     selectedHotelIDs = Set(preview.items.filter(\.selectable).map(\.hotelID))
                 }
                 Button("Снять") {
@@ -329,7 +459,7 @@ struct HotelPriceMonitoringView: View {
                 HStack(spacing: 8) {
                     if applying { ProgressView().tint(BusinessDesign.onPrimaryControl) }
                     Image(systemName: "checkmark.seal.fill")
-                    Text(applying ? "Обновляем D1…" : "Обновить выбранные цены")
+                    Text(applying ? "Обновляем цены…" : "Обновить выбранные цены")
                         .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
@@ -369,8 +499,8 @@ struct HotelPriceMonitoringView: View {
                     }
                     HStack(spacing: 6) {
                         if let stars = item.stars { Text("\(stars)★") }
-                        if let city = item.city { Text(city) }
-                        if let provider = item.currentProvider ?? item.provider { Text("· \(provider)") }
+                        if let provider = item.currentProvider ?? item.provider { Text(provider) }
+                        if let checkIn = item.checkIn { Text("· \(checkIn)") }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -401,6 +531,11 @@ struct HotelPriceMonitoringView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let evidence = item.evidence, !evidence.isEmpty {
+                Text(evidence)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if let reason = item.reason, item.reviewStatus == "unverified" || item.reviewStatus == "needs_review" {
                 Text(reason)
                     .font(.caption)
@@ -408,9 +543,9 @@ struct HotelPriceMonitoringView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let source = AppConfig.absoluteURL(item.currentSourceURL ?? item.sourceURL) {
+            if let source = AppConfig.absoluteURL(item.checkedSourceURL ?? item.currentSourceURL ?? item.sourceURL) {
                 Link(destination: source) {
-                    Label("Открыть источник", systemImage: "safari")
+                    Label("Открыть проверенный источник", systemImage: "safari")
                         .font(.caption.weight(.semibold))
                 }
             }
@@ -440,51 +575,95 @@ struct HotelPriceMonitoringView: View {
     }
 
     @MainActor
-    private func export(city: String) async {
-        exportingCity = city
+    private func createAccess(city: String, date: Date) async {
+        busyCity = city
         notice = nil
         errorMessage = nil
-        defer { exportingCity = nil }
+        defer { busyCity = nil }
         do {
-            let document = try await APIClient.shared.hotelPriceJSONExport(city: city)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(document)
-            exportFilename = "iumrah-hotels-\(city.lowercased())-\(dateStamp()).json"
-            exportDocument = HotelJSONFileDocument(data: data)
-            showExporter = true
+            let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
+            guard let url = URL(string: access.accessURL) else { throw PriceJSONUIError.invalidJSON("Сервер вернул некорректную ссылку.") }
+            try BusinessSessionVault.setHotelSyncAccessURL(url, city: city)
+            setURL(url, city: city)
+            _ = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date)
+            await refreshStatus(city: city)
+            notice = "\(city) подключён. Снимок синхронизирован; скопируйте ссылку и отправьте её в ChatGPT."
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     @MainActor
-    private func importResult(from url: URL) async {
+    private func syncSnapshot(city: String, date: Date) async {
+        busyCity = city
+        notice = nil
+        errorMessage = nil
+        defer { busyCity = nil }
+        do {
+            let result = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date)
+            await refreshStatus(city: city)
+            notice = "\(city): \(result.hotelCount) отелей синхронизировано на \(result.checkIn) → \(result.checkOut)."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func revokeAccess(city: String) async {
+        busyCity = city
+        notice = nil
+        errorMessage = nil
+        defer { busyCity = nil }
+        do {
+            _ = try await APIClient.shared.revokeHotelSyncAccess(city: city)
+            BusinessSessionVault.clearHotelSyncAccessURL(city: city)
+            setURL(nil, city: city)
+            await refreshStatus(city: city)
+            notice = "Read-only доступ \(city) отключён."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func refreshStatus(city: String) async {
+        do {
+            let status = try await APIClient.shared.hotelSyncStatus(city: city)
+            if city == "Makkah" { makkahStatus = status }
+            else { madinahStatus = status }
+        } catch {
+            if city == "Makkah" { makkahStatus = nil }
+            else { madinahStatus = nil }
+        }
+    }
+
+    @MainActor
+    private func setURL(_ url: URL?, city: String) {
+        if city == "Makkah" { makkahURL = url }
+        else { madinahURL = url }
+    }
+
+    @MainActor
+    private func previewPastedJSON() async {
         previewing = true
         notice = nil
         errorMessage = nil
         defer { previewing = false }
 
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
         do {
-            let values = try url.resourceValues(forKeys: [.fileSizeKey, .nameKey])
-            if let size = values.fileSize, size > 5_000_000 {
-                throw PriceJSONUIError.invalidFile("JSON слишком большой. Максимум 5 MB.")
+            let trimmed = jsonText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let data = trimmed.data(using: .utf8), data.count <= 5_000_000 else {
+                throw PriceJSONUIError.invalidJSON("JSON слишком большой или повреждён.")
             }
-            let data = try Data(contentsOf: url)
-            let decoder = JSONDecoder()
-            let document = try decoder.decode(HotelPriceUpdateDocument.self, from: data)
-            guard document.schema == "iumrah.hotel-price-update.v1" else {
-                throw PriceJSONUIError.invalidFile("Это не iumrah hotel-price-update JSON.")
+            let document = try JSONDecoder().decode(HotelPriceUpdateDocument.self, from: data)
+            guard document.schema == "iumrah.hotel-price-update.v2" else {
+                throw PriceJSONUIError.invalidJSON("Нужен schema iumrah.hotel-price-update.v2.")
             }
             let verifiedPreview = try await APIClient.shared.previewHotelPriceJSON(document)
             importedDocument = document
-            importedFilename = values.name ?? url.lastPathComponent
             preview = verifiedPreview
             selectedHotelIDs = Set(verifiedPreview.items.filter(\.selectable).map(\.hotelID))
-            notice = "JSON проверен. Ничего ещё не опубликовано — выберите изменения ниже."
+            notice = "JSON проверен. Цена ещё не изменена — подтвердите выбранные строки ниже."
         } catch {
             importedDocument = nil
             preview = nil
@@ -505,7 +684,7 @@ struct HotelPriceMonitoringView: View {
             let response = try await APIClient.shared.applyHotelPriceJSON(document, hotelIDs: Array(selectedHotelIDs))
             preview = response.preview
             selectedHotelIDs.removeAll()
-            notice = "Обновлено \(response.applied) цен в D1. Клиентский каталог теперь использует подтверждённые значения."
+            notice = "Обновлено \(response.applied) цен. Неподтверждённые и конфликтные строки не были изменены."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -519,37 +698,34 @@ struct HotelPriceMonitoringView: View {
         let sign = delta > 0 ? "+" : ""
         let usd = "\(sign)\(money(delta))"
         guard let percent else { return usd }
-        let percentSign = percent > 0 ? "+" : ""
-        return "\(usd) · \(percentSign)\(percent.formatted(.number.precision(.fractionLength(0...1))))%"
+        let pSign = percent > 0 ? "+" : ""
+        return "\(usd) · \(pSign)\(percent.formatted(.number.precision(.fractionLength(0...1))))%"
     }
 
     private func issueText(_ issue: String) -> String {
         switch issue {
-        case "PRICE_CHANGED_AFTER_EXPORT": return "Цена в базе изменилась после экспорта. Повторно экспортируйте этот город перед обновлением."
-        case "SOURCE_CHANGED": return "Источник отеля изменился после экспорта. Эта цена заблокирована от автоматического применения."
-        case "LOW_CONFIDENCE": return "Низкая уверенность проверки. Цена не будет применена автоматически."
-        case "PRICE_NOT_VERIFIED": return "Источник не подтвердил цену."
-        case "HOTEL_NOT_FOUND": return "Отель больше не найден в базе."
-        case "HOTEL_NOT_PUBLISHED": return "Отель больше не опубликован."
-        case "CITY_MISMATCH": return "Город отеля не совпадает с экспортом."
-        default: return issue.replacingOccurrences(of: "_", with: " ").capitalized
+        case "HOTEL_NOT_FOUND": return "Отель больше не найден в каталоге."
+        case "CITY_CHANGED": return "Город отеля изменился после снимка."
+        case "PRICE_CHANGED_AFTER_SNAPSHOT": return "Цена в iumrah Business уже изменилась после снимка."
+        case "SOURCE_CHANGED_AFTER_SNAPSHOT": return "Источник отеля изменился после снимка."
+        case "PROVIDER_MISMATCH": return "Provider не совпадает с источником отеля."
+        case "DATES_NOT_VERIFIED": return "ChatGPT проверил другую дату."
+        case "OCCUPANCY_NOT_VERIFIED": return "Проверено другое число гостей или номеров."
+        case "DIRECT_SOURCE_NOT_VERIFIED": return "Нет подтверждения цены с прямой страницы этого же отеля."
+        case "HIGH_CONFIDENCE_REQUIRED": return "Для обновления требуется прямое подтверждение с confidence high."
+        case "INVALID_NEW_PRICE": return "Новая цена отсутствует или некорректна."
+        case "SOURCE_NOT_VERIFIED": return "Источник не дал подтверждаемую цену."
+        default: return issue
         }
-    }
-
-    private func dateStamp() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
     }
 }
 
 private enum PriceJSONUIError: LocalizedError {
-    case invalidFile(String)
+    case invalidJSON(String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidFile(let message): return message
+        case .invalidJSON(let message): return message
         }
     }
 }

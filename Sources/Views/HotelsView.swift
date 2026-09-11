@@ -118,7 +118,7 @@ struct HotelsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Обновление цен")
                         .font(.headline)
-                    Text("Экспорт JSON → ChatGPT → импорт результата")
+                    Text("Makkah / Madinah ссылки → проверка источников → JSON")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)

@@ -310,7 +310,7 @@ struct HotelAdminDetailView: View {
                     .padding(.horizontal, 2)
             }
 
-            Label("Автоматическая проверка источника отключена. Массовые обновления цен выполняются через Hotels → Обновление цен → JSON.", systemImage: "doc.text.magnifyingglass")
+            Label("Автоматическая проверка источника отключена. Обновление цен выполняется через Hotels → Обновление цен → ChatGPT Sync.", systemImage: "doc.text.magnifyingglass")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

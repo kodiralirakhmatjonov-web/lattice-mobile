@@ -35,7 +35,7 @@ test('Booking importer keeps initial USD pricing while source-refresh UI is reti
   assert.doesNotMatch(hotelDetail, /saveBrowserHotelPrice/);
   assert.doesNotMatch(hotelDetail, /APIClient\.shared\.refreshHotelPrice/);
   assert.doesNotMatch(hotelDetail, /Обновить из источника/);
-  assert.match(hotelDetail, /Hotels → Обновление цен → JSON/);
+  assert.match(hotelDetail, /Hotels → Обновление цен → ChatGPT Sync/);
 });
 
 test('Booking and Expedia source refresh share the server price reader', () => {
