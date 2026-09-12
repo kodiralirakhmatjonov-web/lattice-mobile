@@ -14,15 +14,16 @@ const employees = fs.readFileSync(new URL('../../../Sources/Views/EmployeesView.
 const profile = fs.readFileSync(new URL('../../../Sources/Views/ProfileView.swift', import.meta.url), 'utf8');
 const privateImage = fs.readFileSync(new URL('../../../Sources/Views/BusinessPrivateImage.swift', import.meta.url), 'utf8');
 
-test('Booking importer allows an admin-entered USD nightly price without changing Expedia rules', () => {
+test('Booking manual price remains available but price and room photos do not gate hotel publishing', () => {
   assert.match(importer, /setManualBookingImportPriceUSD/);
   assert.match(importer, /method: "booking-admin-manual-usd"/);
   assert.match(importer, /currency: "USD"/);
   assert.match(hotelReview, /Ручная цена Booking · USD за 1 ночь/);
   assert.match(hotelReview, /Использовать эту цену и разрешить публикацию/);
-  assert.match(hotelReview, /let requiredImageCount = isBooking \? 1 : 4/);
-  assert.match(worker, /const requiredImageCount = isBookingImport \? 1 : 4/);
-  assert.match(worker, /normalizedHotelPriceProvider\(source\?\.provider, source\?\.sourceURL\) === 'Booking'/);
+  assert.match(hotelReview, /!draft\.selectedHotelImages\.isEmpty/);
+  assert.doesNotMatch(hotelReview, /requiredImageCount = isBooking \? 1 : 4/);
+  assert.match(worker, /const hotelLevelImages = images\.filter\(image => !\['room', 'bathroom', 'other'\]\.includes\(image\.category\)\)/);
+  assert.doesNotMatch(worker, /const requiredImageCount = isBookingImport \? 1 : 4/);
 });
 
 test('Payments is a persistent Business sidebar section with reusable booking templates', () => {

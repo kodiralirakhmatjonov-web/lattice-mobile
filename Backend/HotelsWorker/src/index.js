@@ -7299,10 +7299,14 @@ async function createImportJob(request, env, user) {
   if (payload.value?.publishWhenComplete === true && plausibleRooms.length === 0) {
     return json({ ok: false, error: 'ROOM_TYPES_REQUIRED', detail: 'Published hotel requires at least one confirmed room type.' }, 422);
   }
-  const trustedImageCount = images.filter(image => image.category !== 'other').length;
-  const isBookingImport = Array.isArray(draft?.sources) && draft.sources.some(source => normalizedHotelPriceProvider(source?.provider, source?.sourceURL) === 'Booking');
-  const requiredImageCount = isBookingImport ? 1 : 4;
-  const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= requiredImageCount && plausibleRooms.length > 0;
+  // Publishing only requires one general property photo. Room/bathroom media is enrichment,
+  // not a gate: a hotel with confirmed room types must be publishable even when Expedia
+  // exposes no room-specific photos.
+  const hotelLevelImages = images.filter(image => !['room', 'bathroom', 'other'].includes(image.category));
+  if (payload.value?.publishWhenComplete === true && hotelLevelImages.length === 0) {
+    return json({ ok: false, error: 'HOTEL_PHOTO_REQUIRED', detail: 'Published hotel requires at least one general hotel photo; room photos are optional.' }, 422);
+  }
+  const canPublish = Boolean(payload.value?.publishWhenComplete) && hotelLevelImages.length > 0 && plausibleRooms.length > 0;
   const safeDraft = { ...draft, id: repairDuplicate?.id || draft?.id, status: 'draft', lifecycleState: 'importing' };
   const persisted = await persistHotelDraft(safeDraft, env, user, { checkDuplicate: false });
   if (!persisted.ok) return persisted.response;
@@ -7645,20 +7649,34 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
 
     const finalState = await step.do('finalize hotel import', async () => {
       const now = new Date().toISOString();
-      const [roomRow, coverRow] = await Promise.all([
+      const [roomRow, coverRow, hotelPhotoRow] = await Promise.all([
         this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_rooms WHERE hotel_id=?').bind(hotelID).first(),
-        this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_images WHERE hotel_id=? AND is_cover=1').bind(hotelID).first()
+        this.env.HOTELS_DB.prepare('SELECT COUNT(*) AS count FROM hotel_images WHERE hotel_id=? AND is_cover=1').bind(hotelID).first(),
+        this.env.HOTELS_DB.prepare("SELECT COUNT(*) AS count FROM hotel_images WHERE hotel_id=? AND category NOT IN ('room','bathroom','other')").bind(hotelID).first()
       ]);
       const roomCount = Number(roomRow?.count || 0);
-      const coverCount = Number(coverRow?.count || 0);
-      const requiredImages = Math.min(4, total);
-      const mediaReady = total > 0 && stored >= requiredImages && coverCount > 0;
+      let coverCount = Number(coverRow?.count || 0);
+      const hotelPhotoCount = Number(hotelPhotoRow?.count || 0);
+
+      // If the provider's nominated cover failed but another general hotel image was saved,
+      // promote that image instead of failing the whole import.
+      if (coverCount === 0 && hotelPhotoCount > 0) {
+        const fallbackCover = await this.env.HOTELS_DB.prepare("SELECT id FROM hotel_images WHERE hotel_id=? AND category NOT IN ('room','bathroom','other') ORDER BY position ASC, created_at ASC LIMIT 1")
+          .bind(hotelID).first();
+        if (fallbackCover?.id) {
+          await this.env.HOTELS_DB.prepare('UPDATE hotel_images SET is_cover=0 WHERE hotel_id=?').bind(hotelID).run();
+          await this.env.HOTELS_DB.prepare('UPDATE hotel_images SET is_cover=1 WHERE id=?').bind(fallbackCover.id).run();
+          coverCount = 1;
+        }
+      }
+
+      const mediaReady = stored > 0 && hotelPhotoCount > 0 && coverCount > 0;
       const roomsReady = !publishWhenComplete || roomCount > 0;
       const completed = mediaReady && roomsReady;
       const withWarnings = completed && failed > 0;
       const warning = withWarnings ? `${failed} из ${total} фотографий недоступны у источника; сохранено ${stored}.` : null;
       let failureReason = null;
-      if (!mediaReady) failureReason = `Сохранено только ${stored} из ${total} фотографий; для готовой карточки требуется минимум ${requiredImages} и обложка.`;
+      if (!mediaReady) failureReason = 'Не удалось сохранить ни одного общего фото отеля с обложкой; фото комнат для публикации не требуются.';
       else if (!roomsReady) failureReason = 'Не найдено ни одного подтверждённого типа номера; публикация остановлена.';
 
       if (completed && publishWhenComplete) {
@@ -7689,7 +7707,7 @@ export class HotelImportWorkflow extends WorkflowEntrypoint {
         warning,
         jobID
       ).run();
-      return { completed, stored, failed, total, hotelID, roomCount, coverCount, warning };
+      return { completed, stored, failed, total, hotelID, roomCount, coverCount, hotelPhotoCount, warning };
     });
 
     if (finalState.completed && publishWhenComplete) {

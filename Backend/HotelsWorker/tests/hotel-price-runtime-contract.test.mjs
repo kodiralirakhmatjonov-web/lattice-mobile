@@ -19,7 +19,7 @@ test('imported WKWebView price is persisted when available but missing price doe
   assert.match(worker, /INSERT INTO hotel_price_cache/);
   assert.match(worker, /importedPriceAvailable/);
   assert.doesNotMatch(worker, /HOTEL_PRICE_REQUIRED/);
-  assert.match(worker, /const canPublish = Boolean\(payload\.value\?\.publishWhenComplete\) && trustedImageCount >= requiredImageCount && plausibleRooms\.length > 0;/);
+  assert.match(worker, /const canPublish = Boolean\(payload\.value\?\.publishWhenComplete\) && hotelLevelImages\.length > 0 && plausibleRooms\.length > 0;/);
 });
 
 test('hotel list returns cached price fields to iumrah Business', () => {

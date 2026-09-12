@@ -429,6 +429,11 @@ struct HotelDraft: Codable, Identifiable {
     var selectedImages: [HotelImageCandidate] { images.filter(\.selected) }
     var selectedRoomImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .room || $0.kind == .bathroom } }
     var selectedTrustedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind.trusted } }
+    /// General hotel media that is safe to use as the property card/cover.
+    /// Room and bathroom photos are useful enrichment but never a publishing requirement.
+    var selectedHotelImages: [HotelImageCandidate] {
+        selectedImages.filter { $0.kind.trusted && $0.kind != .room && $0.kind != .bathroom }
+    }
     var suspiciousSelectedImages: [HotelImageCandidate] { selectedImages.filter { $0.kind == .other } }
     var importedPrice: ProviderPriceSnapshot? {
         sources.compactMap(\.price).filter(\.isUsable).sorted { lhs, rhs in

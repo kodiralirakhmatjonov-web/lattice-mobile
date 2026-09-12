@@ -15,7 +15,7 @@ test('Hotel Importer does not require an automatically extracted price to publis
   const body = createImportJobBody();
   assert.doesNotMatch(body, /HOTEL_PRICE_REQUIRED/);
   assert.match(body, /const importedPriceAvailable = hasImportedHotelPrice\(draft\?\.sources\)/);
-  assert.match(body, /const canPublish = Boolean\(payload\.value\?\.publishWhenComplete\) && trustedImageCount >= requiredImageCount && plausibleRooms\.length > 0;/);
+  assert.match(body, /const canPublish = Boolean\(payload\.value\?\.publishWhenComplete\) && hotelLevelImages\.length > 0 && plausibleRooms\.length > 0;/);
   assert.doesNotMatch(body, /plausibleRooms\.length > 0 && importedPriceAvailable/);
 });
 

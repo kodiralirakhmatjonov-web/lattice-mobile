@@ -720,9 +720,7 @@ struct HotelReviewView: View {
     }
 
     @ViewBuilder private func publishBlock(_ draft: HotelDraft) -> some View {
-        let isBooking = draft.sources.contains { $0.provider.lowercased() == "booking" }
-        let requiredImageCount = isBooking ? 1 : 4
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= requiredImageCount && !draft.rooms.isEmpty && draft.importedPrice != nil
+        let canPublish = !draft.sources.isEmpty && !draft.selectedHotelImages.isEmpty && !draft.rooms.isEmpty
 
         VStack(spacing: 12) {
             if let duplicate = coordinator.duplicateCandidate, duplicate.isPossible {
@@ -776,9 +774,7 @@ struct HotelReviewView: View {
             }
 
             if !canPublish {
-                Text(draft.sources.contains { $0.provider.lowercased() == "booking" } && draft.importedPrice == nil
-                     ? "Для Booking можно ввести USD цену вручную выше. Для публикации достаточно хотя бы одной фотографии и распознанного типа номера."
-                     : "Карточка будет сохранена как черновик, пока у неё нет цены, минимум 4 фотографий и распознанных типов номеров.")
+                Text("Для публикации нужен источник, хотя бы одно фото самого отеля и хотя бы один распознанный тип номера. Фото комнат и цена необязательны — их можно добавить позже.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -841,9 +837,7 @@ struct HotelReviewView: View {
     }
 
     private func submit(_ draft: HotelDraft, allowPossibleDuplicate: Bool) {
-        let isBooking = draft.sources.contains { $0.provider.lowercased() == "booking" }
-        let requiredImageCount = isBooking ? 1 : 4
-        let canPublish = !draft.sources.isEmpty && draft.selectedTrustedImages.count >= requiredImageCount && !draft.rooms.isEmpty && draft.importedPrice != nil
+        let canPublish = !draft.sources.isEmpty && !draft.selectedHotelImages.isEmpty && !draft.rooms.isEmpty
         publishing = true
         publishStatus = draft.selectedImages.isEmpty ? "Сохраняем серверный черновик…" : "Передаём отель в защищённую фоновую очередь…"
         Task { @MainActor in
@@ -867,8 +861,8 @@ struct HotelReviewView: View {
                 await BusinessNotifications.hotelImportStarted(job)
                 publishing = false
                 publishStatus = canPublish
-                    ? "Фоновый импорт запущен. Цена уже сохранена вместе с карточкой; Cloudflare продолжит загрузку фото."
-                    : "Отель сохранится черновиком. Для публикации обязательны подтверждённые номера, фото и цена."
+                    ? "Фоновый импорт запущен. После сохранения хотя бы одного фото отеля карточка будет опубликована; фото комнат и цена необязательны."
+                    : "Отель сохранится черновиком. Для публикации нужен источник, фото самого отеля и хотя бы один распознанный номер."
                 await monitor(jobID: job.id)
             } catch let APIError.possibleDuplicate(duplicate) {
                 coordinator.duplicateCandidate = duplicate
