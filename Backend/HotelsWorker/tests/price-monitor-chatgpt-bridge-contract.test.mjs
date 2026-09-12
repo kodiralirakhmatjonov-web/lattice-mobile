@@ -34,31 +34,33 @@ test('hotel snapshot comes from the already-loaded Business app list and is neve
   assert.match(migration, /PRIMARY KEY \(owner_login, city\)/);
 });
 
-test('Makkah and Madinah use separate durable secret links and the public body copies the proven Flight Sync transport contract', () => {
+test('Makkah and Madinah use separate durable secret links and Hotel Sync exposes clickable provider links plus raw JSON', () => {
   assert.match(worker, /businessHotelSyncPublicURL\(city, token\)/);
   assert.match(worker, /hotel-sync\/\$\{hotelSyncCitySlug\(city\)\}\/\$\{encodeURIComponent\(token\)\}/);
-  assert.match(worker, /publicBusinessHotelSyncFeed\(env, parts\[1\], parts\[2\]\)/);
+  assert.match(worker, /publicBusinessHotelSyncFeed\(env, parts\[1\], parts\[2\], url\)/);
   assert.match(worker, /WHERE token_hash=\? AND city=\? AND enabled=1/);
   assert.match(worker, /monitoring_url/);
+  assert.match(worker, /new URL\(`\$\{source\.origin\}\$\{source\.pathname\}`\)/);
   assert.match(worker, /url\.searchParams\.set\('checkin', checkIn\)/);
   assert.match(worker, /url\.searchParams\.set\('chkin', checkIn\)/);
   assert.match(worker, /Never use a Google\/search-result price snippet as a verified price/);
+  assert.match(worker, /Open exact provider price for/);
+  assert.match(worker, /Machine-readable snapshot and result template/);
+  assert.match(worker, /requestURL\.searchParams\.get\('format'\)/);
 
   const hotelFeedStart = worker.indexOf('async function publicBusinessHotelSyncFeed');
   const hotelFeedEnd = worker.indexOf('function normalizedHotelSyncUpdateItem', hotelFeedStart);
   const hotelFeed = worker.slice(hotelFeedStart, hotelFeedEnd);
-  assert.match(hotelFeed, /'content-type': 'text\/plain; charset=utf-8'/);
+  assert.match(hotelFeed, /'content-type': 'text\/html; charset=utf-8'/);
+  assert.match(hotelFeed, /'content-type': 'application\/json; charset=utf-8'/);
   assert.match(hotelFeed, /'x-content-type-options': 'nosniff'/);
   assert.match(hotelFeed, /'cache-control': 'no-store, max-age=0'/);
-  assert.doesNotMatch(hotelFeed, /'content-type': 'text\/html|cache-control': 'public/i);
+  assert.match(hotelFeed, /'x-robots-tag': 'noindex'/);
 
   const flightFeedStart = worker.indexOf('async function publicBusinessFlightSyncFeed');
   const flightFeedEnd = worker.indexOf('const FLIGHT_DIRECTIONS', flightFeedStart);
   const flightFeed = worker.slice(flightFeedStart, flightFeedEnd);
-  for (const header of ["'content-type': 'text/plain; charset=utf-8'", "'x-content-type-options': 'nosniff'", "'cache-control': 'no-store, max-age=0'"]) {
-    assert.ok(hotelFeed.includes(header), `hotel feed missing ${header}`);
-    assert.ok(flightFeed.includes(header), `flight feed missing ${header}`);
-  }
+  assert.match(flightFeed, /'content-type': 'text\/plain; charset=utf-8'/);
 });
 
 test('old v4 Keychain links self-heal once when the durable feed is first used', () => {

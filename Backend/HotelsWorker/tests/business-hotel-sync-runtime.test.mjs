@@ -108,18 +108,29 @@ test('durable hotel sync round-trip matches Flight Sync delivery and safely appl
   assert.equal(saved.ok, true);
   assert.equal(saved.hotelCount, 1);
 
-  const publicResponse = await f.api.publicBusinessHotelSyncFeed(f.env, 'makkah', token);
+  const publicResponse = await f.api.publicBusinessHotelSyncFeed(
+    f.env, 'makkah', token, new URL(access.accessURL)
+  );
   assert.equal(publicResponse.status, 200);
-  assert.equal(publicResponse.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.equal(publicResponse.headers.get('content-type'), 'text/html; charset=utf-8');
   assert.equal(publicResponse.headers.get('cache-control'), 'no-store, max-age=0');
-  const feed = JSON.parse(await publicResponse.text());
+  const html = await publicResponse.text();
+  assert.match(html, /Open exact provider price for Address Jabal Omar Makkah/);
+  assert.match(html, /Machine-readable snapshot and result template/);
+
+  const jsonResponse = await f.api.publicBusinessHotelSyncFeed(
+    f.env, 'makkah', token, new URL(`${access.accessURL}?format=json`)
+  );
+  assert.equal(jsonResponse.headers.get('content-type'), 'application/json; charset=utf-8');
+  const feed = JSON.parse(await jsonResponse.text());
   assert.equal(feed.source, 'iumrah_business_live_app_state');
   assert.equal(feed.snapshot_id, saved.snapshotID);
   assert.equal(feed.check_in, '2026-10-01');
   assert.equal(feed.hotels.length, 1);
   assert.equal(feed.hotels[0].current_nightly_usd, 172.8);
-  assert.match(feed.hotels[0].monitoring_url, /(?:chkin|startDate)=2026-10-01/);
-  assert.match(feed.hotels[0].monitoring_url, /(?:chkout|endDate)=2026-10-02/);
+  assert.match(feed.hotels[0].monitoring_url, /chkin=2026-10-01/);
+  assert.match(feed.hotels[0].monitoring_url, /chkout=2026-10-02/);
+  assert.doesNotMatch(feed.hotels[0].monitoring_url, /deep_link_value|shortlink|source_caller|af_/i);
 
   const checkedURL = new URL(feed.hotels[0].monitoring_url);
   checkedURL.searchParams.set('currency', 'USD');
