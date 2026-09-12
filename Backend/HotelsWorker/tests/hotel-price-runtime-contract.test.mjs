@@ -14,11 +14,12 @@ test('Hotels Worker no longer runs automatic Cloudflare price maintenance', () =
   assert.match(worker, /saveBusinessHotelSyncSnapshot/);
 });
 
-test('imported WKWebView price is persisted into hotel_price_cache', () => {
+test('imported WKWebView price is persisted when available but missing price does not block import', () => {
   assert.match(worker, /persistImportedHotelPriceSnapshots\(env,\s*id,\s*sources\)/);
   assert.match(worker, /INSERT INTO hotel_price_cache/);
   assert.match(worker, /importedPriceAvailable/);
-  assert.match(worker, /HOTEL_PRICE_REQUIRED/);
+  assert.doesNotMatch(worker, /HOTEL_PRICE_REQUIRED/);
+  assert.match(worker, /const canPublish = Boolean\(payload\.value\?\.publishWhenComplete\) && trustedImageCount >= requiredImageCount && plausibleRooms\.length > 0;/);
 });
 
 test('hotel list returns cached price fields to iumrah Business', () => {

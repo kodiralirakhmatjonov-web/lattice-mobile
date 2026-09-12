@@ -30,7 +30,7 @@ struct HotelPriceMonitoringView: View {
             LazyVStack(alignment: .leading, spacing: 18) {
                 introCard
 
-                Text("JSON для ChatGPT")
+                Text("Ссылки и JSON для ChatGPT")
                     .font(.title2.bold())
 
                 citySyncCard(
@@ -114,21 +114,21 @@ struct HotelPriceMonitoringView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("ChatGPT Hotel Sync")
                         .font(.title2.bold())
-                    Text("Каталог приложения → JSON → ChatGPT → подтверждение")
+                    Text("Каталог приложения → ссылка или JSON → ChatGPT → подтверждение")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            Text("Одним нажатием iumrah Business фиксирует текущий каталог и даты, получает серверный Hotel Sync JSON и сразу копирует весь JSON body. Ссылку больше не нужно переносить в ChatGPT вручную.")
+            Text("Синхронизация фиксирует текущий каталог и даты и готовит два способа передачи в ChatGPT: постоянную read-only ссылку и полный JSON body. Используйте ссылку по умолчанию, а JSON — как запасной вариант, если конкретный чат не сможет открыть URL.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 stepPill("1", "Снимок")
-                stepPill("2", "JSON")
+                stepPill("2", "Ссылка/JSON")
                 stepPill("3", "ChatGPT")
                 stepPill("4", "Применить")
             }
@@ -216,10 +216,10 @@ struct HotelPriceMonitoringView: View {
                     } else {
                         Image(systemName: "arrow.triangle.2.circlepath")
                     }
-                    Text(syncingCity == city ? "Готовим JSON…" : "Синхронизировать и скопировать JSON")
+                    Text(syncingCity == city ? "Синхронизируем…" : "Синхронизировать")
                         .fontWeight(.semibold)
                     Spacer()
-                    Image(systemName: "doc.on.doc")
+                    Image(systemName: "arrow.triangle.2.circlepath")
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 50)
@@ -230,11 +230,11 @@ struct HotelPriceMonitoringView: View {
             .disabled(syncingCity != nil || applying || previewing || cityHotels.isEmpty)
 
             if url != nil || jsonBody != nil {
-                VStack(alignment: .leading, spacing: 11) {
+                VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
-                        Image(systemName: jsonBody == nil ? "clock" : "checkmark.circle.fill")
-                            .foregroundStyle(jsonBody == nil ? Color.secondary : Color.green)
-                        Text(jsonBody == nil ? "Snapshot сохранён" : "JSON готов для ChatGPT")
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Hotel Sync готов")
                             .font(.caption.weight(.semibold))
                         Spacer()
                         if let updatedAt = status?.snapshotUpdatedAt {
@@ -244,27 +244,43 @@ struct HotelPriceMonitoringView: View {
                         }
                     }
 
-                    if let jsonBody {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            Text(jsonBody)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                                .lineLimit(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxHeight: 160)
+                    if let url {
+                        Text(url.absoluteString)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
 
+                        Button {
+                            UIPasteboard.general.string = url.absoluteString
+                            notice = "Ссылка \(city) скопирована. Вставьте её в ChatGPT."
+                            errorMessage = nil
+                        } label: {
+                            HStack {
+                                Label("Скопировать ссылку", systemImage: "link")
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Image(systemName: "doc.on.doc")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(height: 46)
+                        }
+                        .buttonStyle(.plain)
+                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    }
+
+                    if let jsonBody {
                         Button {
                             UIPasteboard.general.string = jsonBody
                             notice = "JSON \(city) скопирован. Вставьте его прямо в ChatGPT."
                             errorMessage = nil
                         } label: {
                             HStack {
-                                Label("Скопировать JSON", systemImage: "doc.on.doc.fill")
+                                Label("Скопировать JSON", systemImage: "doc.text")
                                     .font(.subheadline.weight(.semibold))
                                 Spacer()
-                                Text("\(jsonBody.utf8.count / 1024) KB")
+                                Text("\(max(1, jsonBody.utf8.count / 1024)) KB")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
@@ -274,9 +290,12 @@ struct HotelPriceMonitoringView: View {
                         .buttonStyle(.plain)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                     } else {
-                        Text("Нажмите синхронизацию ещё раз, чтобы получить и скопировать полный JSON body.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.circle")
+                            Text("Ссылка готова. JSON body пока не удалось загрузить в приложение — можно использовать ссылку или повторить синхронизацию.")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     HStack {
@@ -570,9 +589,8 @@ struct HotelPriceMonitoringView: View {
         errorMessage = nil
         defer { syncingCity = nil }
         do {
-            // Keep the proven Flight Sync token/snapshot architecture: every explicit
-            // sync rotates to a fresh read-only access URL and stores a fresh snapshot.
-            // The only UI difference is that we copy the resulting JSON body, not the URL.
+            // Same proven Flight Sync transport: rotate/create fresh read-only access,
+            // store the snapshot, then keep both representations available to the operator.
             let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
             guard let accessURL = URL(string: access.accessURL) else {
                 throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL")
@@ -581,10 +599,9 @@ struct HotelPriceMonitoringView: View {
 
             let snapshot = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)
 
-            // Keep the same read-only token architecture as Flight Sync, but remove an
-            // unnecessary manual step for the operator: read the public feed immediately
-            // and copy the exact JSON body that ChatGPT would receive from the URL.
-            let jsonBody = try await APIClient.shared.hotelSyncReadOnlyBody(from: accessURL)
+            // URL is already valid once access + snapshot succeeded. JSON retrieval is
+            // best-effort so a transient body-fetch problem never hides the working link.
+            let jsonBody = try? await APIClient.shared.hotelSyncReadOnlyBody(from: accessURL)
             if city == "Makkah" {
                 makkahURL = accessURL
                 makkahJSON = jsonBody
@@ -592,8 +609,12 @@ struct HotelPriceMonitoringView: View {
                 madinahURL = accessURL
                 madinahJSON = jsonBody
             }
-            UIPasteboard.general.string = jsonBody
-            notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). JSON скопирован — вставьте его прямо в ChatGPT."
+
+            if jsonBody != nil {
+                notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка и JSON готовы — выберите, что скопировать."
+            } else {
+                notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка готова; JSON можно получить повторной синхронизацией."
+            }
 
             if let status = try? await APIClient.shared.hotelSyncStatus(city: city) {
                 if city == "Makkah" {

@@ -7291,17 +7291,18 @@ async function createImportJob(request, env, user) {
   if (!images.length) return json({ ok: false, error: 'NO_IMAGES_SELECTED' }, 400);
 
   const plausibleRooms = Array.isArray(draft?.rooms) ? draft.rooms.filter(room => isPlausibleRoomName(room?.name)) : [];
+  // Price extraction is best-effort for imports. A hotel with confirmed identity,
+  // room types and media may be published without a source price; staff can set
+  // a manual nightly price later from iumrah Business. Do not block an otherwise
+  // complete hotel because Expedia/Booking did not expose a machine-readable rate.
   const importedPriceAvailable = hasImportedHotelPrice(draft?.sources);
   if (payload.value?.publishWhenComplete === true && plausibleRooms.length === 0) {
     return json({ ok: false, error: 'ROOM_TYPES_REQUIRED', detail: 'Published hotel requires at least one confirmed room type.' }, 422);
   }
-  if (payload.value?.publishWhenComplete === true && !importedPriceAvailable) {
-    return json({ ok: false, error: 'HOTEL_PRICE_REQUIRED', detail: 'Published hotel requires one confirmed price from the exact imported source link.' }, 422);
-  }
   const trustedImageCount = images.filter(image => image.category !== 'other').length;
   const isBookingImport = Array.isArray(draft?.sources) && draft.sources.some(source => normalizedHotelPriceProvider(source?.provider, source?.sourceURL) === 'Booking');
   const requiredImageCount = isBookingImport ? 1 : 4;
-  const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= requiredImageCount && plausibleRooms.length > 0 && importedPriceAvailable;
+  const canPublish = Boolean(payload.value?.publishWhenComplete) && trustedImageCount >= requiredImageCount && plausibleRooms.length > 0;
   const safeDraft = { ...draft, id: repairDuplicate?.id || draft?.id, status: 'draft', lifecycleState: 'importing' };
   const persisted = await persistHotelDraft(safeDraft, env, user, { checkDuplicate: false });
   if (!persisted.ok) return persisted.response;
