@@ -3,6 +3,8 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
+const HOTEL_SYNC_READER_RELEASE = 'hotel-sync-reader-v2-20260912';
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store'
@@ -1433,6 +1435,7 @@ function hotelSyncReaderHTML(payload, citySlug, token) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+<meta name="iumrah-hotel-sync-release" content="${HOTEL_SYNC_READER_RELEASE}">
 <title>iumrah Hotel Sync — ${titleCity}</title>
 <style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:980px;margin:32px auto;padding:0 18px;color:#111;background:#fff;line-height:1.45}
@@ -1475,6 +1478,7 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = nu
     type: 'iumrah_business_hotel_prices',
     read_only: true,
     source: 'iumrah_business_live_app_state',
+    release: HOTEL_SYNC_READER_RELEASE,
     version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
     snapshot_id: row.snapshot_id || snapshot.snapshot_id || null,
     updated_at: row.snapshot_updated_at || null,
@@ -1546,7 +1550,8 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = nu
         'content-type': 'application/json; charset=utf-8',
         'x-content-type-options': 'nosniff',
         'cache-control': 'no-store, max-age=0',
-        'x-robots-tag': 'noindex'
+        'x-robots-tag': 'noindex',
+        'x-iumrah-hotel-sync-release': HOTEL_SYNC_READER_RELEASE
       }
     });
   }
@@ -1557,7 +1562,8 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = nu
       'content-type': 'text/html; charset=utf-8',
       'x-content-type-options': 'nosniff',
       'cache-control': 'no-store, max-age=0',
-      'x-robots-tag': 'noindex'
+      'x-robots-tag': 'noindex',
+      'x-iumrah-hotel-sync-release': HOTEL_SYNC_READER_RELEASE
     }
   });
 }
@@ -6199,6 +6205,7 @@ async function health(env, admin) {
     ok: bookingsDbReady,
     database: 'iumrah-hotels',
     storage: 'iumrah-hotels-media',
+    hotelSyncRelease: HOTEL_SYNC_READER_RELEASE,
     hotels: Number(row?.count || 0),
     bookingsDbReady,
     sourceBookings
