@@ -3,8 +3,6 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
-const HOTEL_SYNC_READER_RELEASE = 'hotel-sync-reader-v2-20260912';
-
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store'
@@ -872,7 +870,7 @@ async function handleCatalog(request, env, url) {
 
   if (parts[0] === 'hotel-sync') {
     if (parts.length !== 3 || request.method !== 'GET') return methodNotAllowed();
-    return publicBusinessHotelSyncFeed(env, parts[1], parts[2], url);
+    return publicBusinessHotelSyncFeed(env, parts[1], parts[2]);
   }
 
   if (parts[0] === 'client') {
@@ -1160,11 +1158,8 @@ function hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut) {
     const source = new URL(sourceURL);
     const resolved = normalizedHotelSyncProvider(provider, sourceURL);
 
-    // Hotel Sync is opened by ChatGPT, not by the native Expedia/Booking app.
-    // Imported share links can contain stale deep_link_value/startDate/endDate
-    // tracking parameters. Keeping those parameters while appending new dates
-    // creates two competing stay contexts and can make the provider redirect to
-    // the old dates. Build a clean property-bound browser URL instead.
+    // Keep the same Flight Sync transport contract, but normalize the hotel-specific
+    // provider URL so stale share/deep-link parameters cannot override snapshot dates.
     const url = new URL(`${source.origin}${source.pathname}`);
     if (resolved === 'Booking') {
       url.searchParams.set('checkin', checkIn);
@@ -1398,67 +1393,7 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
   });
 }
 
-function hotelSyncEscapeHTML(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function hotelSyncReaderHTML(payload, citySlug, token) {
-  const hotels = Array.isArray(payload.hotels) ? payload.hotels : [];
-  const cards = hotels.map((hotel, index) => {
-    const name = hotelSyncEscapeHTML(hotel.hotel_name || hotel.hotel_id || `Hotel ${index + 1}`);
-    const provider = hotelSyncEscapeHTML(hotel.provider || 'Provider');
-    const current = hotel.current_nightly_usd == null ? '—' : `$${Number(hotel.current_nightly_usd).toFixed(2)}`;
-    const href = hotelSyncEscapeHTML(hotel.monitoring_url || '');
-    const id = hotelSyncEscapeHTML(hotel.hotel_id || '');
-    return `<article class="hotel" data-hotel-id="${id}">
-      <div><strong>${index + 1}. ${name}</strong> <span>${provider}</span></div>
-      <div>Current iumrah price: <strong>${hotelSyncEscapeHTML(current)}</strong></div>
-      ${href ? `<a href="${href}">Open exact provider price for ${name}</a>` : '<em>No verified provider URL</em>'}
-    </article>`;
-  }).join('\n');
-
-  const jsonURL = `${businessHotelSyncPublicURL(payload.city, token)}?format=json`;
-  const prettyJSON = hotelSyncEscapeHTML(JSON.stringify(payload, null, 2));
-  const titleCity = hotelSyncEscapeHTML(payload.city || citySlug);
-  const checkIn = hotelSyncEscapeHTML(payload.check_in || '');
-  const checkOut = hotelSyncEscapeHTML(payload.check_out || '');
-  const snapshot = hotelSyncEscapeHTML(payload.snapshot_id || '');
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex">
-<meta name="iumrah-hotel-sync-release" content="${HOTEL_SYNC_READER_RELEASE}">
-<title>iumrah Hotel Sync — ${titleCity}</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:980px;margin:32px auto;padding:0 18px;color:#111;background:#fff;line-height:1.45}
-h1{font-size:28px;margin:0 0 8px} .meta{color:#555;margin-bottom:18px}.rules{padding:14px 16px;border:1px solid #ddd;border-radius:14px;background:#fafafa;margin:18px 0}.hotel{padding:14px 0;border-bottom:1px solid #e8e8e8}.hotel span{color:#666;margin-left:8px}.hotel a{display:inline-block;margin-top:6px}details{margin-top:24px}pre{white-space:pre-wrap;word-break:break-word;background:#f6f6f6;padding:14px;border-radius:14px;font-size:12px}
-</style>
-</head>
-<body>
-<h1>iumrah Business Hotel Sync — ${titleCity}</h1>
-<div class="meta">Snapshot ${snapshot} · ${checkIn} → ${checkOut} · 1 room · 2 adults · USD · ${hotels.length} hotels</div>
-<div class="rules">
-<strong>Instructions for ChatGPT:</strong> open every hotel link below. Verify the exact same Expedia/Booking property and the exact stay dates shown above. Compare the sellable one-night room price with <code>current_nightly_usd</code>. Never use a search-result snippet or a different property/date as verified evidence. If the provider page does not expose a verifiable price, return <code>unverified</code>. Return only <code>iumrah.hotel-price-update.v2</code> JSON using the template in the data section.
-</div>
-<p><a href="${hotelSyncEscapeHTML(jsonURL)}">Open raw JSON feed</a></p>
-${cards}
-<details open>
-<summary><strong>Machine-readable snapshot and result template</strong></summary>
-<pre>${prettyJSON}</pre>
-</details>
-</body>
-</html>`;
-}
-
-async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = null) {
+async function publicBusinessHotelSyncFeed(env, citySlug, token) {
   const city = normalizedHotelSyncCity(citySlug);
   const cleanToken = cleanText(token, 512);
   if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
@@ -1478,7 +1413,6 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = nu
     type: 'iumrah_business_hotel_prices',
     read_only: true,
     source: 'iumrah_business_live_app_state',
-    release: HOTEL_SYNC_READER_RELEASE,
     version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
     snapshot_id: row.snapshot_id || snapshot.snapshot_id || null,
     updated_at: row.snapshot_updated_at || null,
@@ -1490,14 +1424,9 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = nu
     children: 0,
     currency: 'USD',
     hotel_count: Number(row.hotel_count || 0),
-    reader_contract: {
-      default_format: 'html_with_clickable_provider_links',
-      raw_json: '?format=json',
-      reason: 'Hotel monitoring requires following exact provider property links; Flight Sync does not.'
-    },
     monitoring_rules: {
-      primary_method: 'Follow each clickable monitoring_url from this Hotel Sync page. It is a clean exact-property Expedia/Booking URL with the snapshot dates and occupancy applied.',
-      fallback_method: 'If the provider link cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
+      primary_method: 'Open monitoring_url for each hotel. It is the exact stored Expedia/Booking property with the feed dates applied.',
+      fallback_method: 'If monitoring_url cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
       exact_property_only: true,
       exact_dates_required: true,
       occupancy: '1 room, 2 adults, 0 children, 1 night',
@@ -1542,28 +1471,15 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token, requestURL = nu
     hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
   };
 
-  const wantsJSON = requestURL instanceof URL && requestURL.searchParams.get('format')?.toLowerCase() === 'json';
-  if (wantsJSON) {
-    return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
-      status: 200,
-      headers: {
-        'content-type': 'application/json; charset=utf-8',
-        'x-content-type-options': 'nosniff',
-        'cache-control': 'no-store, max-age=0',
-        'x-robots-tag': 'noindex',
-        'x-iumrah-hotel-sync-release': HOTEL_SYNC_READER_RELEASE
-      }
-    });
-  }
-
-  return new Response(hotelSyncReaderHTML(payload, citySlug, cleanToken), {
+  // This is intentionally identical to the already-proven Flight Sync delivery
+  // contract: pretty-printed valid JSON served as plain UTF-8 text. No HTML,
+  // redirect, cache layer or Browser Rendering is involved.
+  return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
     status: 200,
     headers: {
-      'content-type': 'text/html; charset=utf-8',
+      'content-type': 'text/plain; charset=utf-8',
       'x-content-type-options': 'nosniff',
-      'cache-control': 'no-store, max-age=0',
-      'x-robots-tag': 'noindex',
-      'x-iumrah-hotel-sync-release': HOTEL_SYNC_READER_RELEASE
+      'cache-control': 'no-store, max-age=0'
     }
   });
 }
@@ -6205,7 +6121,6 @@ async function health(env, admin) {
     ok: bookingsDbReady,
     database: 'iumrah-hotels',
     storage: 'iumrah-hotels-media',
-    hotelSyncRelease: HOTEL_SYNC_READER_RELEASE,
     hotels: Number(row?.count || 0),
     bookingsDbReady,
     sourceBookings

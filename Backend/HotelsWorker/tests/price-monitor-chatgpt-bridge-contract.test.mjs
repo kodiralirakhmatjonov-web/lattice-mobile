@@ -34,40 +34,44 @@ test('hotel snapshot comes from the already-loaded Business app list and is neve
   assert.match(migration, /PRIMARY KEY \(owner_login, city\)/);
 });
 
-test('Makkah and Madinah use separate durable secret links and Hotel Sync exposes clickable provider links plus raw JSON', () => {
+test('Makkah and Madinah use separate durable secret links and the public body copies the proven Flight Sync transport contract', () => {
   assert.match(worker, /businessHotelSyncPublicURL\(city, token\)/);
   assert.match(worker, /hotel-sync\/\$\{hotelSyncCitySlug\(city\)\}\/\$\{encodeURIComponent\(token\)\}/);
-  assert.match(worker, /publicBusinessHotelSyncFeed\(env, parts\[1\], parts\[2\], url\)/);
+  assert.match(worker, /publicBusinessHotelSyncFeed\(env, parts\[1\], parts\[2\]\)/);
   assert.match(worker, /WHERE token_hash=\? AND city=\? AND enabled=1/);
   assert.match(worker, /monitoring_url/);
-  assert.match(worker, /new URL\(`\$\{source\.origin\}\$\{source\.pathname\}`\)/);
   assert.match(worker, /url\.searchParams\.set\('checkin', checkIn\)/);
   assert.match(worker, /url\.searchParams\.set\('chkin', checkIn\)/);
+  assert.match(worker, /new URL\(`\$\{source\.origin\}\$\{source\.pathname\}`\)/);
+  assert.doesNotMatch(worker, /searchParams\.set\('startDate', checkIn\)/);
+  assert.doesNotMatch(worker, /searchParams\.set\('endDate', checkOut\)/);
   assert.match(worker, /Never use a Google\/search-result price snippet as a verified price/);
-  assert.match(worker, /Open exact provider price for/);
-  assert.match(worker, /Machine-readable snapshot and result template/);
-  assert.match(worker, /requestURL\.searchParams\.get\('format'\)/);
 
   const hotelFeedStart = worker.indexOf('async function publicBusinessHotelSyncFeed');
   const hotelFeedEnd = worker.indexOf('function normalizedHotelSyncUpdateItem', hotelFeedStart);
   const hotelFeed = worker.slice(hotelFeedStart, hotelFeedEnd);
-  assert.match(hotelFeed, /'content-type': 'text\/html; charset=utf-8'/);
-  assert.match(hotelFeed, /'content-type': 'application\/json; charset=utf-8'/);
+  assert.match(hotelFeed, /'content-type': 'text\/plain; charset=utf-8'/);
   assert.match(hotelFeed, /'x-content-type-options': 'nosniff'/);
   assert.match(hotelFeed, /'cache-control': 'no-store, max-age=0'/);
-  assert.match(hotelFeed, /'x-robots-tag': 'noindex'/);
+  assert.doesNotMatch(hotelFeed, /'content-type': 'text\/html|cache-control': 'public/i);
+  assert.doesNotMatch(worker, /HOTEL_SYNC_READER_RELEASE|hotelSyncReaderHTML|default_format:\s*'html_with_clickable_provider_links'/);
+  assert.doesNotMatch(wrangler, /hotel-sync\/\*/);
 
   const flightFeedStart = worker.indexOf('async function publicBusinessFlightSyncFeed');
   const flightFeedEnd = worker.indexOf('const FLIGHT_DIRECTIONS', flightFeedStart);
   const flightFeed = worker.slice(flightFeedStart, flightFeedEnd);
-  assert.match(flightFeed, /'content-type': 'text\/plain; charset=utf-8'/);
+  for (const header of ["'content-type': 'text/plain; charset=utf-8'", "'x-content-type-options': 'nosniff'", "'cache-control': 'no-store, max-age=0'"]) {
+    assert.ok(hotelFeed.includes(header), `hotel feed missing ${header}`);
+    assert.ok(flightFeed.includes(header), `flight feed missing ${header}`);
+  }
 });
 
-test('old v4 Keychain links self-heal once when the durable feed is first used', () => {
-  assert.match(syncView, /let serverStatus = try\? await APIClient\.shared\.hotelSyncStatus/);
-  assert.match(syncView, /accessURL == nil \|\| serverStatus\?\.enabled != true/);
-  assert.match(syncView, /rotateHotelSyncAccess/);
-  assert.match(syncView, /setHotelSyncAccessURL/);
+test('hotel sync button uses the same fresh-access flow as Flight Sync and never reuses a stale Keychain token', () => {
+  assert.match(syncView, /let access = try await APIClient\.shared\.rotateHotelSyncAccess\(city: city\)/);
+  assert.match(syncView, /setHotelSyncAccessURL\(accessURL, city: city\)/);
+  assert.match(syncView, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
+  assert.match(syncView, /UIPasteboard\.general\.string = accessURL\.absoluteString/);
+  assert.doesNotMatch(syncView, /let serverStatus = try\? await APIClient\.shared\.hotelSyncStatus/);
 });
 
 test('ChatGPT result is pasted as v2 JSON, exact-date previewed, then explicitly batch-applied', () => {

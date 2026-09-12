@@ -18,10 +18,6 @@
       "zone_id": "__ZONE_ID__"
     },
     {
-      "pattern": "iumrah.app/api/catalog/hotels/hotel-sync/*",
-      "zone_id": "__ZONE_ID__"
-    },
-    {
       "pattern": "iumrah.app/api/catalog/hotels*",
       "zone_id": "__ZONE_ID__"
     }

@@ -492,30 +492,36 @@ struct HotelPriceMonitoringView: View {
         errorMessage = nil
         defer { syncingCity = nil }
         do {
-            var accessURL = BusinessSessionVault.hotelSyncAccessURL(city: city)
-            let serverStatus = try? await APIClient.shared.hotelSyncStatus(city: city)
-            // v4 used a short-lived one-shot relay. After upgrading to the durable
-            // Flight-Sync-style feed there may still be an old URL in Keychain,
-            // while the new server feed is not configured yet. Rotate exactly once
-            // in that case so the user never has to diagnose a stale link manually.
-            if accessURL == nil || serverStatus?.enabled != true {
-                let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
-                guard let createdURL = URL(string: access.accessURL) else { throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL") }
-                try BusinessSessionVault.setHotelSyncAccessURL(createdURL, city: city)
-                accessURL = createdURL
+            // Match the proven Flight Sync flow exactly: create a fresh read-only
+            // access URL, save the current snapshot, then copy that same URL.
+            // Never reuse a locally cached token when the user explicitly taps Sync.
+            let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
+            guard let accessURL = URL(string: access.accessURL) else {
+                throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL")
             }
+            try BusinessSessionVault.setHotelSyncAccessURL(accessURL, city: city)
 
             let snapshot = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)
-            let status = try await APIClient.shared.hotelSyncStatus(city: city)
+
+            // Keep the critical path identical to Flight Sync: once the snapshot
+            // succeeds, copy the freshly rotated URL immediately. A secondary
+            // status refresh must never be able to turn a successful sync into
+            // a visible failure or prevent the URL from reaching the clipboard.
             if city == "Makkah" {
                 makkahURL = accessURL
-                makkahStatus = status
             } else {
                 madinahURL = accessURL
-                madinahStatus = status
             }
-            UIPasteboard.general.string = accessURL?.absoluteString
+            UIPasteboard.general.string = accessURL.absoluteString
             notice = "\(city): синхронизировано \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка скопирована."
+
+            if let status = try? await APIClient.shared.hotelSyncStatus(city: city) {
+                if city == "Makkah" {
+                    makkahStatus = status
+                } else {
+                    madinahStatus = status
+                }
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
