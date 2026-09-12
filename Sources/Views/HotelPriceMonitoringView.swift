@@ -233,7 +233,7 @@ struct HotelPriceMonitoringView: View {
                 VStack(alignment: .leading, spacing: 11) {
                     HStack(spacing: 8) {
                         Image(systemName: jsonBody == nil ? "clock" : "checkmark.circle.fill")
-                            .foregroundStyle(jsonBody == nil ? .secondary : .green)
+                            .foregroundStyle(jsonBody == nil ? Color.secondary : Color.green)
                         Text(jsonBody == nil ? "Snapshot сохранён" : "JSON готов для ChatGPT")
                             .font(.caption.weight(.semibold))
                         Spacer()
