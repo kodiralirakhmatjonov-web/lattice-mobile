@@ -66,11 +66,12 @@ test('Makkah and Madinah use separate durable secret links and the public body c
   }
 });
 
-test('hotel sync button uses the same fresh-access flow as Flight Sync and never reuses a stale Keychain token', () => {
+test('hotel sync keeps the same fresh-access snapshot contract while copying JSON directly for ChatGPT', () => {
   assert.match(syncView, /let access = try await APIClient\.shared\.rotateHotelSyncAccess\(city: city\)/);
   assert.match(syncView, /setHotelSyncAccessURL\(accessURL, city: city\)/);
   assert.match(syncView, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
-  assert.match(syncView, /UIPasteboard\.general\.string = accessURL\.absoluteString/);
+  assert.match(syncView, /hotelSyncReadOnlyBody\(from: accessURL\)/);
+  assert.match(syncView, /UIPasteboard\.general\.string = jsonBody/);
   assert.doesNotMatch(syncView, /let serverStatus = try\? await APIClient\.shared\.hotelSyncStatus/);
 });
 

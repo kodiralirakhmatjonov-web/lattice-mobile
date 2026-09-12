@@ -699,10 +699,15 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
     private func recoverRoomsInBrowser(provider: Provider, propertyURL: URL) async -> [HotelRoomDraft] {
         var recovered: [HotelRoomDraft] = []
         let probeURLs = Self.roomProbeURLs(provider: provider, propertyURL: propertyURL)
-        guard let exactPropertyURL = probeURLs.first else { return recovered }
+        guard !probeURLs.isEmpty else { return recovered }
 
-        // Exact-source only: the compatibility probe list contains only the original
-        // property URL. No dates, currency, host, path, or query parameters are mutated.
+        // Room inventory on Expedia/Booking is lazy and availability-gated. A zero-sized
+        // WKWebView (the old implementation) does not mount the room cards reliably, and a
+        // share URL with no usable/future dates often never asks the provider for inventory.
+        // Keep the main importer untouched: this isolated browser is allowed to add dates
+        // only for room discovery, while host/path/property identity stay locked to the
+        // exact hotel the user pasted. Nothing from this probe can replace hotel identity,
+        // photos, or source URL.
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -714,53 +719,162 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
                 forMainFrameOnly: true
             )
         )
-        let roomWebView = WKWebView(frame: .zero, configuration: config)
-        roomWebView.customUserAgent = Self.userAgent(for: provider)
+        let roomWebView = WKWebView(
+            frame: CGRect(x: 0, y: 0, width: 1366, height: 1100),
+            configuration: config
+        )
+        roomWebView.customUserAgent = provider == .expedia
+            ? Self.expediaDesktopSafariUserAgent
+            : Self.userAgent(for: provider)
+        defer { roomWebView.stopLoading() }
 
-        status = "Уточняем номера с исходной страницы…"
-        progress = 0.88
-        var request = URLRequest(url: exactPropertyURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        roomWebView.load(request)
+        for (index, probeURL) in probeURLs.enumerated() {
+            guard provider.isProviderContentURL(probeURL),
+                  Self.isSameProperty(probeURL, as: propertyURL, provider: provider) else { continue }
 
-        guard await waitForRoomProbeLoad(roomWebView, provider: provider, timeoutSeconds: 20),
-              !(await detectVerification(in: roomWebView)) else {
-            roomWebView.stopLoading()
-            return recovered
-        }
+            status = index == 0
+                ? "Получаем доступные типы номеров…"
+                : "Проверяем ещё одно окно доступности номеров…"
+            progress = min(0.92, 0.87 + Double(index) * 0.015)
 
-        _ = try? await roomWebView.evaluateJavaScript(Self.revealRoomsScript())
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
-        for fraction in [0.0, 0.22, 0.48, 0.74, 1.0] {
-            _ = try? await roomWebView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
+            var request = URLRequest(url: probeURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 35)
+            request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            roomWebView.load(request)
 
-        if let pageURL = roomWebView.url,
-           provider.isProviderContentURL(pageURL),
-           Self.isSameProperty(pageURL, as: propertyURL, provider: provider),
-           !(await detectVerification(in: roomWebView)),
-           let raw = try? await roomWebView.evaluateJavaScript(Self.extractionScript(provider: provider, sourceURL: propertyURL.absoluteString)),
-           let json = raw as? String,
-           let data = json.data(using: .utf8),
-           let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
-           !Self.isChallengeIdentity(snapshot.name) {
-            if provider != .expedia
-                || Self.propertyID(from: propertyURL, provider: provider) == snapshot.providerHotelID {
-                recovered = HotelNormalizer.makeDraft(snapshot: snapshot).rooms
+            guard await waitForRoomProbeLoad(roomWebView, provider: provider, timeoutSeconds: 22),
+                  !(await detectVerification(in: roomWebView)) else { continue }
+
+            _ = try? await roomWebView.evaluateJavaScript(Self.revealRoomsScript())
+            try? await Task.sleep(nanoseconds: 1_700_000_000)
+            for fraction in [0.0, 0.18, 0.42, 0.68, 0.88, 1.0] {
+                _ = try? await roomWebView.evaluateJavaScript(Self.scrollRoomsScript(fraction: fraction))
+                try? await Task.sleep(nanoseconds: 320_000_000)
             }
+            // Some Expedia layouts mount the "See all rooms" control only after the offers
+            // section has entered the viewport. Give it one more chance after scrolling.
+            _ = try? await roomWebView.evaluateJavaScript(Self.revealRoomsScript())
+            try? await Task.sleep(nanoseconds: 700_000_000)
+
+            guard let pageURL = roomWebView.url,
+                  provider.isProviderContentURL(pageURL),
+                  Self.isSameProperty(pageURL, as: propertyURL, provider: provider),
+                  !(await detectVerification(in: roomWebView)),
+                  let raw = try? await roomWebView.evaluateJavaScript(
+                    Self.extractionScript(provider: provider, sourceURL: propertyURL.absoluteString)
+                  ),
+                  let json = raw as? String,
+                  let data = json.data(using: .utf8),
+                  let snapshot = try? JSONDecoder().decode(ProviderSnapshot.self, from: data),
+                  !Self.isChallengeIdentity(snapshot.name) else { continue }
+
+            if provider == .expedia,
+               Self.propertyID(from: propertyURL, provider: provider) != snapshot.providerHotelID {
+                continue
+            }
+
+            let probeRooms = HotelNormalizer.makeDraft(snapshot: snapshot).rooms
+            recovered = Self.mergeRooms(recovered, probeRooms)
+
+            // Once a real room list is present, stop early so the importer keeps its current
+            // speed. If Expedia exposes only one type in this date window, probe another
+            // availability window to distinguish a genuinely small hotel from sold-out stock.
+            if recovered.count >= 2 { break }
         }
 
-        roomWebView.stopLoading()
         return recovered
     }
 
     private static func roomProbeURLs(provider: Provider, propertyURL: URL) -> [URL] {
-        // Keep the TestFlight recovery invariant without reverting the exact-source model.
-        // The latest importer must probe only the exact URL that the user imported.
         guard provider.isProviderContentURL(propertyURL) else { return [] }
-        return [propertyURL]
+        switch provider {
+        case .booking:
+            // Booking already has a hardened availability-window builder used by its price
+            // probe. Reuse the same exact-property URLs for room recovery.
+            return bookingOperationalURLs(propertyURL)
+        case .expedia:
+            return expediaRoomProbeURLs(propertyURL)
+        }
+    }
+
+    private static func expediaRoomProbeURLs(_ propertyURL: URL) -> [URL] {
+        guard let propertyID = propertyID(from: propertyURL, provider: .expedia),
+              let original = URLComponents(url: propertyURL, resolvingAgainstBaseURL: false) else {
+            return [propertyURL]
+        }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let today = calendar.startOfDay(for: Date())
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        let originalItems = original.queryItems ?? []
+        var originalValues: [String: String] = [:]
+        for item in originalItems {
+            originalValues[item.name.lowercased()] = item.value ?? ""
+        }
+        let originalCheckIn = originalValues["chkin"] ?? originalValues["startdate"]
+        let originalCheckOut = originalValues["chkout"] ?? originalValues["enddate"]
+
+        var windows: [(Date, Date)] = []
+        if let rawIn = originalCheckIn,
+           let rawOut = originalCheckOut,
+           let checkIn = formatter.date(from: rawIn),
+           let checkOut = formatter.date(from: rawOut),
+           checkIn >= today,
+           checkOut > checkIn {
+            windows.append((checkIn, checkOut))
+        }
+        for offset in [1, 7, 21] {
+            guard let checkIn = calendar.date(byAdding: .day, value: offset, to: today),
+                  let checkOut = calendar.date(byAdding: .day, value: 1, to: checkIn) else { continue }
+            windows.append((checkIn, checkOut))
+        }
+
+        // Strip mobile-share/deep-link tracking and any stale stay parameters. These values
+        // can override the visible query inside Expedia's app shell and are a common reason
+        // the room inventory request never fires.
+        let blockedNames: Set<String> = [
+            "chkin", "chkout", "startdate", "enddate", "rm1", "rooms", "adults", "children",
+            "currency", "userewards", "deep_link_value", "shortlink", "source_caller", "brandcid",
+            "custom_web_attribute", "pid", "c", "s_dev_type", "s_dev_os"
+        ]
+        let baseItems = originalItems.filter { item in
+            let name = item.name.lowercased()
+            return !blockedNames.contains(name) && !name.hasPrefix("af_")
+        }
+
+        var output: [URL] = []
+        var seen = Set<String>()
+        for (checkIn, checkOut) in windows {
+            var components = original
+            var items = baseItems
+
+            func set(_ name: String, _ value: String) {
+                items.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+                items.append(URLQueryItem(name: name, value: value))
+            }
+
+            set("expediaPropertyId", propertyID)
+            set("chkin", formatter.string(from: checkIn))
+            set("chkout", formatter.string(from: checkOut))
+            set("rm1", "a2")
+            set("currency", "USD")
+            set("useRewards", "false")
+            components.queryItems = items
+            components.fragment = nil
+
+            guard let candidate = components.url,
+                  isSameProperty(candidate, as: propertyURL, provider: .expedia) else { continue }
+            if seen.insert(candidate.absoluteString).inserted { output.append(candidate) }
+        }
+
+        return output.isEmpty ? [propertyURL] : output
     }
 
     private func waitForRoomProbeLoad(_ targetWebView: WKWebView, provider: Provider, timeoutSeconds: Double) async -> Bool {
@@ -1009,6 +1123,7 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
 
     private static let mobileSafariUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
     private static let bookingDesktopSafariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
+    private static let expediaDesktopSafariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
 
     private static func userAgent(for provider: Provider) -> String {
         provider == .booking ? bookingDesktopSafariUserAgent : mobileSafariUserAgent
@@ -1108,14 +1223,14 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
         (() => {
           const clean = el => String(el?.innerText || el?.textContent || el?.getAttribute?.('aria-label') || '').replace(/\\s+/g, ' ').trim();
           const nodes = [...document.querySelectorAll('button,a,[role="button"],[aria-controls]')];
-          const patterns = /show all rooms|view all rooms|see all rooms|room options|available rooms|choose your room|select a room|rooms and rates|all room types|показать все номера|все номера/i;
+          const patterns = /show all rooms|view all rooms|see all rooms|see all available rooms|room options|available rooms|choose your room|choose a room|select a room|reserve a room|rooms and rates|all room types|показать все номера|все номера/i;
           const target = nodes.find(el => patterns.test(clean(el)) && el.offsetParent !== null)
             || nodes.find(el => patterns.test(clean(el)));
           if (target) {
             try { target.scrollIntoView({ block: 'center' }); target.click(); return true; } catch (_) {}
           }
           const headings = [...document.querySelectorAll('h1,h2,h3,[role="heading"]')];
-          const heading = headings.find(el => /room options|available rooms|choose your room|rooms and rates|room types|номера/i.test(clean(el)));
+          const heading = headings.find(el => /room options|available rooms|choose your room|choose a room|rooms and rates|room types|номера/i.test(clean(el)));
           if (heading) { try { heading.scrollIntoView({ block: 'start' }); return true; } catch (_) {} }
           return false;
         })();
@@ -2462,6 +2577,9 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
           ] : [
             '[data-stid*="room"] h2','[data-stid*="room"] h3','[data-stid*="room"] h4',
             '[data-testid*="room"] h2','[data-testid*="room"] h3','[data-testid*="room"] h4',
+            '[data-stid*="offer"] h2','[data-stid*="offer"] h3','[data-stid*="offer"] h4',
+            '[data-testid*="offer"] h2','[data-testid*="offer"] h3','[data-testid*="offer"] h4',
+            '[data-stid*="property-offers"] [role="heading"]','[data-testid*="property-offers"] [role="heading"]',
             '[aria-label*="room"] h3','[data-stid*="room"] [role="heading"]','[data-testid*="room"] [role="heading"]'
           ];
           for (const selector of roomSelectors) {
@@ -2550,6 +2668,50 @@ final class HotelImportCoordinator: NSObject, ObservableObject, WKNavigationDele
               180
             );
             if (candidateName) addRoom(candidateName, null, item);
+          }
+
+          // Expedia commonly returns one property-scoped GraphQL object whose nested room
+          // records do not repeat the property ID. The previous importer rejected those
+          // legitimate nested rooms because it required the ID on every individual object.
+          // Walk only subtrees rooted at the exact requested property, and stop immediately
+          // if a nested object declares a different property ID (recommendation/cross-sell).
+          if (provider === 'Expedia' && expectedPropertyID) {
+            const scopedSeen = new WeakSet();
+            let scopedBudget = 9000;
+            const walkScopedRooms = (value, depth = 0) => {
+              if (!value || depth > 14 || scopedBudget <= 0) return;
+              if (Array.isArray(value)) {
+                for (const child of value.slice(0, 500)) walkScopedRooms(child, depth + 1);
+                return;
+              }
+              if (typeof value !== 'object' || scopedSeen.has(value)) return;
+              scopedSeen.add(value);
+              scopedBudget -= 1;
+
+              const explicitID = candidatePropertyID(value);
+              if (explicitID && explicitID !== expectedPropertyID) return;
+
+              const type = lower(typeText(value['@type'] || value.__typename || value.type || value.contentType || ''));
+              const keys = Object.keys(value).join(' ').toLowerCase();
+              const roomSignal = /room|suite|unit|accommodation/.test(type) ||
+                /(roomtypename|roomtype|room_name|roomname|unitname|bedgroup|bedding|occupancy|maxoccupancy|sleeps|roomsize)/.test(keys);
+              if (roomSignal) {
+                const candidateName = safeText(
+                  value.roomTypeName || value.roomName || value.unitName || value.displayName || value.name || value.title || value.heading,
+                  180
+                );
+                if (candidateName) addRoom(candidateName, null, value);
+              }
+              for (const child of Object.values(value).slice(0, 420)) {
+                if (child && typeof child === 'object') walkScopedRooms(child, depth + 1);
+              }
+            };
+
+            for (const root of allJSON) {
+              if (root && typeof root === 'object' && !Array.isArray(root) && candidatePropertyID(root) === expectedPropertyID) {
+                walkScopedRooms(root);
+              }
+            }
           }
 
           const offerWalk = value => {

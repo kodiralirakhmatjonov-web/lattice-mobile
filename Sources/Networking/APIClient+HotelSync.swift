@@ -28,6 +28,28 @@ extension APIClient {
         return try decoder.decode(BusinessHotelSyncRevokeResponse.self, from: data)
     }
 
+    /// Reads the exact public Hotel Sync payload that ChatGPT sees. The UI copies this body
+    /// directly, so the operator no longer has to paste an intermediate read-only URL into
+    /// ChatGPT. We still keep the token internally because the backend uses it to expose the
+    /// same immutable snapshot contract as Flight Sync.
+    func hotelSyncReadOnlyBody(from accessURL: URL) async throws -> String {
+        var request = URLRequest(url: accessURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("application/json,text/plain;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.server("HOTEL_SYNC_READ_ONLY_FETCH_FAILED")
+        }
+        guard !data.isEmpty,
+              (try? JSONSerialization.jsonObject(with: data)) != nil,
+              let text = String(data: data, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw APIError.server("HOTEL_SYNC_INVALID_READ_ONLY_BODY")
+        }
+        return text
+    }
+
     func saveHotelSyncSnapshot(city: String, checkIn: Date, hotels: [HotelListItem]) async throws -> BusinessHotelSyncSnapshotResponse {
         guard let canonicalCity = hotelSyncCanonicalCity(city) else { throw APIError.server("HOTEL_SYNC_INVALID_CITY") }
         let calendar = Calendar(identifier: .gregorian)
