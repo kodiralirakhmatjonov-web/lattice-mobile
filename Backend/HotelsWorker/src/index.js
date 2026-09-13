@@ -4,7 +4,7 @@ import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
 const JSON_HEADERS = {
-  'content-type': 'text/plain; charset=utf-8',
+  'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store'
 };
 
@@ -974,7 +974,6 @@ async function handleBusinessOperations(request, env, url, parts, user, business
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'POST') return rotateBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'DELETE') return revokeBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'snapshot' && request.method === 'POST') return saveBusinessHotelSyncSnapshot(request, env, user, city);
-    if (parts.length === 3 && parts[2] === 'body' && request.method === 'GET') return businessHotelSyncBody(env, user, city);
     return methodNotAllowed();
   }
 
@@ -1235,11 +1234,9 @@ function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
   const city = normalizedHotelSyncCity(value.city);
   if (!hotelID || !hotelName || city !== expectedCity) return null;
 
-  const candidateSourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
-  const candidateProvider = normalizedHotelSyncProvider(value.provider, candidateSourceURL);
-  const hasMonitorableProperty = Boolean(candidateSourceURL && candidateProvider && hotelSyncPropertyIdentity(candidateSourceURL, candidateProvider));
-  const sourceURL = hasMonitorableProperty ? candidateSourceURL : null;
-  const provider = hasMonitorableProperty ? candidateProvider : null;
+  const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
+  const provider = normalizedHotelSyncProvider(value.provider, sourceURL);
+  if (!sourceURL || !provider || !hotelSyncPropertyIdentity(sourceURL, provider)) return null;
 
   const rawPrice = value.current_nightly_usd ?? value.currentNightlyUSD;
   const price = rawPrice === null || rawPrice === undefined || rawPrice === '' ? null : Number(rawPrice);
@@ -1257,8 +1254,7 @@ function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
     is_manual_override: Boolean(value.is_manual_override ?? value.isManualOverride),
     provider,
     source_url: sourceURL,
-    monitoring_url: hasMonitorableProperty ? hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut) : null,
-    monitoring_status: hasMonitorableProperty ? 'ready' : 'unverified_source',
+    monitoring_url: hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut),
     last_price_fetched_at: cleanText(value.last_price_fetched_at || value.lastPriceFetchedAt, 80) || null
   };
 }
@@ -1399,30 +1395,41 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
   });
 }
 
-function businessHotelSyncFeedPayload(row, city) {
+async function publicBusinessHotelSyncFeed(env, citySlug, token) {
+  const city = normalizedHotelSyncCity(citySlug);
+  const cleanToken = cleanText(token, 512);
+  if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+  const tokenHash = await sha256Hex(cleanToken);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    FROM business_hotel_sync_feeds
+    WHERE token_hash=? AND city=? AND enabled=1
+    LIMIT 1
+  `).bind(tokenHash, city).first().catch(() => null);
+  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+
   let snapshot = { version: BUSINESS_HOTEL_SYNC_VERSION, hotels: [] };
-  try { snapshot = JSON.parse(row?.snapshot_json || '{}'); } catch {}
-  return {
+  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
+  const payload = {
     ok: true,
     type: 'iumrah_business_hotel_prices',
     read_only: true,
     source: 'iumrah_business_live_app_state',
     version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
-    snapshot_id: row?.snapshot_id || snapshot.snapshot_id || null,
-    updated_at: row?.snapshot_updated_at || null,
+    snapshot_id: row.snapshot_id || snapshot.snapshot_id || null,
+    updated_at: row.snapshot_updated_at || null,
     city,
-    check_in: row?.check_in || snapshot.check_in || null,
-    check_out: row?.check_out || snapshot.check_out || null,
+    check_in: row.check_in || snapshot.check_in || null,
+    check_out: row.check_out || snapshot.check_out || null,
     rooms: 1,
     adults: 2,
     children: 0,
     currency: 'USD',
-    hotel_count: Number(row?.hotel_count || 0),
+    hotel_count: Number(row.hotel_count || 0),
     monitoring_rules: {
       primary_method: 'Open monitoring_url for each hotel first. It is the exact stored Expedia/Booking property with the preferred feed dates applied.',
       fallback_method: 'If monitoring_url cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
       exact_property_only: true,
-      source_policy: 'Hotels without an exact Expedia/Booking property remain in the feed with monitoring_status=unverified_source. Mark them unverified and never invent or substitute another property.',
       exact_dates_required: false,
       date_policy: 'Prefer the feed dates. If the provider does not expose them, a directly verified nearby stay date for the same property and occupancy is acceptable; keep the feed check_in/check_out in the JSON and mention the observed stay date in reason.',
       snapshot_policy: 'snapshot_id is audit/history only. A newer snapshot does not invalidate a result. Apply is protected per hotel by live hotel ID + provider/property + current old_nightly_usd compare-and-set.',
@@ -1435,10 +1442,10 @@ function businessHotelSyncFeedPayload(row, city) {
     result_template: {
       schema: 'iumrah.hotel-price-update.v2',
       version: 2,
-      snapshot_id: row?.snapshot_id || null,
+      snapshot_id: row.snapshot_id || null,
       city,
-      check_in: row?.check_in || null,
-      check_out: row?.check_out || null,
+      check_in: row.check_in || null,
+      check_out: row.check_out || null,
       rooms: 1,
       adults: 2,
       currency: 'USD',
@@ -1455,8 +1462,8 @@ function businessHotelSyncFeedPayload(row, city) {
         source_url: 'copy from feed',
         monitoring_url: 'copy from feed',
         checked_source_url: 'actual verified URL for the same provider/property; nearby dates are allowed, or null',
-        check_in: row?.check_in || null,
-        check_out: row?.check_out || null,
+        check_in: row.check_in || null,
+        check_out: row.check_out || null,
         rooms: 1,
         adults: 2,
         currency: 'USD',
@@ -1467,10 +1474,10 @@ function businessHotelSyncFeedPayload(row, city) {
     },
     hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
   };
-}
 
-function businessHotelSyncFeedResponse(row, city) {
-  const payload = businessHotelSyncFeedPayload(row, city);
+  // This is intentionally identical to the already-proven Flight Sync delivery
+  // contract: pretty-printed valid JSON served as plain UTF-8 text. No HTML,
+  // redirect, cache layer or Browser Rendering is involved.
   return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
     status: 200,
     headers: {
@@ -1479,36 +1486,6 @@ function businessHotelSyncFeedResponse(row, city) {
       'cache-control': 'no-store, max-age=0'
     }
   });
-}
-
-async function businessHotelSyncBody(env, user, cityValue) {
-  const owner = businessHotelSyncOwner(user);
-  const city = normalizedHotelSyncCity(cityValue);
-  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
-  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
-  const row = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
-    FROM business_hotel_sync_feeds
-    WHERE owner_login=? AND city=? AND enabled=1
-    LIMIT 1
-  `).bind(owner, city).first().catch(() => null);
-  if (!row || !row.snapshot_id) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_NOT_READY' }, 404);
-  return businessHotelSyncFeedResponse(row, city);
-}
-
-async function publicBusinessHotelSyncFeed(env, citySlug, token) {
-  const city = normalizedHotelSyncCity(citySlug);
-  const cleanToken = cleanText(token, 512);
-  if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  const tokenHash = await sha256Hex(cleanToken);
-  const row = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
-    FROM business_hotel_sync_feeds
-    WHERE token_hash=? AND city=? AND enabled=1
-    LIMIT 1
-  `).bind(tokenHash, city).first().catch(() => null);
-  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  return businessHotelSyncFeedResponse(row, city);
 }
 
 function normalizedHotelSyncUpdateItem(value) {
@@ -2766,6 +2743,70 @@ function mergeSourceBooking(raw, sourcePayload) {
   return merged;
 }
 
+
+async function applyPendingPackagePricingReport(env, bookingID) {
+  // PackageEngine may accept the sealed pricing report before the Business trip is
+  // materialized. This post-booking table is the durable server-to-server hand-off.
+  // Rollout-safe: if the migration has not reached this environment yet, booking
+  // sync continues and the PackageEngine/client can retry later.
+  let pending;
+  try {
+    pending = await env.HOTELS_DB.prepare(
+      'SELECT quote_id,pricing_version,pricing_snapshot_json FROM pending_package_pricing_reports WHERE booking_id=? LIMIT 1'
+    ).bind(bookingID).first();
+  } catch (error) {
+    if (String(error?.message || '').toLowerCase().includes('no such table')) return false;
+    throw error;
+  }
+  if (!pending) return false;
+
+  const pendingPricing = parseJSONObject(pending.pricing_snapshot_json);
+  const pendingQuoteID = cleanText(pending.quote_id, 220);
+  if (!pendingQuoteID || !pendingPricing || typeof pendingPricing !== 'object' || String(pendingPricing.quoteId || '') !== pendingQuoteID) {
+    console.error('PENDING_PACKAGE_PRICING_INVALID', { bookingID, quoteID: pendingQuoteID });
+    return false;
+  }
+
+  const trip = await env.HOTELS_DB.prepare(
+    'SELECT id,pricing_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1'
+  ).bind(bookingID).first();
+  if (!trip) return false;
+
+  const existingPricing = parseJSONObject(trip.pricing_snapshot_json);
+  const existingKeys = existingPricing && typeof existingPricing === 'object' ? Object.keys(existingPricing) : [];
+  if (existingKeys.length > 0) {
+    if (String(existingPricing.quoteId || '') === pendingQuoteID) {
+      await env.HOTELS_DB.prepare('DELETE FROM pending_package_pricing_reports WHERE booking_id=?').bind(bookingID).run();
+      return true;
+    }
+    // Never overwrite an already committed cost report with another quote. Keep
+    // the pending row for staff/debug visibility instead of destroying evidence.
+    console.error('PACKAGE_PRICING_IMMUTABILITY_CONFLICT', {
+      bookingID,
+      existingQuoteID: String(existingPricing.quoteId || ''),
+      pendingQuoteID,
+    });
+    return false;
+  }
+
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(
+    `UPDATE pilgrim_trips
+     SET pricing_snapshot_json=?,updated_at=?
+     WHERE booking_id=?
+       AND (pricing_snapshot_json IS NULL OR TRIM(pricing_snapshot_json)='' OR TRIM(pricing_snapshot_json)='{}')`
+  ).bind(JSON.stringify(pendingPricing),now,bookingID).run();
+
+  const persisted = await env.HOTELS_DB.prepare(
+    'SELECT pricing_snapshot_json FROM pilgrim_trips WHERE booking_id=? LIMIT 1'
+  ).bind(bookingID).first();
+  const persistedPricing = parseJSONObject(persisted?.pricing_snapshot_json);
+  if (String(persistedPricing.quoteId || '') !== pendingQuoteID) return false;
+
+  await env.HOTELS_DB.prepare('DELETE FROM pending_package_pricing_reports WHERE booking_id=?').bind(bookingID).run();
+  return true;
+}
+
 async function updatePilgrimIdentityFields(env, pilgrim, identity) {
   if (!pilgrim) return null;
   const now = new Date().toISOString();
@@ -2783,23 +2824,25 @@ async function syncBookingTrip(env, raw) {
   let trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   const now = new Date().toISOString();
   const identity = bookingIdentity(effectiveRaw);
-  const pricing = extractPricingSnapshot(effectiveRaw);
+  // Pricing is server-owned by PackageEngine. Never ingest supplier costs or
+  // margin data from the public booking payload. The operational row starts empty
+  // and PackageEngine attaches the sealed report only after booking creation.
   const startDate = cleanText(effectiveRaw?.startDate,64); const endDate = cleanText(effectiveRaw?.endDate,64);
   let pilgrim;
   if (!trip) {
     pilgrim = await createPilgrim(env, identity); if (!pilgrim) return null;
     const bookingNumber = await allocateBookingNumber(env);
     await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,pilgrim.id,tripStatusFromBooking(effectiveRaw),startDate,endDate,JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,pilgrim.id,tripStatusFromBooking(effectiveRaw),startDate,endDate,JSON.stringify(effectiveRaw),'{}',now,now).run();
   } else {
     pilgrim = await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
     pilgrim = await updatePilgrimIdentityFields(env,pilgrim,identity);
     const previous = parseJSONObject(trip.booking_snapshot_json); const merged={...previous,...effectiveRaw};
-    const priceJSON = pricing && Object.keys(pricing).length ? JSON.stringify(pricing) : (trip.pricing_snapshot_json||'{}');
-    await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET start_date=COALESCE(?,start_date),end_date=COALESCE(?,end_date),booking_snapshot_json=?,pricing_snapshot_json=?,updated_at=? WHERE booking_id=?`)
-      .bind(startDate,endDate,JSON.stringify(merged),priceJSON,now,bookingID).run();
+    await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips SET start_date=COALESCE(?,start_date),end_date=COALESCE(?,end_date),booking_snapshot_json=?,updated_at=? WHERE booking_id=?`)
+      .bind(startDate,endDate,JSON.stringify(merged),now,bookingID).run();
   }
   trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  await applyPendingPackagePricingReport(env, bookingID);
   pilgrim=pilgrim||await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first();
   const stats=await env.HOTELS_DB.prepare('SELECT COUNT(*) AS count,MAX(COALESCE(end_date,created_at)) AS last_trip FROM pilgrim_trips WHERE pilgrim_id=?').bind(pilgrim.id).first();
   await env.HOTELS_DB.prepare('UPDATE pilgrims SET total_trips=?,last_trip_at=?,updated_at=? WHERE id=?').bind(Number(stats?.count||0),stats?.last_trip||null,now,pilgrim.id).run();
@@ -3419,41 +3462,33 @@ async function generatorPricingReportForBooking(env, bookingID, raw) {
   const snapshot = parseJSONObject(trip?.booking_snapshot_json);
   const persistedPricing = parseJSONObject(trip?.pricing_snapshot_json);
   const rawObject = raw && typeof raw === 'object' ? raw : {};
-  const embeddedPricing = rawObject?.pricingSnapshot && typeof rawObject.pricingSnapshot === 'object'
-    ? rawObject.pricingSnapshot
-    : snapshot?.pricingSnapshot && typeof snapshot.pricingSnapshot === 'object'
-      ? snapshot.pricingSnapshot
+  const directPricing = persistedPricing && typeof persistedPricing === 'object' &&
+    Array.isArray(persistedPricing?.components) && persistedPricing.components.length > 0 &&
+    persistedPricing?.totals && typeof persistedPricing.totals === 'object' &&
+    persistedPricing?.context && typeof persistedPricing.context === 'object' &&
+    persistedPricing?.selectedPricingInputs && typeof persistedPricing.selectedPricingInputs === 'object'
+      ? persistedPricing
       : null;
-  const pricingCandidates = [persistedPricing, embeddedPricing].filter(item => item && typeof item === 'object');
-  const directPricing = pricingCandidates.find(item =>
-    Array.isArray(item?.components) && item.components.length > 0 &&
-    item?.totals && typeof item.totals === 'object' &&
-    item?.context && typeof item.context === 'object' &&
-    item?.selectedPricingInputs && typeof item.selectedPricingInputs === 'object'
-  ) || null;
   const trace = rawObject?.generatorTrace && typeof rawObject.generatorTrace === 'object'
     ? rawObject.generatorTrace
     : snapshot?.generatorTrace && typeof snapshot.generatorTrace === 'object'
       ? snapshot.generatorTrace
       : {};
 
-  // New bookings explicitly sync their complete pricingSnapshot after the booking
-  // is created. Prefer that immutable generator report so Business can always show
-  // and edit every cost component even if the package_quote_audits lookup is late,
-  // unavailable, or has already been cleaned up. Keep the quote-audit fallback for
-  // older bookings that only contain generatorTrace.quoteId.
-  if (directPricing && typeof directPricing === 'object' &&
-      Array.isArray(directPricing.components) && directPricing.components.length > 0 &&
-      directPricing.totals && typeof directPricing.totals === 'object') {
+  // New pricing reports are written directly by PackageEngine after booking.
+  // Never treat an embedded client pricingSnapshot as authoritative.
+  if (directPricing) {
     return {
       ...directPricing,
       quoteId: cleanText(directPricing.quoteId, 180) || `booking-${bookingID}`,
-      pricingVersion: cleanText(directPricing.pricingVersion, 120) || 'persisted-booking-pricing-v1',
+      pricingVersion: cleanText(directPricing.pricingVersion, 120) || 'server-booking-pricing-v1',
       currency: cleanText(directPricing.currency, 12) || 'USD',
       selection: trace
     };
   }
 
+  // Compatibility only for older deployments that stored a server quote audit by
+  // quoteId. This source is also server-side; client-embedded costs are not used.
   return generatorPricingReport(env, { ...snapshot, ...rawObject });
 }
 
@@ -3764,10 +3799,10 @@ async function operationsBookingDetail(request, env, bookingID) {
   if (!resolved) return json({ ok: false, error: 'BOOKING_NOT_FOUND' }, 404);
   const trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
   const pilgrim = trip ? await env.HOTELS_DB.prepare('SELECT * FROM pilgrims WHERE id=?').bind(trip.pilgrim_id).first() : null;
-  const pricingSnapshot = trip ? parseJSONObject(trip.pricing_snapshot_json) : extractPricingSnapshot(resolved.raw);
+  const pricingSnapshot = trip ? parseJSONObject(trip.pricing_snapshot_json) : {};
   const pricingReportSource = trip ? { ...parseJSONObject(trip.booking_snapshot_json), ...resolved.raw } : resolved.raw;
   let pricingLines = flattenPricingLines(pricingSnapshot);
-  if (!pricingLines.length) pricingLines = flattenPricingLines(resolved.raw);
+  // Client payloads are not a trusted source of supplier-cost lines.
   const [history, flightRows, assignment] = await Promise.all([
     env.HOTELS_DB.prepare('SELECT old_status, new_status, changed_by, created_at FROM booking_status_history WHERE booking_id=? ORDER BY created_at DESC LIMIT 50').bind(bookingID).all(),
     env.HOTELS_DB.prepare("SELECT * FROM trip_flights WHERE booking_id=? ORDER BY CASE direction WHEN 'outbound' THEN 0 ELSE 1 END").bind(bookingID).all(),
@@ -5167,9 +5202,9 @@ async function handleClientAccount(request,env,parts){
   const canonicalID=Number(auth.pilgrim.id);const now=new Date().toISOString();
   let trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=? LIMIT 1').bind(bookingID).first();
   if(!trip){
-    const sourcePayload=await sourceBookingPayload(env,bookingID);const effectiveRaw=mergeSourceBooking(boot.booking,sourcePayload);const pricing=extractPricingSnapshot(effectiveRaw);const bookingNumber=await allocateBookingNumber(env);
+    const sourcePayload=await sourceBookingPayload(env,bookingID);const effectiveRaw=mergeSourceBooking(boot.booking,sourcePayload);const bookingNumber=await allocateBookingNumber(env);
     await env.HOTELS_DB.prepare(`INSERT INTO pilgrim_trips (id,booking_id,booking_number,pilgrim_id,status,start_date,end_date,booking_snapshot_json,pricing_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,canonicalID,tripStatusFromBooking(effectiveRaw),cleanText(effectiveRaw?.startDate,64),cleanText(effectiveRaw?.endDate,64),JSON.stringify(effectiveRaw),JSON.stringify(pricing),now,now).run();
+      .bind(`trip-${crypto.randomUUID()}`,bookingID,bookingNumber,canonicalID,tripStatusFromBooking(effectiveRaw),cleanText(effectiveRaw?.startDate,64),cleanText(effectiveRaw?.endDate,64),JSON.stringify(effectiveRaw),'{}',now,now).run();
   }else if(Number(trip.pilgrim_id)!==canonicalID){
     const oldID=Number(trip.pilgrim_id||0);
     await env.HOTELS_DB.prepare('UPDATE pilgrim_trips SET pilgrim_id=?,updated_at=? WHERE booking_id=?').bind(canonicalID,now,bookingID).run();
@@ -5177,6 +5212,7 @@ async function handleClientAccount(request,env,parts){
   }
   const identity=bookingIdentity(boot.booking);await updatePilgrimIdentityFields(env,auth.pilgrim,identity);await recalcPilgrimStats(env,canonicalID);
   trip=await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE booking_id=?').bind(bookingID).first();
+  await applyPendingPackagePricingReport(env, bookingID);
   return json({ok:true,pilgrimID:pilgrimPublicID(canonicalID),bookingNumber:Number(trip?.booking_number||0)||null,bookingDisplayNumber:bookingPublicNumber(trip?.booking_number)});
  }
  return methodNotAllowed();
@@ -5201,21 +5237,15 @@ async function syncBookingProfileByToken(request, env, bookingID, auth) {
 
   if (trip) {
     const hasGeneratorTrace = payload?.generatorTrace && typeof payload.generatorTrace === 'object';
-    const hasPricingSnapshot = payload?.pricingSnapshot && typeof payload.pricingSnapshot === 'object';
-    if (hasGeneratorTrace || hasPricingSnapshot) {
+    if (hasGeneratorTrace) {
       const snapshot = parseJSONObject(trip.booking_snapshot_json);
-      let pricing = parseJSONObject(trip.pricing_snapshot_json);
-      if (hasGeneratorTrace) snapshot.generatorTrace = payload.generatorTrace;
-      if (hasPricingSnapshot) {
-        // Keep the exact generator cost report in the dedicated operational column.
-        // Do not copy it into booking_snapshot_json because that snapshot is also
-        // consumed by the pilgrim trip-detail API.
-        pricing = payload.pricingSnapshot;
-      }
+      snapshot.generatorTrace = payload.generatorTrace;
+      // pricingSnapshot from a client is intentionally ignored. PackageEngine is
+      // the only owner allowed to write pricing_snapshot_json for generated quotes.
       await env.HOTELS_DB.prepare(`UPDATE pilgrim_trips
-        SET booking_snapshot_json=?, pricing_snapshot_json=?, updated_at=?
+        SET booking_snapshot_json=?, updated_at=?
         WHERE id=?`)
-        .bind(JSON.stringify(snapshot), JSON.stringify(pricing), new Date().toISOString(), trip.id)
+        .bind(JSON.stringify(snapshot), new Date().toISOString(), trip.id)
         .run();
       trip = await env.HOTELS_DB.prepare('SELECT * FROM pilgrim_trips WHERE id=?').bind(trip.id).first();
     }
@@ -6090,8 +6120,7 @@ async function refreshHotelPriceResponse(env, hotelID) {
       && !rowError
       && Number.isFinite(sourceNightly)
       && sourceNightly > 0
-      && !!current?.fetchedAt
-      && current.fetchedAt !== beforeFetchedAt;
+      && !!current?.fetchedAt;
 
     if (!persistedFreshSnapshot) {
       const code = rowError || 'HOTEL_PRICE_REFRESH_NOT_CONFIRMED';

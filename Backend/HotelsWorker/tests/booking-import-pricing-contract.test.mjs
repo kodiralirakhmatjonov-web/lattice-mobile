@@ -95,9 +95,9 @@ test('persisted complete pricing snapshot can be edited even if an older booking
   const start = worker.indexOf('async function generatorPricingReportForBooking');
   const end = worker.indexOf('function normalizeSecurityName', start);
   const implementation = worker.slice(start, end);
-  assert.match(implementation, /Array\.isArray\(item\?\.components\)/);
-  assert.match(implementation, /item\?\.context/);
-  assert.match(implementation, /item\?\.selectedPricingInputs/);
+  assert.match(implementation, /Array\.isArray\(persistedPricing\?\.components\)/);
+  assert.match(implementation, /persistedPricing\?\.context/);
+  assert.match(implementation, /persistedPricing\?\.selectedPricingInputs/);
   assert.match(implementation, /quoteId: cleanText\(directPricing\.quoteId, 180\) \|\| `booking-\$\{bookingID\}`/);
   assert.match(worker, /pricingReport: reportWithPricingOverride\(await generatorPricingReportForBooking\(env, bookingID, pricingReportSource\)/);
 });
