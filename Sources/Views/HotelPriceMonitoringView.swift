@@ -23,12 +23,18 @@ struct HotelPriceMonitoringView: View {
     @State private var applying = false
     @State private var notice: String?
     @State private var errorMessage: String?
+    @State private var scrollToTopRequest = 0
     @FocusState private var jsonEditorFocused: Bool
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
-                introCard
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    Color.clear
+                        .frame(height: 0)
+                        .id("hotel-sync-top")
+
+                    introCard
 
                 Text("Ссылки и JSON для ChatGPT")
                     .font(.title2.bold())
@@ -80,23 +86,29 @@ struct HotelPriceMonitoringView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
+                }
+                .padding(.vertical, 14)
             }
-            .padding(.vertical, 14)
-        }
-        .contentMargins(.horizontal, 18, for: .scrollContent)
-        .scrollIndicators(.hidden)
-        .scrollDismissesKeyboard(.interactively)
-        .background(BusinessDesign.background)
-        .navigationTitle("Hotel Sync")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Готово") { jsonEditorFocused = false }
-                    .fontWeight(.semibold)
+            .contentMargins(.horizontal, 18, for: .scrollContent)
+            .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .background(BusinessDesign.background)
+            .onChange(of: scrollToTopRequest) { _ in
+                withAnimation(.easeOut(duration: 0.24)) {
+                    proxy.scrollTo("hotel-sync-top", anchor: .top)
+                }
             }
+            .navigationTitle("Hotel Sync")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Готово") { jsonEditorFocused = false }
+                        .fontWeight(.semibold)
+                }
+            }
+            .task { await loadSyncState() }
         }
-        .task { await loadSyncState() }
     }
 
     private var introCard: some View {
@@ -698,6 +710,13 @@ struct HotelPriceMonitoringView: View {
             preview = nil
             importedDocument = nil
             pastedJSON = ""
+
+            // The result list can be much taller than the base Hotel Sync screen.
+            // Once it is removed, SwiftUI may preserve the old deep scroll offset,
+            // leaving the user on an apparently blank white screen. Explicitly
+            // return to the top after a successful apply.
+            await Task.yield()
+            scrollToTopRequest &+= 1
         } catch {
             errorMessage = error.localizedDescription
         }

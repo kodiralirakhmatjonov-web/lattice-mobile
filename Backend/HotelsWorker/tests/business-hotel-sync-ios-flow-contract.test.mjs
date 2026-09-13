@@ -63,3 +63,18 @@ test('Hotel Sync JSON editor can dismiss the keyboard without leaving the screen
   assert.match(source, /scrollDismissesKeyboard\(\.interactively\)/);
   assert.match(source, /Label\("Скрыть клавиатуру", systemImage: "keyboard\.chevron\.compact\.down"\)/);
 });
+
+test('Hotel Sync returns to the top after applying prices so content shrink cannot leave a blank screen', () => {
+  assert.match(source, /ScrollViewReader \{ proxy in/);
+  assert.match(source, /\.id\("hotel-sync-top"\)/);
+  assert.match(source, /@State private var scrollToTopRequest = 0/);
+  assert.match(source, /proxy\.scrollTo\("hotel-sync-top", anchor: \.top\)/);
+
+  const applyStart = source.indexOf('private func applySelected() async');
+  assert.notEqual(applyStart, -1, 'applySelected must exist');
+  const applyBody = source.slice(applyStart, source.indexOf('\n    private func hotelsForCity', applyStart));
+  const clearPreview = applyBody.indexOf('preview = nil');
+  const requestScroll = applyBody.indexOf('scrollToTopRequest &+= 1');
+  assert.ok(clearPreview >= 0, 'successful apply must clear preview');
+  assert.ok(requestScroll > clearPreview, 'scroll reset must happen after the tall preview is removed');
+});
