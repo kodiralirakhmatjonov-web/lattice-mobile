@@ -58,7 +58,7 @@ function fixture() {
 
   const fn = new Function(
     'WorkflowEntrypoint', 'HOTEL_PRICE_TTL_MS', 'HOTEL_PRICE_RETRY_MS',
-    `${source}\nreturn { rotateBusinessHotelSyncAccess, saveBusinessHotelSyncSnapshot, publicBusinessHotelSyncFeed, businessHotelSyncStatus, applyBusinessHotelSyncUpdates };`
+    `${source}\nreturn { rotateBusinessHotelSyncAccess, saveBusinessHotelSyncSnapshot, publicBusinessHotelSyncFeed, businessHotelSyncBody, businessHotelSyncStatus, applyBusinessHotelSyncUpdates };`
   );
   const api = fn(class {}, HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS);
   return { db, env: { HOTELS_DB: bindingFor(db) }, api, sourceURL };
@@ -114,6 +114,12 @@ test('durable hotel sync round-trip matches Flight Sync delivery and safely appl
   assert.equal(publicResponse.headers.get('cache-control'), 'no-store, max-age=0');
   const feed = JSON.parse(await publicResponse.text());
   assert.equal(feed.source, 'iumrah_business_live_app_state');
+
+  const adminBodyResponse = await f.api.businessHotelSyncBody(f.env, user, 'Makkah');
+  assert.equal(adminBodyResponse.status, 200);
+  const adminFeed = JSON.parse(await adminBodyResponse.text());
+  assert.equal(adminFeed.snapshot_id, saved.snapshotID);
+  assert.deepEqual(adminFeed.hotels, feed.hotels);
   assert.equal(feed.snapshot_id, saved.snapshotID);
   assert.equal(feed.check_in, '2026-10-01');
   assert.equal(feed.hotels.length, 1);
@@ -222,4 +228,46 @@ test('hotel sync rejects only the hotel whose live old price already changed', a
   assert.equal(response.appliedCount, 0);
   assert.equal(response.rejected[0].error, 'HOTEL_SYNC_PRICE_ALREADY_CHANGED');
   assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 180);
+});
+
+test('hotel sync keeps hotels without a monitorable provider source instead of failing the whole city snapshot', async () => {
+  const f = fixture();
+  const user = { login: 'owner' };
+  await f.api.rotateBusinessHotelSyncAccess(f.env, user, 'Makkah');
+
+  const savedResponse = await f.api.saveBusinessHotelSyncSnapshot(jsonRequest({
+    version: 2,
+    city: 'Makkah',
+    generated_at: '2026-09-13T09:00:00Z',
+    check_in: '2026-10-03',
+    check_out: '2026-10-04',
+    rooms: 1,
+    adults: 2,
+    children: 0,
+    currency: 'USD',
+    hotels: [
+      {
+        hotel_id: 'h1', hotel_name: 'Address Jabal Omar Makkah', city: 'Makkah', stars: 5,
+        current_nightly_usd: 172.8, currency: 'USD', catalog_status: 'published', price_status: 'fresh',
+        is_manual_override: false, provider: 'Expedia', source_url: f.sourceURL
+      },
+      {
+        hotel_id: 'h2', hotel_name: 'Manual Hotel Without Provider Link', city: 'Makkah', stars: 3,
+        current_nightly_usd: 45, currency: 'USD', catalog_status: 'published', price_status: 'fresh',
+        is_manual_override: true, provider: null, source_url: null
+      }
+    ]
+  }), f.env, user, 'Makkah');
+  assert.equal(savedResponse.status, 200);
+  const saved = await savedResponse.json();
+  assert.equal(saved.hotelCount, 2);
+
+  const bodyResponse = await f.api.businessHotelSyncBody(f.env, user, 'Makkah');
+  const feed = JSON.parse(await bodyResponse.text());
+  assert.equal(feed.hotel_count, 2);
+  const manual = feed.hotels.find(item => item.hotel_id === 'h2');
+  assert.equal(manual.provider, null);
+  assert.equal(manual.source_url, null);
+  assert.equal(manual.monitoring_url, null);
+  assert.equal(manual.monitoring_status, 'unverified_source');
 });

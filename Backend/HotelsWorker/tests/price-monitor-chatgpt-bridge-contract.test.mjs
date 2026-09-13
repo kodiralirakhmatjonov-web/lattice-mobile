@@ -47,7 +47,7 @@ test('Makkah and Madinah use separate durable secret links and the public body c
   assert.doesNotMatch(worker, /searchParams\.set\('endDate', checkOut\)/);
   assert.match(worker, /Never use a Google\/search-result price snippet as a verified price/);
 
-  const hotelFeedStart = worker.indexOf('async function publicBusinessHotelSyncFeed');
+  const hotelFeedStart = worker.indexOf('function businessHotelSyncFeedResponse');
   const hotelFeedEnd = worker.indexOf('function normalizedHotelSyncUpdateItem', hotelFeedStart);
   const hotelFeed = worker.slice(hotelFeedStart, hotelFeedEnd);
   assert.match(hotelFeed, /'content-type': 'text\/plain; charset=utf-8'/);
@@ -66,13 +66,17 @@ test('Makkah and Madinah use separate durable secret links and the public body c
   }
 });
 
-test('hotel sync keeps the same fresh-access snapshot contract while copying JSON directly for ChatGPT', () => {
-  assert.match(syncView, /let access = try await APIClient\.shared\.rotateHotelSyncAccess\(city: city\)/);
-  assert.match(syncView, /setHotelSyncAccessURL\(accessURL, city: city\)/);
+test('hotel sync keeps one durable public link while daily sync refreshes snapshot and admin JSON body', () => {
+  assert.match(syncView, /let existingURL = city == "Makkah" \? makkahURL : madinahURL/);
+  assert.match(syncView, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
+  assert.match(syncView, /rotateHotelSyncAccess\(city: city\)/);
+  assert.match(syncView, /setHotelSyncAccessURL\(freshURL, city: city\)/);
   assert.match(syncView, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
-  assert.match(syncView, /hotelSyncReadOnlyBody\(from: accessURL\)/);
+  assert.match(syncView, /hotelSyncBody\(city: city\)/);
+  assert.doesNotMatch(syncView, /hotelSyncReadOnlyBody\(from: accessURL\)/);
   assert.match(syncView, /UIPasteboard\.general\.string = jsonBody/);
-  assert.doesNotMatch(syncView, /let serverStatus = try\? await APIClient\.shared\.hotelSyncStatus/);
+  assert.match(worker, /parts\[2\] === 'body'/);
+  assert.match(worker, /businessHotelSyncBody\(env, user, city\)/);
 });
 
 test('ChatGPT result uses live per-hotel compare-and-set instead of a global snapshot lock', () => {

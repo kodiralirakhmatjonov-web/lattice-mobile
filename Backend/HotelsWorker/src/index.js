@@ -4,7 +4,7 @@ import { handleZiyaratAdmin, handleZiyaratCatalog } from './ziyarats.js';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS, normalizeImportedHotelPriceSnapshot, hotelPriceMoveNeedsConfirmation, hotelPriceCandidatesMatch, extractHotelPriceFromHTML, quoteContextFromProbeURL } from './hotel-price.js';
 
 const JSON_HEADERS = {
-  'content-type': 'application/json; charset=utf-8',
+  'content-type': 'text/plain; charset=utf-8',
   'cache-control': 'no-store'
 };
 
@@ -974,6 +974,7 @@ async function handleBusinessOperations(request, env, url, parts, user, business
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'POST') return rotateBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'DELETE') return revokeBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'snapshot' && request.method === 'POST') return saveBusinessHotelSyncSnapshot(request, env, user, city);
+    if (parts.length === 3 && parts[2] === 'body' && request.method === 'GET') return businessHotelSyncBody(env, user, city);
     return methodNotAllowed();
   }
 
@@ -1234,9 +1235,11 @@ function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
   const city = normalizedHotelSyncCity(value.city);
   if (!hotelID || !hotelName || city !== expectedCity) return null;
 
-  const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
-  const provider = normalizedHotelSyncProvider(value.provider, sourceURL);
-  if (!sourceURL || !provider || !hotelSyncPropertyIdentity(sourceURL, provider)) return null;
+  const candidateSourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
+  const candidateProvider = normalizedHotelSyncProvider(value.provider, candidateSourceURL);
+  const hasMonitorableProperty = Boolean(candidateSourceURL && candidateProvider && hotelSyncPropertyIdentity(candidateSourceURL, candidateProvider));
+  const sourceURL = hasMonitorableProperty ? candidateSourceURL : null;
+  const provider = hasMonitorableProperty ? candidateProvider : null;
 
   const rawPrice = value.current_nightly_usd ?? value.currentNightlyUSD;
   const price = rawPrice === null || rawPrice === undefined || rawPrice === '' ? null : Number(rawPrice);
@@ -1254,7 +1257,8 @@ function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
     is_manual_override: Boolean(value.is_manual_override ?? value.isManualOverride),
     provider,
     source_url: sourceURL,
-    monitoring_url: hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut),
+    monitoring_url: hasMonitorableProperty ? hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut) : null,
+    monitoring_status: hasMonitorableProperty ? 'ready' : 'unverified_source',
     last_price_fetched_at: cleanText(value.last_price_fetched_at || value.lastPriceFetchedAt, 80) || null
   };
 }
@@ -1395,41 +1399,30 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
   });
 }
 
-async function publicBusinessHotelSyncFeed(env, citySlug, token) {
-  const city = normalizedHotelSyncCity(citySlug);
-  const cleanToken = cleanText(token, 512);
-  if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  const tokenHash = await sha256Hex(cleanToken);
-  const row = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
-    FROM business_hotel_sync_feeds
-    WHERE token_hash=? AND city=? AND enabled=1
-    LIMIT 1
-  `).bind(tokenHash, city).first().catch(() => null);
-  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-
+function businessHotelSyncFeedPayload(row, city) {
   let snapshot = { version: BUSINESS_HOTEL_SYNC_VERSION, hotels: [] };
-  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
-  const payload = {
+  try { snapshot = JSON.parse(row?.snapshot_json || '{}'); } catch {}
+  return {
     ok: true,
     type: 'iumrah_business_hotel_prices',
     read_only: true,
     source: 'iumrah_business_live_app_state',
     version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
-    snapshot_id: row.snapshot_id || snapshot.snapshot_id || null,
-    updated_at: row.snapshot_updated_at || null,
+    snapshot_id: row?.snapshot_id || snapshot.snapshot_id || null,
+    updated_at: row?.snapshot_updated_at || null,
     city,
-    check_in: row.check_in || snapshot.check_in || null,
-    check_out: row.check_out || snapshot.check_out || null,
+    check_in: row?.check_in || snapshot.check_in || null,
+    check_out: row?.check_out || snapshot.check_out || null,
     rooms: 1,
     adults: 2,
     children: 0,
     currency: 'USD',
-    hotel_count: Number(row.hotel_count || 0),
+    hotel_count: Number(row?.hotel_count || 0),
     monitoring_rules: {
       primary_method: 'Open monitoring_url for each hotel first. It is the exact stored Expedia/Booking property with the preferred feed dates applied.',
       fallback_method: 'If monitoring_url cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
       exact_property_only: true,
+      source_policy: 'Hotels without an exact Expedia/Booking property remain in the feed with monitoring_status=unverified_source. Mark them unverified and never invent or substitute another property.',
       exact_dates_required: false,
       date_policy: 'Prefer the feed dates. If the provider does not expose them, a directly verified nearby stay date for the same property and occupancy is acceptable; keep the feed check_in/check_out in the JSON and mention the observed stay date in reason.',
       snapshot_policy: 'snapshot_id is audit/history only. A newer snapshot does not invalidate a result. Apply is protected per hotel by live hotel ID + provider/property + current old_nightly_usd compare-and-set.',
@@ -1442,10 +1435,10 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
     result_template: {
       schema: 'iumrah.hotel-price-update.v2',
       version: 2,
-      snapshot_id: row.snapshot_id || null,
+      snapshot_id: row?.snapshot_id || null,
       city,
-      check_in: row.check_in || null,
-      check_out: row.check_out || null,
+      check_in: row?.check_in || null,
+      check_out: row?.check_out || null,
       rooms: 1,
       adults: 2,
       currency: 'USD',
@@ -1462,8 +1455,8 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
         source_url: 'copy from feed',
         monitoring_url: 'copy from feed',
         checked_source_url: 'actual verified URL for the same provider/property; nearby dates are allowed, or null',
-        check_in: row.check_in || null,
-        check_out: row.check_out || null,
+        check_in: row?.check_in || null,
+        check_out: row?.check_out || null,
         rooms: 1,
         adults: 2,
         currency: 'USD',
@@ -1474,10 +1467,10 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
     },
     hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
   };
+}
 
-  // This is intentionally identical to the already-proven Flight Sync delivery
-  // contract: pretty-printed valid JSON served as plain UTF-8 text. No HTML,
-  // redirect, cache layer or Browser Rendering is involved.
+function businessHotelSyncFeedResponse(row, city) {
+  const payload = businessHotelSyncFeedPayload(row, city);
   return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
     status: 200,
     headers: {
@@ -1486,6 +1479,36 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
       'cache-control': 'no-store, max-age=0'
     }
   });
+}
+
+async function businessHotelSyncBody(env, user, cityValue) {
+  const owner = businessHotelSyncOwner(user);
+  const city = normalizedHotelSyncCity(cityValue);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    FROM business_hotel_sync_feeds
+    WHERE owner_login=? AND city=? AND enabled=1
+    LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+  if (!row || !row.snapshot_id) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_NOT_READY' }, 404);
+  return businessHotelSyncFeedResponse(row, city);
+}
+
+async function publicBusinessHotelSyncFeed(env, citySlug, token) {
+  const city = normalizedHotelSyncCity(citySlug);
+  const cleanToken = cleanText(token, 512);
+  if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+  const tokenHash = await sha256Hex(cleanToken);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    FROM business_hotel_sync_feeds
+    WHERE token_hash=? AND city=? AND enabled=1
+    LIMIT 1
+  `).bind(tokenHash, city).first().catch(() => null);
+  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+  return businessHotelSyncFeedResponse(row, city);
 }
 
 function normalizedHotelSyncUpdateItem(value) {

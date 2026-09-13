@@ -174,6 +174,11 @@ struct HotelPriceMonitoringView: View {
         symbol: String
     ) -> some View {
         let cityHotels = hotelsForCity(city)
+        let selectedCheckIn = Self.syncDateString(date.wrappedValue)
+        let syncIsCurrent = status?.enabled == true
+            && status?.snapshotID != nil
+            && status?.checkIn == selectedCheckIn
+            && status?.hotelCount == cityHotels.count
         return VStack(alignment: .leading, spacing: 15) {
             HStack(spacing: 12) {
                 ZStack {
@@ -190,9 +195,12 @@ struct HotelPriceMonitoringView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if let status, status.enabled {
+                if syncIsCurrent {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
+                } else if let status, status.enabled, status.snapshotID != nil {
+                    Image(systemName: "clock.badge.exclamationmark.fill")
+                        .foregroundStyle(.orange)
                 }
             }
 
@@ -241,12 +249,12 @@ struct HotelPriceMonitoringView: View {
             .buttonStyle(.plain)
             .disabled(syncingCity != nil || applying || previewing || cityHotels.isEmpty)
 
-            if url != nil || jsonBody != nil {
+            if url != nil || jsonBody != nil || status?.snapshotID != nil {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Hotel Sync готов")
+                        Image(systemName: syncIsCurrent ? "checkmark.circle.fill" : "clock.fill")
+                            .foregroundStyle(syncIsCurrent ? Color.green : Color.orange)
+                        Text(syncIsCurrent ? "Hotel Sync актуален" : "Предыдущая синхронизация")
                             .font(.caption.weight(.semibold))
                         Spacer()
                         if let updatedAt = status?.snapshotUpdatedAt {
@@ -254,6 +262,16 @@ struct HotelPriceMonitoringView: View {
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
+                    }
+
+                    if !syncIsCurrent, let status, status.snapshotID != nil {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "arrow.clockwise.circle")
+                            Text("Этот snapshot уже не соответствует выбранной дате или текущему списку отелей. Было: \(status.checkIn ?? "—") · \(status.hotelCount) отелей. Сейчас: \(selectedCheckIn) · \(cityHotels.count) отелей. Нажмите «Синхронизировать» перед отправкой ссылки в ChatGPT.")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
 
                     if let url {
@@ -279,6 +297,8 @@ struct HotelPriceMonitoringView: View {
                             .frame(height: 46)
                         }
                         .buttonStyle(.plain)
+                        .disabled(!syncIsCurrent)
+                        .opacity(syncIsCurrent ? 1 : 0.5)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                     }
 
@@ -300,14 +320,16 @@ struct HotelPriceMonitoringView: View {
                             .frame(height: 46)
                         }
                         .buttonStyle(.plain)
+                        .disabled(!syncIsCurrent)
+                        .opacity(syncIsCurrent ? 1 : 0.5)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                    } else {
+                    } else if syncIsCurrent {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "exclamationmark.circle")
-                            Text("Ссылка готова. JSON body пока не удалось загрузить в приложение — можно использовать ссылку или повторить синхронизацию.")
+                            Text("Snapshot сохранён, но резервный JSON не загрузился. Нажмите «Синхронизировать» ещё раз. Публичная ссылка при этом не будет заменена.")
                         }
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.orange)
                     }
 
                     HStack {
@@ -582,13 +604,13 @@ struct HotelPriceMonitoringView: View {
         makkahStatus = await makkah
         madinahStatus = await madinah
 
-        if let storedMakkahURL, makkahStatus?.enabled == true {
-            makkahJSON = try? await APIClient.shared.hotelSyncReadOnlyBody(from: storedMakkahURL)
+        if makkahStatus?.enabled == true, makkahStatus?.snapshotID != nil {
+            makkahJSON = try? await APIClient.shared.hotelSyncBody(city: "Makkah")
         } else {
             makkahJSON = nil
         }
-        if let storedMadinahURL, madinahStatus?.enabled == true {
-            madinahJSON = try? await APIClient.shared.hotelSyncReadOnlyBody(from: storedMadinahURL)
+        if madinahStatus?.enabled == true, madinahStatus?.snapshotID != nil {
+            madinahJSON = try? await APIClient.shared.hotelSyncBody(city: "Madinah")
         } else {
             madinahJSON = nil
         }
@@ -600,20 +622,39 @@ struct HotelPriceMonitoringView: View {
         notice = nil
         errorMessage = nil
         defer { syncingCity = nil }
+
+        let existingURL = city == "Makkah" ? makkahURL : madinahURL
+        let existingStatus = city == "Makkah" ? makkahStatus : madinahStatus
+        var accessURL = existingURL
+        var createdAccessForThisAttempt = false
+
         do {
-            // Same proven Flight Sync transport: rotate/create fresh read-only access,
-            // store the snapshot, then keep both representations available to the operator.
-            let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
-            guard let accessURL = URL(string: access.accessURL) else {
-                throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL")
+            // Hotel Sync now follows the proven Flight Sync model: the public link is
+            // created once and stays stable. Daily sync only replaces the snapshot behind
+            // that link. Rotating the token on every refresh could invalidate a perfectly
+            // good old link before the new snapshot was saved.
+            if existingStatus?.enabled != true || accessURL == nil {
+                let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
+                guard let freshURL = URL(string: access.accessURL) else {
+                    throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL")
+                }
+                try BusinessSessionVault.setHotelSyncAccessURL(freshURL, city: city)
+                accessURL = freshURL
+                createdAccessForThisAttempt = true
             }
-            try BusinessSessionVault.setHotelSyncAccessURL(accessURL, city: city)
+
+            guard let accessURL else {
+                throw APIError.server("HOTEL_SYNC_ACCESS_URL_MISSING")
+            }
 
             let snapshot = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)
 
-            // URL is already valid once access + snapshot succeeded. JSON retrieval is
-            // best-effort so a transient body-fetch problem never hides the working link.
-            let jsonBody = try? await APIClient.shared.hotelSyncReadOnlyBody(from: accessURL)
+            // Fetch the backup JSON through the authenticated admin endpoint instead of
+            // calling our own public token URL from the iOS app. The public URL remains
+            // exclusively for ChatGPT/browser use and a CDN hiccup can no longer make the
+            // app claim that JSON failed to load.
+            let jsonBody = try await APIClient.shared.hotelSyncBody(city: city)
+
             if city == "Makkah" {
                 makkahURL = accessURL
                 makkahJSON = jsonBody
@@ -622,11 +663,7 @@ struct HotelPriceMonitoringView: View {
                 madinahJSON = jsonBody
             }
 
-            if jsonBody != nil {
-                notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка и JSON готовы — выберите, что скопировать."
-            } else {
-                notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка готова; JSON можно получить повторной синхронизацией."
-            }
+            notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка и JSON обновлены."
 
             if let status = try? await APIClient.shared.hotelSyncStatus(city: city) {
                 if city == "Makkah" {
@@ -636,6 +673,22 @@ struct HotelPriceMonitoringView: View {
                 }
             }
         } catch {
+            // If this was the very first connection and snapshot creation failed, do not
+            // leave a half-configured token in Keychain/backend. Existing stable links are
+            // never revoked by a failed daily refresh.
+            if createdAccessForThisAttempt {
+                _ = try? await APIClient.shared.revokeHotelSyncAccess(city: city)
+                BusinessSessionVault.clearHotelSyncAccessURL(city: city)
+                if city == "Makkah" {
+                    makkahURL = nil
+                    makkahJSON = nil
+                    makkahStatus = try? await APIClient.shared.hotelSyncStatus(city: city)
+                } else {
+                    madinahURL = nil
+                    madinahJSON = nil
+                    madinahStatus = try? await APIClient.shared.hotelSyncStatus(city: city)
+                }
+            }
             errorMessage = error.localizedDescription
         }
     }
@@ -776,6 +829,12 @@ struct HotelPriceMonitoringView: View {
 
     private static func usd(_ value: Double) -> String {
         "$" + String(format: value.rounded() == value ? "%.0f" : "%.2f", value)
+    }
+
+    private static func syncDateString(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        guard let year = parts.year, let month = parts.month, let day = parts.day else { return "" }
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     private static func minimumCheckInDate() -> Date {

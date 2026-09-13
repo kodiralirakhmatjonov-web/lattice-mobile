@@ -28,6 +28,23 @@ extension APIClient {
         return try decoder.decode(BusinessHotelSyncRevokeResponse.self, from: data)
     }
 
+    /// Reads the latest Hotel Sync JSON through the authenticated admin route.
+    /// This deliberately avoids re-fetching our own public token URL from inside the app,
+    /// so transient CDN/public-route failures cannot hide a valid snapshot from the operator.
+    func hotelSyncBody(city: String) async throws -> String {
+        guard let canonical = hotelSyncCanonicalCity(city) else { throw APIError.server("HOTEL_SYNC_INVALID_CITY") }
+        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/hotel-sync/\(canonical.lowercased())/body")
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        guard !data.isEmpty,
+              (try? JSONSerialization.jsonObject(with: data)) != nil,
+              let text = String(data: data, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw APIError.server("HOTEL_SYNC_INVALID_BODY")
+        }
+        return text
+    }
+
     /// Reads the exact public Hotel Sync payload that ChatGPT sees. The UI copies this body
     /// directly, so the operator no longer has to paste an intermediate read-only URL into
     /// ChatGPT. We still keep the token internally because the backend uses it to expose the

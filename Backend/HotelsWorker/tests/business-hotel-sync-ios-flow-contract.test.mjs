@@ -13,17 +13,22 @@ function syncBody() {
   return source.slice(start, end);
 }
 
-test('hotel sync keeps Flight Sync fresh-access -> snapshot flow and prepares both URL and JSON', () => {
+test('hotel sync reuses a stable read-only URL and only creates access when missing', () => {
   const body = syncBody();
-  const rotate = body.indexOf('rotateHotelSyncAccess(city: city)');
+  assert.match(body, /let existingURL = city == "Makkah" \? makkahURL : madinahURL/);
+  assert.match(body, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
+  assert.match(body, /rotateHotelSyncAccess\(city: city\)/);
+  assert.match(body, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
+  assert.doesNotMatch(body, /rotate\/create fresh read-only access/);
+});
+
+test('daily hotel sync saves the snapshot before refreshing backup JSON', () => {
+  const body = syncBody();
   const save = body.indexOf('saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)');
-  const readBody = body.indexOf('try? await APIClient.shared.hotelSyncReadOnlyBody(from: accessURL)');
-  assert.ok(rotate >= 0, 'must rotate/create a fresh access URL');
-  assert.ok(save > rotate, 'must save snapshot after receiving fresh access');
-  assert.ok(readBody > save, 'JSON body may be fetched only after snapshot save');
-  assert.match(body, /makkahURL = accessURL/);
-  assert.match(body, /makkahJSON = jsonBody/);
-  assert.doesNotMatch(body, /UIPasteboard\.general\.string/);
+  const readBody = body.indexOf('hotelSyncBody(city: city)');
+  assert.ok(save >= 0, 'snapshot save must exist');
+  assert.ok(readBody > save, 'admin JSON body must be read only after snapshot save');
+  assert.doesNotMatch(body, /hotelSyncReadOnlyBody\(from:/);
 });
 
 test('hotel sync UI exposes separate copy-link and copy-JSON controls for each city card', () => {
@@ -35,25 +40,20 @@ test('hotel sync UI exposes separate copy-link and copy-JSON controls for each c
   assert.match(source, /citySyncCard\(\s*city: "Madinah"/);
 });
 
-test('JSON body fetch is best-effort and cannot invalidate a working read-only URL', () => {
-  const body = syncBody();
-  assert.match(body, /let jsonBody = try\? await APIClient\.shared\.hotelSyncReadOnlyBody\(from: accessURL\)/);
-  const setURL = body.indexOf('makkahURL = accessURL');
-  const setJSON = body.indexOf('makkahJSON = jsonBody');
-  assert.ok(setURL >= 0 && setJSON > setURL);
+test('stale hotel sync state is visibly distinguished from the current catalog/date', () => {
+  assert.match(source, /let syncIsCurrent = status\?\.enabled == true/);
+  assert.match(source, /status\?\.checkIn == selectedCheckIn/);
+  assert.match(source, /status\?\.hotelCount == cityHotels\.count/);
+  assert.match(source, /Text\(syncIsCurrent \? "Hotel Sync актуален" : "Предыдущая синхронизация"\)/);
+  assert.match(source, /Нажмите «Синхронизировать» перед отправкой ссылки в ChatGPT/);
+  assert.match(source, /\.disabled\(!syncIsCurrent\)/);
 });
 
-test('hotel sync button never reuses a stale Keychain URL or gates rotation on server status', () => {
-  const body = syncBody();
-  assert.doesNotMatch(body, /BusinessSessionVault\.hotelSyncAccessURL\(city: city\)/);
-  assert.doesNotMatch(body, /serverStatus/);
-  assert.match(body, /setHotelSyncAccessURL\(accessURL, city: city\)/);
-});
-
-test('read-only Hotel Sync JSON is fetched without mutating the feed', () => {
-  assert.match(api, /func hotelSyncReadOnlyBody\(from accessURL: URL\)/);
-  assert.match(api, /URLSession\.shared\.data\(for: request\)/);
-  assert.match(api, /String\(data: data, encoding: \.utf8\)/);
+test('backup Hotel Sync JSON is fetched through authenticated admin route', () => {
+  assert.match(api, /func hotelSyncBody\(city: String\)/);
+  assert.match(api, /hotel-sync\/\\\(canonical\.lowercased\(\)\)\/body/);
+  assert.match(api, /let \(data, response\) = try await perform\(from: url\)/);
+  assert.doesNotMatch(syncBody(), /URLSession\.shared\.data/);
 });
 
 test('Hotel Sync JSON editor can dismiss the keyboard without leaving the screen', () => {
