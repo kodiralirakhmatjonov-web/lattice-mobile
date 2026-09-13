@@ -103,14 +103,9 @@ extension APIClient {
             throw APIError.server("HOTEL_SYNC_INVALID_UPDATE_DATE")
         }
 
-        let status = try await hotelSyncStatus(city: expectedCity)
-        guard status.enabled,
-              status.snapshotID == document.snapshotID,
-              status.checkIn == document.checkIn,
-              status.checkOut == document.checkOut else {
-            throw APIError.server("HOTEL_SYNC_SNAPSHOT_CHANGED")
-        }
-
+        // Snapshot is an audit marker only. Daily price updates are validated against the
+        // hotel that is live now (hotel id + provider/property + current old price), so a
+        // newer sync run does not invalidate a still-safe ChatGPT result.
         let currentByID = Dictionary(uniqueKeysWithValues: currentHotels.map { ($0.id, $0) })
         let items = document.hotels.map { update -> BusinessHotelPricePreviewItem in
             guard let hotel = currentByID[update.hotelID] else {
@@ -119,24 +114,23 @@ extension APIClient {
 
             let currentCity = hotelSyncCanonicalCity(hotel.city)
             let currentPrice = hotelSyncRoundedPrice(hotel.price?.nightlyUSD)
-            let currentSource = hotel.sourceURL ?? hotel.price?.sourceURL
-            let currentProvider = hotelSyncProvider(hotel.sourceProvider ?? hotel.price?.provider, sourceURL: currentSource)
-            let updateProvider = hotelSyncProvider(update.provider, sourceURL: update.sourceURL)
+            let currentSource = hotel.price?.sourceURL ?? hotel.sourceURL
+            let currentProvider = hotelSyncProvider(hotel.price?.provider ?? hotel.sourceProvider, sourceURL: currentSource)
+            let updateProvider = hotelSyncProvider(
+                update.provider,
+                sourceURL: update.checkedSourceURL ?? update.sourceURL ?? update.monitoringURL
+            )
             let statusValue = update.status.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
             if currentCity != expectedCity {
                 return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "CITY_MISMATCH", selectable: false)
             }
-            if !hotelSyncPricesMatch(currentPrice, update.oldNightlyUSD) {
-                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "PRICE_CHANGED_AFTER_SNAPSHOT", selectable: false)
-            }
-            if currentProvider == nil || updateProvider != currentProvider || !hotelSyncSameProperty(currentSource, update.sourceURL, provider: currentProvider) {
-                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "SOURCE_CHANGED_AFTER_SNAPSHOT", selectable: false)
-            }
             if update.checkIn != document.checkIn || update.checkOut != document.checkOut || update.rooms != 1 || update.adults != 2 || update.currency.uppercased() != "USD" {
                 return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "DATES_OR_OCCUPANCY_MISMATCH", selectable: false)
             }
 
+            // Non-actionable rows must stay readable even if their copied source URL is stale
+            // or omitted. Only a real "changed" row needs the strict live-property gate.
             if statusValue == "unchanged" {
                 return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "unchanged", issue: nil, selectable: false)
             }
@@ -152,13 +146,31 @@ extension APIClient {
             guard let next = hotelSyncRoundedPrice(update.newNightlyUSD), next >= 15, next <= 5000 else {
                 return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "INVALID_NEW_PRICE", selectable: false)
             }
+
+            // Compare-and-set: this is the only "stale result" conflict that should block a
+            // daily update. If the live price still equals old_nightly_usd, the result is safe
+            // to apply even when a newer Hotel Sync snapshot was created meanwhile.
+            if !hotelSyncPricesMatch(currentPrice, update.oldNightlyUSD) {
+                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "PRICE_ALREADY_CHANGED", selectable: false)
+            }
+            guard let currentProvider else {
+                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "CHECKED_SOURCE_NOT_VERIFIED", selectable: false)
+            }
+            guard updateProvider == currentProvider else {
+                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "CHECKED_SOURCE_NOT_VERIFIED", selectable: false)
+            }
+            if let copiedSource = update.sourceURL,
+               !hotelSyncSameProperty(currentSource, copiedSource, provider: currentProvider) {
+                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "PROPERTY_CHANGED", selectable: false)
+            }
             guard let checked = update.checkedSourceURL,
                   hotelSyncSameProperty(currentSource, checked, provider: currentProvider) else {
                 return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "CHECKED_SOURCE_NOT_VERIFIED", selectable: false)
             }
-            guard hotelSyncURLContainsDates(checked, provider: currentProvider, checkIn: document.checkIn, checkOut: document.checkOut) else {
-                return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "CHECKED_SOURCE_DATES_NOT_VERIFIED", selectable: false)
-            }
+
+            // The checked provider URL may use a nearby date. Hotel Sync keeps its requested
+            // dates for audit/history, but date query parameters no longer invalidate a price
+            // update. Property identity + live old-price CAS are the safety boundary.
             return hotelSyncPreviewItem(update, hotel: hotel, reviewStatus: "ready", issue: nil, selectable: true)
         }
 
@@ -245,11 +257,21 @@ extension APIClient {
         guard let raw = sourceURL, let url = URL(string: raw) else { return nil }
         let resolvedProvider = hotelSyncProvider(provider, sourceURL: raw)
         if resolvedProvider == "Booking" {
+            // Booking redirects the same property between localized filenames such as
+            // hotel-name.ru.html, hotel-name.en-gb.html and hotel-name.html. Prefer the
+            // normalized path identity so these redirects remain the same property.
+            let ns = url.path as NSString
+            let regex = try? NSRegularExpression(pattern: #"^/hotel/([^/]+)/([^/?#]+?)(?:\.html)?/?$"#, options: [.caseInsensitive])
+            if let match = regex?.firstMatch(in: url.path, range: NSRange(location: 0, length: ns.length)), match.numberOfRanges > 2 {
+                let country = ns.substring(with: match.range(at: 1)).lowercased()
+                var slug = ns.substring(with: match.range(at: 2)).lowercased()
+                slug = slug.replacingOccurrences(of: #"\.(?:[a-z]{2}(?:-[a-z]{2})?)$"#, with: "", options: .regularExpression)
+                return "booking:path:\(country)|\(slug)"
+            }
             if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                let id = components.queryItems?.first(where: { $0.name == "app_hotel_id" || $0.name == "hotel_id" })?.value,
                !id.isEmpty { return "booking:id:\(id)" }
-            let path = url.path.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            return path.contains("/hotel/") || path.hasPrefix("hotel/") ? "booking:path:\(path)" : nil
+            return nil
         }
         if resolvedProvider == "Expedia" {
             if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),

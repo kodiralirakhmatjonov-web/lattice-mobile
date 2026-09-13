@@ -202,7 +202,7 @@ struct HotelPriceMonitoringView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            Text("Дата фиксируется внутри snapshot. Цена из другой даты не пройдёт предпросмотр и не сможет обновить каталог.")
+            Text("Snapshot теперь хранится только для истории. Для быстрого обновления можно подтвердить цену на ближайшую дату: система проверит тот же hotel/property и что текущая цена в базе всё ещё совпадает с old_nightly_usd.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -397,7 +397,7 @@ struct HotelPriceMonitoringView: View {
             .foregroundStyle(.primary)
             .disabled(previewing || applying || pastedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-            Text("Обновление разрешается только для high-confidence результата с тем же snapshot, hotel ID, property, датами и текущей исходной ценой.")
+            Text("Snapshot не блокирует обновление. Для changed/high-confidence проверяются live hotel ID, provider/property и текущая old_nightly_usd. Если цена уже успела измениться, только этот отель получит конфликт.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -724,13 +724,13 @@ struct HotelPriceMonitoringView: View {
 
     private func issueText(_ issue: String) -> String {
         switch issue {
-        case "PRICE_CHANGED_AFTER_SNAPSHOT", "HOTEL_SYNC_PRICE_CHANGED_AFTER_SNAPSHOT": return "Цена изменилась после создания ссылки. Синхронизируйте город ещё раз."
-        case "SOURCE_CHANGED_AFTER_SNAPSHOT", "HOTEL_SYNC_SOURCE_CHANGED_AFTER_SNAPSHOT": return "Источник отеля изменился после snapshot."
-        case "DATES_OR_OCCUPANCY_MISMATCH", "HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH": return "Не совпадают дата, номер или число гостей."
-        case "CHECKED_SOURCE_DATES_NOT_VERIFIED", "HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH": return "В проверенной ссылке не подтверждены точные даты snapshot."
-        case "CHECKED_SOURCE_NOT_VERIFIED", "HOTEL_SYNC_SOURCE_NOT_VERIFIED": return "Не подтверждён точный источник отеля."
+        case "PRICE_ALREADY_CHANGED", "HOTEL_SYNC_PRICE_ALREADY_CHANGED", "PRICE_CHANGED_AFTER_SNAPSHOT", "HOTEL_SYNC_PRICE_CHANGED_AFTER_SNAPSHOT": return "Цена в базе уже изменилась после проверки. Обновите только этот отель свежим результатом."
+        case "PROPERTY_CHANGED", "SOURCE_CHANGED_AFTER_SNAPSHOT", "HOTEL_SYNC_SOURCE_CHANGED_AFTER_SNAPSHOT": return "Текущий provider/property отеля уже другой."
+        case "DATES_OR_OCCUPANCY_MISMATCH", "HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH": return "Внутри JSON не совпадают дата, номер или число гостей."
+        case "CHECKED_SOURCE_DATES_NOT_VERIFIED", "HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH": return "Старая проверка точных дат. В новой версии ближайшая дата разрешена."
+        case "CHECKED_SOURCE_NOT_VERIFIED", "HOTEL_SYNC_SOURCE_NOT_VERIFIED": return "Не подтверждён точный provider/property отеля."
         case "HOTEL_SYNC_PROPERTY_MISMATCH": return "Проверена другая гостиница/property."
-        case "HOTEL_SYNC_SNAPSHOT_CHANGED": return "Snapshot уже изменился. Повторите проверку по новой ссылке."
+        case "HOTEL_SYNC_SNAPSHOT_CHANGED": return "Старый сервер всё ещё требует snapshot. Задеплойте Hotel Sync Fast Update."
         case "LOW_CONFIDENCE": return "Недостаточная уверенность проверки."
         case "PRICE_NOT_VERIFIED": return "Цена не подтверждена источником."
         case "INVALID_NEW_PRICE", "HOTEL_SYNC_INVALID_NEW_PRICE": return "Новая цена некорректна."

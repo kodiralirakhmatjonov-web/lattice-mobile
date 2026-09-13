@@ -42,8 +42,9 @@ struct BusinessHotelSyncSnapshotHotel: Codable, Hashable, Identifiable {
         catalogStatus = hotel.status
         priceStatus = hotel.price?.status
         isManualOverride = hotel.price?.isManualOverride ?? false
-        provider = Self.normalizedProvider(hotel.sourceProvider ?? hotel.price?.provider, sourceURL: hotel.sourceURL ?? hotel.price?.sourceURL)
-        sourceURL = hotel.sourceURL ?? hotel.price?.sourceURL
+        let priceSourceURL = hotel.price?.sourceURL ?? hotel.sourceURL
+        provider = Self.normalizedProvider(hotel.price?.provider ?? hotel.sourceProvider, sourceURL: priceSourceURL)
+        sourceURL = priceSourceURL
         lastPriceFetchedAt = hotel.price?.fetchedAt
     }
 

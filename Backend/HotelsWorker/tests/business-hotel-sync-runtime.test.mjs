@@ -153,10 +153,10 @@ test('durable hotel sync round-trip matches Flight Sync delivery and safely appl
   assert.equal(row.nightly_price_usd, 155.2);
   assert.equal(row.quote_check_in, '2026-10-01');
   assert.equal(row.quote_check_out, '2026-10-02');
-  assert.equal(row.method, 'chatgpt-admin-exact-source');
+  assert.equal(row.method, 'chatgpt-admin-live-cas');
 });
 
-test('hotel sync refuses a price verified on the wrong dates', async () => {
+test('hotel sync accepts a verified nearby-date price for the same live property', async () => {
   const f = fixture();
   const user = { login: 'owner' };
   await f.api.rotateBusinessHotelSyncAccess(f.env, user, 'Makkah');
@@ -166,14 +166,60 @@ test('hotel sync refuses a price verified on the wrong dates', async () => {
     hotels: [{ hotel_id:'h1', hotel_name:'Address Jabal Omar Makkah', city:'Makkah', stars:5, current_nightly_usd:172.8, currency:'USD', catalog_status:'published', price_status:'fresh', is_manual_override:false, provider:'Expedia', source_url:f.sourceURL }]
   }), f.env, user, 'Makkah')).json();
 
-  const wrongURL = `${f.sourceURL}&chkin=2026-10-06&chkout=2026-10-07`;
+  const nearbyURL = `${f.sourceURL}&chkin=2026-10-06&chkout=2026-10-07`;
   const result = {
     schema:'iumrah.hotel-price-update.v2', version:2, snapshot_id:saved.snapshotID, city:'Makkah',
     check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', checked_at:'2026-09-11T18:10:00Z',
-    hotels:[{ hotel_id:'h1', status:'changed', old_nightly_usd:172.8, new_nightly_usd:150, provider:'Expedia', source_url:f.sourceURL, checked_source_url:wrongURL, check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', confidence:'high' }]
+    hotels:[{ hotel_id:'h1', status:'changed', old_nightly_usd:172.8, new_nightly_usd:150, provider:'Expedia', source_url:f.sourceURL, checked_source_url:nearbyURL, check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', confidence:'high' }]
+  };
+  const response = await (await f.api.applyBusinessHotelSyncUpdates(jsonRequest({result, hotel_ids:['h1']}), f.env, user)).json();
+  assert.equal(response.appliedCount, 1);
+  assert.equal(response.rejectedCount, 0);
+  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 150);
+});
+
+test('hotel sync does not invalidate an older result only because a newer snapshot exists', async () => {
+  const f = fixture();
+  const user = { login: 'owner' };
+  await f.api.rotateBusinessHotelSyncAccess(f.env, user, 'Makkah');
+  const payload = generatedAt => ({
+    version:2, city:'Makkah', generated_at:generatedAt,
+    check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, children:0, currency:'USD',
+    hotels:[{ hotel_id:'h1', hotel_name:'Address Jabal Omar Makkah', city:'Makkah', stars:5, current_nightly_usd:172.8, currency:'USD', catalog_status:'published', price_status:'fresh', is_manual_override:false, provider:'Expedia', source_url:f.sourceURL }]
+  });
+  const first = await (await f.api.saveBusinessHotelSyncSnapshot(jsonRequest(payload('2026-09-11T18:01:00Z')), f.env, user, 'Makkah')).json();
+  const second = await (await f.api.saveBusinessHotelSyncSnapshot(jsonRequest(payload('2026-09-12T18:01:00Z')), f.env, user, 'Makkah')).json();
+  assert.notEqual(first.snapshotID, second.snapshotID);
+
+  const result = {
+    schema:'iumrah.hotel-price-update.v2', version:2, snapshot_id:first.snapshotID, city:'Makkah',
+    check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', checked_at:'2026-09-12T18:10:00Z',
+    hotels:[{ hotel_id:'h1', status:'changed', old_nightly_usd:172.8, new_nightly_usd:160, provider:'Expedia', source_url:f.sourceURL, checked_source_url:`${f.sourceURL}&chkin=2026-10-01&chkout=2026-10-02`, check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', confidence:'high' }]
+  };
+  const response = await (await f.api.applyBusinessHotelSyncUpdates(jsonRequest({result, hotel_ids:['h1']}), f.env, user)).json();
+  assert.equal(response.appliedCount, 1);
+  assert.equal(response.rejectedCount, 0);
+  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 160);
+});
+
+test('hotel sync rejects only the hotel whose live old price already changed', async () => {
+  const f = fixture();
+  const user = { login: 'owner' };
+  await f.api.rotateBusinessHotelSyncAccess(f.env, user, 'Makkah');
+  const saved = await (await f.api.saveBusinessHotelSyncSnapshot(jsonRequest({
+    version:2, city:'Makkah', generated_at:'2026-09-11T18:01:00Z',
+    check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, children:0, currency:'USD',
+    hotels:[{ hotel_id:'h1', hotel_name:'Address Jabal Omar Makkah', city:'Makkah', stars:5, current_nightly_usd:172.8, currency:'USD', catalog_status:'published', price_status:'fresh', is_manual_override:false, provider:'Expedia', source_url:f.sourceURL }]
+  }), f.env, user, 'Makkah')).json();
+  f.db.prepare('UPDATE hotel_price_cache SET nightly_price_usd=180, quote_total_usd=180 WHERE hotel_id=?').run('h1');
+
+  const result = {
+    schema:'iumrah.hotel-price-update.v2', version:2, snapshot_id:saved.snapshotID, city:'Makkah',
+    check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', checked_at:'2026-09-11T18:10:00Z',
+    hotels:[{ hotel_id:'h1', status:'changed', old_nightly_usd:172.8, new_nightly_usd:150, provider:'Expedia', source_url:f.sourceURL, checked_source_url:`${f.sourceURL}&chkin=2026-10-01&chkout=2026-10-02`, check_in:'2026-10-01', check_out:'2026-10-02', rooms:1, adults:2, currency:'USD', confidence:'high' }]
   };
   const response = await (await f.api.applyBusinessHotelSyncUpdates(jsonRequest({result, hotel_ids:['h1']}), f.env, user)).json();
   assert.equal(response.appliedCount, 0);
-  assert.equal(response.rejected[0].error, 'HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH');
-  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 172.8);
+  assert.equal(response.rejected[0].error, 'HOTEL_SYNC_PRICE_ALREADY_CHANGED');
+  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 180);
 });

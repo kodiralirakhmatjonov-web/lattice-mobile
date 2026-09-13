@@ -75,20 +75,21 @@ test('hotel sync keeps the same fresh-access snapshot contract while copying JSO
   assert.doesNotMatch(syncView, /let serverStatus = try\? await APIClient\.shared\.hotelSyncStatus/);
 });
 
-test('ChatGPT result is pasted as v2 JSON, exact-date previewed, then explicitly batch-applied', () => {
+test('ChatGPT result uses live per-hotel compare-and-set instead of a global snapshot lock', () => {
   assert.match(models, /schemaName = "iumrah\.hotel-price-update\.v2"/);
   assert.match(syncView, /TextEditor\(text: \$pastedJSON\)/);
   assert.match(syncView, /Проверить JSON/);
   assert.match(syncView, /Обновить выбранные цены/);
-  assert.match(api, /CHECKED_SOURCE_DATES_NOT_VERIFIED/);
-  assert.match(api, /PRICE_CHANGED_AFTER_SNAPSHOT/);
+  assert.match(api, /PRICE_ALREADY_CHANGED/);
   assert.match(api, /hotelSyncSameProperty/);
-  assert.match(api, /hotelSyncURLContainsDates/);
+  assert.doesNotMatch(api, /status\.snapshotID == document\.snapshotID/);
+  assert.doesNotMatch(api, /hotelSyncURLContainsDates\(checked/);
   assert.match(api, /applyHotelChatGPTUpdate/);
-  assert.match(worker, /HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH/);
   assert.match(worker, /HOTEL_SYNC_PROPERTY_MISMATCH/);
-  assert.match(worker, /HOTEL_SYNC_PRICE_CHANGED_AFTER_SNAPSHOT/);
-  assert.match(worker, /chatgpt-admin-exact-source/);
+  assert.match(worker, /HOTEL_SYNC_PRICE_ALREADY_CHANGED/);
+  assert.doesNotMatch(worker, /feed\.snapshot_id !== snapshotID/);
+  assert.doesNotMatch(worker, /HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH/);
+  assert.match(worker, /chatgpt-admin-live-cas/);
 });
 
 test('hotel importer stays available and Flight Sync files remain separate from Hotel Sync', () => {

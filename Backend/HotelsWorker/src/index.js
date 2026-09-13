@@ -1162,6 +1162,8 @@ function hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut) {
     // provider URL so stale share/deep-link parameters cannot override snapshot dates.
     const url = new URL(`${source.origin}${source.pathname}`);
     if (resolved === 'Booking') {
+      const propertyID = source.searchParams.get('app_hotel_id') || source.searchParams.get('hotel_id');
+      if (propertyID && /^[0-9]{3,}$/.test(propertyID)) url.searchParams.set('app_hotel_id', propertyID);
       url.searchParams.set('checkin', checkIn);
       url.searchParams.set('checkout', checkOut);
       url.searchParams.set('group_adults', '2');
@@ -1194,10 +1196,10 @@ function hotelSyncPropertyIdentity(value, providerHint = null) {
       return propertyID ? `expedia:${propertyID}` : null;
     }
     if (provider === 'Booking') {
-      const explicit = url.searchParams.get('app_hotel_id') || url.searchParams.get('hotel_id');
-      if (explicit && /^[0-9]{3,}$/.test(explicit)) return `booking:${explicit}`;
       const pathKey = bookingHotelIdentityKey(url.toString());
-      return pathKey ? `booking:${pathKey}` : null;
+      if (pathKey) return `booking:path:${pathKey}`;
+      const explicit = url.searchParams.get('app_hotel_id') || url.searchParams.get('hotel_id');
+      return explicit && /^[0-9]{3,}$/.test(explicit) ? `booking:id:${explicit}` : null;
     }
   } catch {}
   return null;
@@ -1425,14 +1427,16 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
     currency: 'USD',
     hotel_count: Number(row.hotel_count || 0),
     monitoring_rules: {
-      primary_method: 'Open monitoring_url for each hotel. It is the exact stored Expedia/Booking property with the feed dates applied.',
+      primary_method: 'Open monitoring_url for each hotel first. It is the exact stored Expedia/Booking property with the preferred feed dates applied.',
       fallback_method: 'If monitoring_url cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
       exact_property_only: true,
-      exact_dates_required: true,
+      exact_dates_required: false,
+      date_policy: 'Prefer the feed dates. If the provider does not expose them, a directly verified nearby stay date for the same property and occupancy is acceptable; keep the feed check_in/check_out in the JSON and mention the observed stay date in reason.',
+      snapshot_policy: 'snapshot_id is audit/history only. A newer snapshot does not invalidate a result. Apply is protected per hotel by live hotel ID + provider/property + current old_nightly_usd compare-and-set.',
       occupancy: '1 room, 2 adults, 0 children, 1 night',
       unverified_when_not_provable: true,
       result_schema: 'iumrah.hotel-price-update.v2',
-      price_basis: 'Use the sellable nightly room rate shown for the exact stay. Do not mix another date, another property, crossed-out savings, or recommendation-card prices.',
+      price_basis: 'Use a directly sellable nightly room rate for the same hotel/property. Do not mix another property, crossed-out savings, or recommendation-card prices.',
       currency_rule: 'Prefer USD. If only SAR is directly shown, convert with 1 USD = 3.75 SAR and preserve the observed SAR amount in the result.'
     },
     result_template: {
@@ -1457,7 +1461,7 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
         provider: 'copy from feed',
         source_url: 'copy from feed',
         monitoring_url: 'copy from feed',
-        checked_source_url: 'actual verified provider URL containing exact dates, or null',
+        checked_source_url: 'actual verified URL for the same provider/property; nearby dates are allowed, or null',
         check_in: row.check_in || null,
         check_out: row.check_out || null,
         rooms: 1,
@@ -1491,16 +1495,19 @@ function normalizedHotelSyncUpdateItem(value) {
   if (!hotelID || !['changed', 'unchanged', 'unverified'].includes(status)) return null;
   const oldPrice = value.old_nightly_usd ?? value.oldNightlyUSD;
   const newPrice = value.new_nightly_usd ?? value.newNightlyUSD;
+  const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
+  const monitoringURL = safeHotelSyncSourceURL(value.monitoring_url || value.monitoringURL);
+  const checkedSourceURL = safeHotelSyncSourceURL(value.checked_source_url || value.checkedSourceURL);
   return {
     hotel_id: hotelID,
     hotel_name: safeHumanText(value.hotel_name || value.hotelName, 300) || null,
     status,
     old_nightly_usd: oldPrice == null ? null : Number(oldPrice),
     new_nightly_usd: newPrice == null ? null : Number(newPrice),
-    provider: normalizedHotelSyncProvider(value.provider, value.source_url || value.sourceURL),
-    source_url: safeHotelSyncSourceURL(value.source_url || value.sourceURL),
-    monitoring_url: safeHotelSyncSourceURL(value.monitoring_url || value.monitoringURL),
-    checked_source_url: safeHotelSyncSourceURL(value.checked_source_url || value.checkedSourceURL),
+    provider: normalizedHotelSyncProvider(value.provider, checkedSourceURL || sourceURL || monitoringURL),
+    source_url: sourceURL,
+    monitoring_url: monitoringURL,
+    checked_source_url: checkedSourceURL,
     check_in: validLocalDate(value.check_in || value.checkIn),
     check_out: validLocalDate(value.check_out || value.checkOut),
     rooms: Number(value.rooms),
@@ -1526,25 +1533,13 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
   const snapshotID = cleanText(document.snapshot_id || document.snapshotID, 260);
   const checkIn = validLocalDate(document.check_in || document.checkIn);
   const checkOut = validLocalDate(document.check_out || document.checkOut);
+  // snapshot_id is retained for audit/history only. It no longer acts as a global lock:
+  // every selected hotel is compared against the live catalog state immediately before write.
   if (!city || !snapshotID || !checkIn || !checkOut || checkOut <= checkIn) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_RESULT_CONTEXT' }, 400);
   if (Number(document.rooms) !== 1 || Number(document.adults) !== 2 || normalizedCurrency(document.currency) !== 'USD') {
     return json({ ok: false, error: 'HOTEL_SYNC_INVALID_RESULT_OCCUPANCY' }, 400);
   }
 
-  const feed = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, check_in, check_out
-    FROM business_hotel_sync_feeds
-    WHERE owner_login=? AND city=? AND enabled=1
-    LIMIT 1
-  `).bind(owner, city).first().catch(() => null);
-  if (!feed || feed.snapshot_id !== snapshotID || feed.check_in !== checkIn || feed.check_out !== checkOut) {
-    return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_CHANGED' }, 409);
-  }
-
-  let snapshot;
-  try { snapshot = JSON.parse(feed.snapshot_json || '{}'); } catch { snapshot = null; }
-  if (!snapshot || !Array.isArray(snapshot.hotels)) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_INVALID' }, 409);
-  const baselineByID = new Map(snapshot.hotels.map(item => [item.hotel_id, item]));
   const updates = Array.isArray(document.hotels) ? document.hotels.map(normalizedHotelSyncUpdateItem).filter(Boolean) : [];
   const updateByID = new Map(updates.map(item => [item.hotel_id, item]));
   const now = new Date().toISOString();
@@ -1553,38 +1548,49 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
   const rejected = [];
 
   for (const hotelID of selectedIDs) {
-    const baseline = baselineByID.get(hotelID);
     const update = updateByID.get(hotelID);
-    if (!baseline || !update) { rejected.push({ hotelID, error: 'HOTEL_SYNC_ITEM_NOT_FOUND' }); continue; }
+    if (!update) { rejected.push({ hotelID, error: 'HOTEL_SYNC_ITEM_NOT_FOUND' }); continue; }
     if (update.status !== 'changed' || update.confidence !== 'high') { rejected.push({ hotelID, error: 'HOTEL_SYNC_ITEM_NOT_VERIFIED' }); continue; }
+
     const nextPrice = Number(update.new_nightly_usd);
     const oldPrice = Number(update.old_nightly_usd);
     if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'HOTEL_SYNC_INVALID_NEW_PRICE' }); continue; }
-    if (!Number.isFinite(oldPrice) || !Number.isFinite(Number(baseline.current_nightly_usd)) || Math.abs(oldPrice - Number(baseline.current_nightly_usd)) >= 0.01) {
-      rejected.push({ hotelID, error: 'HOTEL_SYNC_BASELINE_MISMATCH' }); continue;
-    }
+    if (!Number.isFinite(oldPrice)) { rejected.push({ hotelID, error: 'HOTEL_SYNC_BASELINE_MISMATCH' }); continue; }
     if (update.check_in !== checkIn || update.check_out !== checkOut || update.rooms !== 1 || update.adults !== 2 || update.currency !== 'USD') {
       rejected.push({ hotelID, error: 'HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH' }); continue;
     }
-    if (!update.source_url || !update.checked_source_url || !update.provider) { rejected.push({ hotelID, error: 'HOTEL_SYNC_SOURCE_NOT_VERIFIED' }); continue; }
-    if (!hotelSyncSameProperty(baseline.source_url, update.source_url, update.provider) || !hotelSyncSameProperty(baseline.source_url, update.checked_source_url, update.provider)) {
-      rejected.push({ hotelID, error: 'HOTEL_SYNC_PROPERTY_MISMATCH' }); continue;
-    }
-    if (!hotelSyncURLContainsDates(update.checked_source_url, update.provider, checkIn, checkOut)) {
-      rejected.push({ hotelID, error: 'HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH' }); continue;
-    }
 
+    const hotel = await env.HOTELS_DB.prepare(`
+      SELECT id, city, status
+      FROM hotels
+      WHERE id=?
+      LIMIT 1
+    `).bind(hotelID).first().catch(() => null);
+    if (!hotel || hotel.status !== 'published') { rejected.push({ hotelID, error: 'HOTEL_NOT_FOUND' }); continue; }
+    if (normalizedHotelSyncCity(hotel.city) !== city) { rejected.push({ hotelID, error: 'CITY_MISMATCH' }); continue; }
+
+    // Compare-and-set against the live price, not against the latest snapshot. This makes
+    // daily/48-hour updates resilient to a new sync run while still preventing stale writes.
     const currentRow = await readHotelPriceRow(env, hotelID);
     const currentPrice = Number(hotelPriceFromRow(currentRow)?.nightlyUSD);
-    if (!Number.isFinite(currentPrice) || Math.abs(currentPrice - Number(baseline.current_nightly_usd)) >= 0.01) {
-      rejected.push({ hotelID, error: 'HOTEL_SYNC_PRICE_CHANGED_AFTER_SNAPSHOT' }); continue;
-    }
-    const source = await ensureHotelPriceSourceLock(env, hotelID);
-    const currentProvider = normalizedHotelSyncProvider(source?.provider, source?.source_url);
-    if (!source?.source_url || currentProvider !== update.provider || !hotelSyncSameProperty(source.source_url, baseline.source_url, currentProvider)) {
-      rejected.push({ hotelID, error: 'HOTEL_SYNC_SOURCE_CHANGED_AFTER_SNAPSHOT' }); continue;
+    if (!Number.isFinite(currentPrice) || Math.abs(currentPrice - oldPrice) >= 0.01) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_PRICE_ALREADY_CHANGED' }); continue;
     }
 
+    const source = await ensureHotelPriceSourceLock(env, hotelID);
+    const currentProvider = normalizedHotelSyncProvider(source?.provider, source?.source_url);
+    if (!source?.source_url || !currentProvider || !update.provider || currentProvider !== update.provider) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_SOURCE_NOT_VERIFIED' }); continue;
+    }
+    if (update.source_url && !hotelSyncSameProperty(source.source_url, update.source_url, currentProvider)) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_PROPERTY_MISMATCH' }); continue;
+    }
+    if (!update.checked_source_url || !hotelSyncSameProperty(source.source_url, update.checked_source_url, currentProvider)) {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_PROPERTY_MISMATCH' }); continue;
+    }
+
+    // checked_source_url may contain a nearby stay date. The requested sync dates remain in
+    // the audit fields, but provider query dates no longer block an otherwise safe update.
     await env.HOTELS_DB.prepare(`
       INSERT INTO hotel_price_cache (
         hotel_id, source_id, provider, source_url, resolved_url,
@@ -1593,7 +1599,7 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
         confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
         last_http_status, error, pending_nightly_price_usd, pending_seen_count,
         pending_first_seen_at, pending_last_seen_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'USD', 'nightly', ?, ?, ?, ?, 1, 2, 1, 0.99, 'chatgpt-admin-exact-source', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'USD', 'nightly', ?, ?, ?, ?, 1, 2, 1, 0.99, 'chatgpt-admin-live-cas', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
       ON CONFLICT(hotel_id) DO UPDATE SET
         source_id=excluded.source_id,
         provider=excluded.provider,
@@ -1610,7 +1616,7 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
         quote_adults=2,
         quote_rooms=1,
         confidence=0.99,
-        method='chatgpt-admin-exact-source',
+        method='chatgpt-admin-live-cas',
         status='fresh',
         fetched_at=excluded.fetched_at,
         expires_at=excluded.expires_at,
@@ -1646,7 +1652,6 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
 
   return json({ ok: true, city, snapshotID, applied, rejected, appliedCount: applied.length, rejectedCount: rejected.length });
 }
-
 
 const BUSINESS_FLIGHT_SYNC_VERSION = 1;
 const BUSINESS_FLIGHT_SYNC_MAX_FLIGHTS = 500;
@@ -5919,7 +5924,10 @@ function bookingHotelIdentityKey(value) {
     if (!(host === 'booking.com' || host.endsWith('.booking.com'))) return null;
     const match = url.pathname.match(/^\/hotel\/([^/]+)\/([^/?#]+?)(?:\.html)?\/?$/i);
     if (!match) return null;
-    return `${match[1]}|${match[2]}`.toLowerCase();
+    // Booking often redirects between localized filenames such as hotel-name.ru.html,
+    // hotel-name.en-gb.html and hotel-name.html. They are the same property path.
+    const slug = String(match[2] || '').replace(/\.(?:[a-z]{2}(?:-[a-z]{2})?)$/i, '');
+    return `${match[1]}|${slug}`.toLowerCase();
   } catch (_) {
     return null;
   }
