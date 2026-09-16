@@ -181,28 +181,10 @@ struct BusinessChatMessageRow: View {
     let groupStart: Bool
     let groupEnd: Bool
     let timestampText: String
-    let timestampReveal: CGFloat
 
     private var isMine: Bool { message.isStaff }
 
     var body: some View {
-        ZStack(alignment: .trailing) {
-            Text(timestampText)
-                .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .opacity(timestampReveal)
-                .offset(x: 2)
-                .accessibilityHidden(true)
-
-            messageRow
-                .offset(x: -44 * timestampReveal)
-        }
-        .frame(maxWidth: .infinity)
-        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.92), value: timestampReveal)
-    }
-
-    private var messageRow: some View {
         HStack(alignment: .bottom, spacing: 7) {
             if isMine { Spacer(minLength: 58) }
 
@@ -252,7 +234,8 @@ struct BusinessChatMessageRow: View {
         return bubbleContent
             .padding(.leading, leadingPadding)
             .padding(.trailing, trailingPadding)
-            .padding(.vertical, verticalPadding)
+            .padding(.top, verticalPadding)
+            .padding(.bottom, metadataBottomPadding)
             .background {
                 if isMine {
                     shape.fill(outgoingColor)
@@ -265,42 +248,60 @@ struct BusinessChatMessageRow: View {
                     shape.stroke(Color.primary.opacity(colorScheme == .dark ? 0.055 : 0.035), lineWidth: 0.55)
                 }
             }
-            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.08 : 0.025), radius: 1.5, y: 1)
+            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.08 : 0.020), radius: 1.25, y: 1)
             .contentShape(shape)
             .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
     private var bubbleContent: some View {
-        VStack(alignment: .leading, spacing: message.isImage ? 7 : 0) {
-            if message.isImage, let url = AppConfig.absoluteURL(message.attachmentURL) {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFit()
-                    } else if phase.error != nil {
-                        Color.primary.opacity(0.045)
-                            .overlay(Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.secondary))
+        // Keep the message content-sized. Timestamps live inside every bubble,
+        // so the conversation reads naturally without the old swipe-to-reveal gesture.
+        VStack(alignment: .trailing, spacing: 5) {
+            VStack(alignment: .leading, spacing: 6) {
+                if message.isImage, let url = AppConfig.absoluteURL(message.attachmentURL) {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFit()
+                        } else if phase.error != nil {
+                            Color.primary.opacity(0.045)
+                                .overlay(Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.secondary))
+                                .frame(width: 220, height: 150)
+                        } else {
+                            ZStack {
+                                Color.primary.opacity(0.035)
+                                ProgressView()
+                            }
                             .frame(width: 220, height: 150)
-                    } else {
-                        ZStack {
-                            Color.primary.opacity(0.035)
-                            ProgressView()
                         }
-                        .frame(width: 220, height: 150)
                     }
+                    .frame(maxWidth: 258)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
-                .frame(maxWidth: 258)
-                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+
+                let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    Text(message.body)
+                        .font(.system(size: 16.5, weight: .regular))
+                        .foregroundStyle(isMine ? Color.white : Color.primary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
             }
 
-            let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                Text(message.body)
-                    .font(.system(size: 17, weight: .regular))
-                    .foregroundStyle(isMine ? Color.white : Color.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
+            HStack(spacing: 4) {
+                Text(timestampText)
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+
+                if isMine {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .accessibilityLabel("Отправлено")
+                }
             }
+            .foregroundStyle(metadataColor)
         }
     }
 
@@ -312,18 +313,26 @@ struct BusinessChatMessageRow: View {
 
     private var leadingPadding: CGFloat {
         let imageOnly = message.isImage && message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if imageOnly { return groupEnd && !isMine ? 7 : 3 }
-        return groupEnd && !isMine ? 17 : 13
+        if imageOnly { return groupEnd && !isMine ? 7 : 4 }
+        return groupEnd && !isMine ? 16 : 12
     }
 
     private var trailingPadding: CGFloat {
         let imageOnly = message.isImage && message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if imageOnly { return groupEnd && isMine ? 7 : 3 }
-        return groupEnd && isMine ? 17 : 13
+        if imageOnly { return groupEnd && isMine ? 7 : 4 }
+        return groupEnd && isMine ? 16 : 12
     }
 
     private var verticalPadding: CGFloat {
-        message.isImage && message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 3 : 9
+        message.isImage && message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 4 : 8
+    }
+
+    private var metadataBottomPadding: CGFloat {
+        message.isImage && message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 5 : 6
+    }
+
+    private var metadataColor: Color {
+        isMine ? .white.opacity(0.72) : .secondary
     }
 
     private var outgoingColor: Color {

@@ -209,7 +209,7 @@ struct ChatConversationView: View {
     @State private var errorMessage: String?
     @State private var selectedPhoto: PhotosPickerItem?
     @FocusState private var composerFocused: Bool
-    @GestureState private var timestampReveal: CGFloat = 0
+    @State private var composerPanelHeight: CGFloat = 76
 
     private let bottomAnchorID = "business-chat-bottom"
 
@@ -228,7 +228,16 @@ struct ChatConversationView: View {
                     }
                     composer(proxy: proxy)
                 }
-                .padding(.bottom, composerFocused ? 8 : 18)
+                .padding(.bottom, composerFocused ? 8 : 12)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { composerPanelHeight = geometry.size.height }
+                            .onChange(of: geometry.size.height) { _, value in
+                                composerPanelHeight = value
+                            }
+                    }
+                }
                 .zIndex(10)
             }
             // Match the client Care chat: content runs through the physical
@@ -239,14 +248,20 @@ struct ChatConversationView: View {
                     NavigationLink {
                         BookingDetailView(bookingID: booking.id)
                     } label: {
-                        HStack(spacing: 7) {
-                            pilgrimAvatar(size: 30)
-                            HStack(spacing: 3) {
-                                Text(businessPilgrimName(booking))
-                                    .font(.system(size: 12.5, weight: .semibold))
+                        HStack(spacing: 8) {
+                            pilgrimAvatar(size: 32)
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 3) {
+                                    Text(businessPilgrimName(booking))
+                                        .font(.system(size: 13.5, weight: .semibold))
+                                        .lineLimit(1)
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 7.5, weight: .bold))
+                                }
+                                Text("Паломник · \(booking.bookingDisplayNumber.map { "Бронь \($0)" } ?? "Бронь #----")")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundStyle(.secondary)
                                     .lineLimit(1)
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 7.5, weight: .bold))
                             }
                         }
                     }
@@ -329,8 +344,7 @@ struct ChatConversationView: View {
                             pilgrimName: businessPilgrimName(booking),
                             groupStart: isGroupStart(at: index),
                             groupEnd: isGroupEnd(at: index),
-                            timestampText: timeLabel(message.createdAt),
-                            timestampReveal: timestampReveal
+                            timestampText: timeLabel(message.createdAt)
                         )
                         .id(message.id)
                         .padding(.bottom, isGroupEnd(at: index) ? 8 : 2)
@@ -355,16 +369,7 @@ struct ChatConversationView: View {
         }
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.interactively)
-        .contentMargins(.bottom, errorMessage == nil ? 82 : 122, for: .scrollContent)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 12, coordinateSpace: .local)
-                .updating($timestampReveal) { value, state, _ in
-                    let dx = value.translation.width
-                    let dy = value.translation.height
-                    guard dx < 0, abs(dx) > abs(dy) * 1.2 else { return }
-                    state = min(1, max(0, -dx / 78))
-                }
-        )
+        .contentMargins(.bottom, max(88, composerPanelHeight + 10), for: .scrollContent)
     }
 
     private var bookingContext: some View {
@@ -434,7 +439,8 @@ struct ChatConversationView: View {
                         .focused($composerFocused)
                         .font(.system(size: 16.5))
                         .textFieldStyle(.plain)
-                        .lineLimit(1...5)
+                        .lineLimit(1...4)
+                        .frame(minHeight: 24, maxHeight: 82, alignment: .center)
                         .submitLabel(.send)
                         .tint(outgoingAccent)
                         .onSubmit {
@@ -442,7 +448,7 @@ struct ChatConversationView: View {
                             send()
                         }
                         .padding(.leading, 14)
-                        .padding(.vertical, 9)
+                        .padding(.vertical, 8)
 
                     if canSend || sending {
                         Button {
@@ -470,7 +476,7 @@ struct ChatConversationView: View {
                         .transition(.scale(scale: 0.76).combined(with: .opacity))
                     }
                 }
-                .frame(minHeight: 42)
+                .frame(minHeight: 44, maxHeight: 98, alignment: .bottom)
                 .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .onTapGesture { composerFocused = true }
                 .businessChatGlassSurface(
