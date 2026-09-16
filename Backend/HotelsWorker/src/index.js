@@ -971,9 +971,10 @@ async function handleBusinessOperations(request, env, url, parts, user, business
     const city = normalizedHotelSyncCity(parts[1]);
     if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
     if (parts.length === 2 && request.method === 'GET') return businessHotelSyncStatus(env, user, city);
-    if (parts.length === 3 && parts[2] === 'access' && request.method === 'POST') return rotateBusinessHotelSyncAccess(env, user, city);
+    if (parts.length === 3 && parts[2] === 'access' && request.method === 'POST') return ensureBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'access' && request.method === 'DELETE') return revokeBusinessHotelSyncAccess(env, user, city);
     if (parts.length === 3 && parts[2] === 'snapshot' && request.method === 'POST') return saveBusinessHotelSyncSnapshot(request, env, user, city);
+    if (parts.length === 3 && parts[2] === 'body' && request.method === 'GET') return businessHotelSyncBody(env, user, city);
     return methodNotAllowed();
   }
 
@@ -1236,7 +1237,7 @@ function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
 
   const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
   const provider = normalizedHotelSyncProvider(value.provider, sourceURL);
-  if (!sourceURL || !provider || !hotelSyncPropertyIdentity(sourceURL, provider)) return null;
+  const monitorable = Boolean(sourceURL && provider && hotelSyncPropertyIdentity(sourceURL, provider));
 
   const rawPrice = value.current_nightly_usd ?? value.currentNightlyUSD;
   const price = rawPrice === null || rawPrice === undefined || rawPrice === '' ? null : Number(rawPrice);
@@ -1252,9 +1253,10 @@ function normalizedHotelSyncItem(value, expectedCity, checkIn, checkOut) {
     catalog_status: cleanText(value.catalog_status || value.catalogStatus, 40) || 'published',
     price_status: cleanText(value.price_status || value.priceStatus, 40) || null,
     is_manual_override: Boolean(value.is_manual_override ?? value.isManualOverride),
-    provider,
-    source_url: sourceURL,
-    monitoring_url: hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut),
+    provider: provider || null,
+    source_url: sourceURL || null,
+    monitoring_url: monitorable ? hotelSyncMonitoringURL(sourceURL, provider, checkIn, checkOut) : null,
+    monitoring_status: monitorable ? 'ready' : 'unverified_source',
     last_price_fetched_at: cleanText(value.last_price_fetched_at || value.lastPriceFetchedAt, 80) || null
   };
 }
@@ -1265,16 +1267,21 @@ async function businessHotelSyncStatus(env, user, cityValue) {
   if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
   if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
   const row = await env.HOTELS_DB.prepare(`
-    SELECT enabled, snapshot_id, hotel_count, check_in, check_out, snapshot_updated_at, created_at, updated_at
+    SELECT token_hash, enabled, snapshot_id, hotel_count, check_in, check_out, snapshot_updated_at, created_at, updated_at
     FROM business_hotel_sync_feeds WHERE owner_login=? AND city=? LIMIT 1
   `).bind(owner, city).first().catch(() => null);
+  const enabled = Boolean(row && Number(row.enabled) === 1);
   return json({
     ok: true,
     city,
     configured: Boolean(row),
-    enabled: Boolean(row && Number(row.enabled) === 1),
+    enabled,
     readOnly: true,
     source: 'iumrah_business_live_app_state',
+    // token_hash is also a valid bearer token for the public reader. This lets every
+    // authenticated iumrah Business device recover the same permanent read-only URL
+    // without storing the original random token in plaintext or rotating it.
+    accessURL: enabled && row?.token_hash ? businessHotelSyncPublicURL(city, row.token_hash) : null,
     snapshotID: row?.snapshot_id || null,
     hotelCount: Number(row?.hotel_count || 0),
     checkIn: row?.check_in || null,
@@ -1285,32 +1292,83 @@ async function businessHotelSyncStatus(env, user, cityValue) {
   });
 }
 
-async function rotateBusinessHotelSyncAccess(env, user, cityValue) {
+async function ensureBusinessHotelSyncAccess(env, user, cityValue) {
   const owner = businessHotelSyncOwner(user);
   const city = normalizedHotelSyncCity(cityValue);
   if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
   if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+
+  const now = new Date().toISOString();
+  const existing = await env.HOTELS_DB.prepare(`
+    SELECT token_hash, enabled, created_at
+    FROM business_hotel_sync_feeds
+    WHERE owner_login=? AND city=?
+    LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+
+  if (existing?.token_hash) {
+    if (Number(existing.enabled) !== 1) {
+      await env.HOTELS_DB.prepare(`
+        UPDATE business_hotel_sync_feeds SET enabled=1, updated_at=? WHERE owner_login=? AND city=?
+      `).bind(now, owner, city).run();
+    }
+    return json({
+      ok: true,
+      city,
+      readOnly: true,
+      accessURL: businessHotelSyncPublicURL(city, existing.token_hash),
+      rotatedAt: null,
+      createdAt: existing.created_at || null,
+      reused: true,
+      unlimitedReads: true,
+      note: 'Permanent read-only URL. It can be opened repeatedly from any browser, device, ChatGPT account, or network until explicitly revoked.'
+    });
+  }
+
   const token = randomToken(32);
   const tokenHash = await sha256Hex(token);
-  const now = new Date().toISOString();
   await env.HOTELS_DB.prepare(`
     INSERT INTO business_hotel_sync_feeds (
       owner_login, city, token_hash, enabled, snapshot_json, hotel_count,
       snapshot_id, check_in, check_out, snapshot_updated_at, created_at, updated_at
     ) VALUES (?, ?, ?, 1, '{"version":2,"hotels":[]}', 0, NULL, NULL, NULL, NULL, ?, ?)
-    ON CONFLICT(owner_login, city) DO UPDATE SET
-      token_hash=excluded.token_hash,
-      enabled=1,
-      updated_at=excluded.updated_at
+    ON CONFLICT(owner_login, city) DO NOTHING
   `).bind(owner, city, tokenHash, now, now).run();
+
+  // Two devices can request access at the same moment. Re-read the winner so both devices
+  // receive the exact same permanent URL instead of one request failing or rotating access.
+  const persisted = await env.HOTELS_DB.prepare(`
+    SELECT token_hash, enabled, created_at
+    FROM business_hotel_sync_feeds
+    WHERE owner_login=? AND city=?
+    LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+  if (!persisted?.token_hash) return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_CREATE_FAILED' }, 500);
+  if (Number(persisted.enabled) !== 1) {
+    await env.HOTELS_DB.prepare(`
+      UPDATE business_hotel_sync_feeds SET enabled=1, updated_at=? WHERE owner_login=? AND city=?
+    `).bind(now, owner, city).run();
+  }
+
   return json({
     ok: true,
     city,
     readOnly: true,
-    accessURL: businessHotelSyncPublicURL(city, token),
-    rotatedAt: now,
-    note: 'This URL can only read the hotel snapshot uploaded by iumrah Business. It cannot edit prices or access staff data.'
+    // Return the stored hash as the canonical bearer token. The public reader accepts both
+    // this canonical form and legacy raw tokens, so every previously copied URL stays valid.
+    accessURL: businessHotelSyncPublicURL(city, persisted.token_hash),
+    rotatedAt: null,
+    createdAt: persisted.created_at || now,
+    reused: persisted.token_hash !== tokenHash,
+    unlimitedReads: true,
+    note: 'Permanent read-only URL. It can be opened repeatedly from any browser, device, ChatGPT account, or network until explicitly revoked.'
   });
+}
+
+// Backward-compatible internal alias for older tests/callers. The operation is now
+// idempotent and never rotates an existing bearer token.
+async function rotateBusinessHotelSyncAccess(env, user, cityValue) {
+  return ensureBusinessHotelSyncAccess(env, user, cityValue);
 }
 
 async function revokeBusinessHotelSyncAccess(env, user, cityValue) {
@@ -1395,19 +1453,38 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
   });
 }
 
+async function businessHotelSyncBody(env, user, cityValue) {
+  const owner = businessHotelSyncOwner(user);
+  const city = normalizedHotelSyncCity(cityValue);
+  if (!owner) return json({ ok: false, error: 'HOTEL_SYNC_OWNER_REQUIRED' }, 403);
+  if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
+
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    FROM business_hotel_sync_feeds
+    WHERE owner_login=? AND city=? AND enabled=1
+    LIMIT 1
+  `).bind(owner, city).first().catch(() => null);
+  if (!row) return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_NOT_ENABLED' }, 404);
+  return businessHotelSyncFeedResponse(row, city);
+}
+
 async function publicBusinessHotelSyncFeed(env, citySlug, token) {
   const city = normalizedHotelSyncCity(citySlug);
   const cleanToken = cleanText(token, 512);
   if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  const tokenHash = await sha256Hex(cleanToken);
+  const hashedToken = await sha256Hex(cleanToken);
   const row = await env.HOTELS_DB.prepare(`
     SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
     FROM business_hotel_sync_feeds
-    WHERE token_hash=? AND city=? AND enabled=1
+    WHERE (token_hash=? OR token_hash=?) AND city=? AND enabled=1
     LIMIT 1
-  `).bind(tokenHash, city).first().catch(() => null);
+  `).bind(cleanToken, hashedToken, city).first().catch(() => null);
   if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
+  return businessHotelSyncFeedResponse(row, city);
+}
 
+function businessHotelSyncFeedResponse(row, city) {
   let snapshot = { version: BUSINESS_HOTEL_SYNC_VERSION, hotels: [] };
   try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
   const payload = {
@@ -1475,9 +1552,6 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
     hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
   };
 
-  // This is intentionally identical to the already-proven Flight Sync delivery
-  // contract: pretty-printed valid JSON served as plain UTF-8 text. No HTML,
-  // redirect, cache layer or Browser Rendering is involved.
   return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
     status: 200,
     headers: {

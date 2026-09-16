@@ -38,7 +38,7 @@ test('Makkah and Madinah use separate durable secret links and the public body c
   assert.match(worker, /businessHotelSyncPublicURL\(city, token\)/);
   assert.match(worker, /hotel-sync\/\$\{hotelSyncCitySlug\(city\)\}\/\$\{encodeURIComponent\(token\)\}/);
   assert.match(worker, /publicBusinessHotelSyncFeed\(env, parts\[1\], parts\[2\]\)/);
-  assert.match(worker, /WHERE token_hash=\? AND city=\? AND enabled=1/);
+  assert.match(worker, /WHERE \(token_hash=\? OR token_hash=\?\) AND city=\? AND enabled=1/);
   assert.match(worker, /monitoring_url/);
   assert.match(worker, /url\.searchParams\.set\('checkin', checkIn\)/);
   assert.match(worker, /url\.searchParams\.set\('chkin', checkIn\)/);
@@ -69,8 +69,9 @@ test('Makkah and Madinah use separate durable secret links and the public body c
 test('hotel sync keeps one durable public link while daily sync refreshes snapshot and admin JSON body', () => {
   assert.match(syncView, /let existingURL = city == "Makkah" \? makkahURL : madinahURL/);
   assert.match(syncView, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
-  assert.match(syncView, /rotateHotelSyncAccess\(city: city\)/);
-  assert.match(syncView, /setHotelSyncAccessURL\(freshURL, city: city\)/);
+  assert.match(syncView, /ensureHotelSyncAccess\(city: city\)/);
+  assert.match(syncView, /setHotelSyncAccessURL\(stableURL, city: city\)/);
+  assert.match(syncView, /existingStatus\?\.accessURL/);
   assert.match(syncView, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
   assert.match(syncView, /hotelSyncBody\(city: city\)/);
   assert.doesNotMatch(syncView, /hotelSyncReadOnlyBody\(from: accessURL\)/);

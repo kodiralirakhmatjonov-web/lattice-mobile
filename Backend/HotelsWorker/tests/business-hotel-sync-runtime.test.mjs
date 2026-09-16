@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS } from '../src/hotel-price.js';
 
@@ -58,7 +59,7 @@ function fixture() {
 
   const fn = new Function(
     'WorkflowEntrypoint', 'HOTEL_PRICE_TTL_MS', 'HOTEL_PRICE_RETRY_MS',
-    `${source}\nreturn { rotateBusinessHotelSyncAccess, saveBusinessHotelSyncSnapshot, publicBusinessHotelSyncFeed, businessHotelSyncBody, businessHotelSyncStatus, applyBusinessHotelSyncUpdates };`
+    `${source}\nreturn { ensureBusinessHotelSyncAccess, rotateBusinessHotelSyncAccess, saveBusinessHotelSyncSnapshot, publicBusinessHotelSyncFeed, businessHotelSyncBody, businessHotelSyncStatus, applyBusinessHotelSyncUpdates };`
   );
   const api = fn(class {}, HOTEL_PRICE_TTL_MS, HOTEL_PRICE_RETRY_MS);
   return { db, env: { HOTELS_DB: bindingFor(db) }, api, sourceURL };
@@ -68,6 +69,61 @@ const jsonRequest = value => new Request('https://iumrah.app/test', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify(value)
+});
+
+test('hotel sync access is permanent, recoverable from status, and reusable for unlimited reads', async () => {
+  const f = fixture();
+  const user = { login: 'Owner' };
+
+  const first = await (await f.api.ensureBusinessHotelSyncAccess(f.env, user, 'Makkah')).json();
+  const second = await (await f.api.ensureBusinessHotelSyncAccess(f.env, user, 'Makkah')).json();
+  assert.equal(first.accessURL, second.accessURL);
+  assert.equal(second.reused, true);
+  assert.equal(second.unlimitedReads, true);
+
+  const status = await (await f.api.businessHotelSyncStatus(f.env, user, 'Makkah')).json();
+  assert.equal(status.accessURL, first.accessURL);
+
+  const saved = await f.api.saveBusinessHotelSyncSnapshot(jsonRequest({
+    version: 2, city: 'Makkah', generated_at: '2026-09-16T07:00:00Z',
+    check_in: '2026-10-06', check_out: '2026-10-07', rooms: 1, adults: 2, children: 0, currency: 'USD',
+    hotels: [{ hotel_id:'h1', hotel_name:'Address Jabal Omar Makkah', city:'Makkah', stars:5, current_nightly_usd:172.8, currency:'USD', catalog_status:'published', price_status:'fresh', is_manual_override:false, provider:'Expedia', source_url:f.sourceURL }]
+  }), f.env, user, 'Makkah');
+  assert.equal(saved.status, 200);
+
+  const token = new URL(first.accessURL).pathname.split('/').at(-1);
+  for (let i = 0; i < 4; i += 1) {
+    const response = await f.api.publicBusinessHotelSyncFeed(f.env, 'makkah', token);
+    assert.equal(response.status, 200);
+    const feed = JSON.parse(await response.text());
+    assert.equal(feed.hotel_count, 1);
+  }
+});
+
+test('legacy raw hotel-sync links remain valid after permanent canonical URLs are introduced', async () => {
+  const f = fixture();
+  const rawToken = 'legacy-hotel-sync-token-that-stays-valid-2026';
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const now = '2026-09-16T07:00:00.000Z';
+  f.db.prepare(`
+    INSERT INTO business_hotel_sync_feeds(
+      owner_login, city, token_hash, enabled, snapshot_json, hotel_count,
+      snapshot_id, check_in, check_out, snapshot_updated_at, created_at, updated_at
+    ) VALUES(?, ?, ?, 1, ?, 1, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'owner', 'Makkah', tokenHash,
+    JSON.stringify({ version:2, snapshot_id:'legacy-snapshot', city:'Makkah', check_in:'2026-10-06', check_out:'2026-10-07', hotels:[] }),
+    'legacy-snapshot', '2026-10-06', '2026-10-07', now, now, now
+  );
+
+  const legacy = await f.api.publicBusinessHotelSyncFeed(f.env, 'makkah', rawToken);
+  assert.equal(legacy.status, 200);
+
+  const status = await (await f.api.businessHotelSyncStatus(f.env, { login:'Owner' }, 'Makkah')).json();
+  const canonicalToken = new URL(status.accessURL).pathname.split('/').at(-1);
+  assert.equal(canonicalToken, tokenHash);
+  const canonical = await f.api.publicBusinessHotelSyncFeed(f.env, 'makkah', canonicalToken);
+  assert.equal(canonical.status, 200);
 });
 
 test('durable hotel sync round-trip matches Flight Sync delivery and safely applies an exact-date update', async () => {

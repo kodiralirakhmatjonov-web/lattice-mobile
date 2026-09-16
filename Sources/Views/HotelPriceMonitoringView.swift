@@ -267,7 +267,7 @@ struct HotelPriceMonitoringView: View {
                     if !syncIsCurrent, let status, status.snapshotID != nil {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "arrow.clockwise.circle")
-                            Text("Этот snapshot уже не соответствует выбранной дате или текущему списку отелей. Было: \(status.checkIn ?? "—") · \(status.hotelCount) отелей. Сейчас: \(selectedCheckIn) · \(cityHotels.count) отелей. Нажмите «Синхронизировать» перед отправкой ссылки в ChatGPT.")
+                            Text("Этот snapshot уже не соответствует выбранной дате или текущему списку отелей. Было: \(status.checkIn ?? "—") · \(status.hotelCount) отелей. Сейчас: \(selectedCheckIn) · \(cityHotels.count) отелей. Постоянная ссылка остаётся доступной; нажмите «Синхронизировать», чтобы обновить данные перед проверкой цен.")
                         }
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -297,8 +297,6 @@ struct HotelPriceMonitoringView: View {
                             .frame(height: 46)
                         }
                         .buttonStyle(.plain)
-                        .disabled(!syncIsCurrent)
-                        .opacity(syncIsCurrent ? 1 : 0.5)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                     }
 
@@ -320,8 +318,6 @@ struct HotelPriceMonitoringView: View {
                             .frame(height: 46)
                         }
                         .buttonStyle(.plain)
-                        .disabled(!syncIsCurrent)
-                        .opacity(syncIsCurrent ? 1 : 0.5)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                     } else if syncIsCurrent {
                         HStack(alignment: .top, spacing: 8) {
@@ -596,13 +592,22 @@ struct HotelPriceMonitoringView: View {
     private func loadSyncState() async {
         let storedMakkahURL = BusinessSessionVault.hotelSyncAccessURL(city: "Makkah")
         let storedMadinahURL = BusinessSessionVault.hotelSyncAccessURL(city: "Madinah")
-        makkahURL = storedMakkahURL
-        madinahURL = storedMadinahURL
 
         async let makkah = try? APIClient.shared.hotelSyncStatus(city: "Makkah")
         async let madinah = try? APIClient.shared.hotelSyncStatus(city: "Madinah")
         makkahStatus = await makkah
         madinahStatus = await madinah
+
+        // The server is the source of truth for the permanent bearer URL. Keychain is only
+        // a compatibility fallback for an app talking to an older backend. This means a new
+        // phone/session can recover the same URL instead of silently rotating and killing it.
+        let serverMakkahURL = makkahStatus?.accessURL.flatMap { URL(string: $0) }
+        let serverMadinahURL = madinahStatus?.accessURL.flatMap { URL(string: $0) }
+        makkahURL = serverMakkahURL ?? storedMakkahURL
+        madinahURL = serverMadinahURL ?? storedMadinahURL
+
+        if let serverMakkahURL { try? BusinessSessionVault.setHotelSyncAccessURL(serverMakkahURL, city: "Makkah") }
+        if let serverMadinahURL { try? BusinessSessionVault.setHotelSyncAccessURL(serverMadinahURL, city: "Madinah") }
 
         if makkahStatus?.enabled == true, makkahStatus?.snapshotID != nil {
             makkahJSON = try? await APIClient.shared.hotelSyncBody(city: "Makkah")
@@ -625,22 +630,19 @@ struct HotelPriceMonitoringView: View {
 
         let existingURL = city == "Makkah" ? makkahURL : madinahURL
         let existingStatus = city == "Makkah" ? makkahStatus : madinahStatus
-        var accessURL = existingURL
-        var createdAccessForThisAttempt = false
+        var accessURL = existingStatus?.accessURL.flatMap { URL(string: $0) } ?? existingURL
 
         do {
-            // Hotel Sync now follows the proven Flight Sync model: the public link is
-            // created once and stays stable. Daily sync only replaces the snapshot behind
-            // that link. Rotating the token on every refresh could invalidate a perfectly
-            // good old link before the new snapshot was saved.
+            // Access is permanent and idempotent. POST /access only creates the bearer once
+            // (or re-enables the same bearer after an explicit revoke); it never rotates it.
+            // Therefore the same copied URL remains reusable across browsers/devices/accounts.
             if existingStatus?.enabled != true || accessURL == nil {
-                let access = try await APIClient.shared.rotateHotelSyncAccess(city: city)
-                guard let freshURL = URL(string: access.accessURL) else {
+                let access = try await APIClient.shared.ensureHotelSyncAccess(city: city)
+                guard let stableURL = URL(string: access.accessURL) else {
                     throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL")
                 }
-                try BusinessSessionVault.setHotelSyncAccessURL(freshURL, city: city)
-                accessURL = freshURL
-                createdAccessForThisAttempt = true
+                try BusinessSessionVault.setHotelSyncAccessURL(stableURL, city: city)
+                accessURL = stableURL
             }
 
             guard let accessURL else {
@@ -649,10 +651,7 @@ struct HotelPriceMonitoringView: View {
 
             let snapshot = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)
 
-            // Fetch the backup JSON through the authenticated admin endpoint instead of
-            // calling our own public token URL from the iOS app. The public URL remains
-            // exclusively for ChatGPT/browser use and a CDN hiccup can no longer make the
-            // app claim that JSON failed to load.
+            // Authenticated body and public bearer URL serialize the same snapshot.
             let jsonBody = try await APIClient.shared.hotelSyncBody(city: city)
 
             if city == "Makkah" {
@@ -663,32 +662,26 @@ struct HotelPriceMonitoringView: View {
                 madinahJSON = jsonBody
             }
 
-            notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Ссылка и JSON обновлены."
+            notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Постоянная ссылка и JSON обновлены."
 
             if let status = try? await APIClient.shared.hotelSyncStatus(city: city) {
                 if city == "Makkah" {
                     makkahStatus = status
+                    if let value = status.accessURL, let url = URL(string: value) {
+                        makkahURL = url
+                        try? BusinessSessionVault.setHotelSyncAccessURL(url, city: city)
+                    }
                 } else {
                     madinahStatus = status
+                    if let value = status.accessURL, let url = URL(string: value) {
+                        madinahURL = url
+                        try? BusinessSessionVault.setHotelSyncAccessURL(url, city: city)
+                    }
                 }
             }
         } catch {
-            // If this was the very first connection and snapshot creation failed, do not
-            // leave a half-configured token in Keychain/backend. Existing stable links are
-            // never revoked by a failed daily refresh.
-            if createdAccessForThisAttempt {
-                _ = try? await APIClient.shared.revokeHotelSyncAccess(city: city)
-                BusinessSessionVault.clearHotelSyncAccessURL(city: city)
-                if city == "Makkah" {
-                    makkahURL = nil
-                    makkahJSON = nil
-                    makkahStatus = try? await APIClient.shared.hotelSyncStatus(city: city)
-                } else {
-                    madinahURL = nil
-                    madinahJSON = nil
-                    madinahStatus = try? await APIClient.shared.hotelSyncStatus(city: city)
-                }
-            }
+            // A sync failure must never revoke or rotate an existing public link. The last
+            // good snapshot stays readable and can be opened any number of times.
             errorMessage = error.localizedDescription
         }
     }

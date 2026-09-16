@@ -550,16 +550,21 @@ struct HotelsView: View {
         }
 
         do {
-            async let healthRequest = APIClient.shared.hotelCloudHealth()
-            async let hotelsRequest = APIClient.shared.hotels()
-            let resolvedHealth = try await healthRequest
-            let resolvedHotels = try await hotelsRequest
+            // Catalogue availability is authoritative for this screen. Health contains
+            // additional bindings (for example BOOKINGS_DB) and must not blank a healthy
+            // HOTELS_DB catalogue when an unrelated dependency reports 503.
+            let resolvedHotels = try await APIClient.shared.hotels()
             guard !Task.isCancelled else { return }
-
             await MainActor.run {
-                cloudHealth = resolvedHealth
                 hotels = resolvedHotels
                 backendUnavailable = false
+            }
+
+            if let resolvedHealth = try? await APIClient.shared.hotelCloudHealth() {
+                guard !Task.isCancelled else { return }
+                await MainActor.run { cloudHealth = resolvedHealth }
+            } else {
+                await MainActor.run { cloudHealth = nil }
             }
 
             do {

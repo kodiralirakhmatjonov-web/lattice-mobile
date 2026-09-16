@@ -107,6 +107,7 @@ struct BusinessHotelSyncStatusResponse: Codable, Hashable {
     let enabled: Bool
     let readOnly: Bool
     let source: String
+    let accessURL: String?
     let snapshotID: String?
     let hotelCount: Int
     let checkIn: String?

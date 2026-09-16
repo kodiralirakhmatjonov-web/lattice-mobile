@@ -13,13 +13,15 @@ function syncBody() {
   return source.slice(start, end);
 }
 
-test('hotel sync reuses a stable read-only URL and only creates access when missing', () => {
+test('hotel sync uses the server-backed permanent URL and only ensures access when missing', () => {
   const body = syncBody();
   assert.match(body, /let existingURL = city == "Makkah" \? makkahURL : madinahURL/);
   assert.match(body, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
-  assert.match(body, /rotateHotelSyncAccess\(city: city\)/);
+  assert.match(body, /ensureHotelSyncAccess\(city: city\)/);
+  assert.match(body, /existingStatus\?\.accessURL/);
   assert.match(body, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
-  assert.doesNotMatch(body, /rotate\/create fresh read-only access/);
+  assert.doesNotMatch(body, /revokeHotelSyncAccess\(city: city\)/);
+  assert.match(body, /must never revoke or rotate an existing public link/);
 });
 
 test('daily hotel sync saves the snapshot before refreshing backup JSON', () => {
@@ -45,8 +47,8 @@ test('stale hotel sync state is visibly distinguished from the current catalog/d
   assert.match(source, /status\?\.checkIn == selectedCheckIn/);
   assert.match(source, /status\?\.hotelCount == cityHotels\.count/);
   assert.match(source, /Text\(syncIsCurrent \? "Hotel Sync актуален" : "Предыдущая синхронизация"\)/);
-  assert.match(source, /Нажмите «Синхронизировать» перед отправкой ссылки в ChatGPT/);
-  assert.match(source, /\.disabled\(!syncIsCurrent\)/);
+  assert.match(source, /Постоянная ссылка остаётся доступной/);
+  assert.doesNotMatch(source, /\.disabled\(!syncIsCurrent\)/);
 });
 
 test('backup Hotel Sync JSON is fetched through authenticated admin route', () => {

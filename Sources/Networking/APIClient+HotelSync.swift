@@ -10,7 +10,7 @@ extension APIClient {
         return try decoder.decode(BusinessHotelSyncStatusResponse.self, from: data)
     }
 
-    func rotateHotelSyncAccess(city: String) async throws -> BusinessHotelSyncAccessResponse {
+    func ensureHotelSyncAccess(city: String) async throws -> BusinessHotelSyncAccessResponse {
         guard let canonical = hotelSyncCanonicalCity(city) else { throw APIError.server("HOTEL_SYNC_INVALID_CITY") }
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/hotel-sync/\(canonical.lowercased())/access"))
         request.httpMethod = "POST"
