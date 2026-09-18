@@ -348,9 +348,13 @@ actor APIClient {
         try validate(response, data: body)
     }
 
-    func uploadTravelDocument(bookingID: String, kind: String, title: String, data: Data, contentType: String) async throws {
+    func uploadTravelDocument(bookingID: String, kind: String, title: String, bookingReference: String, data: Data, contentType: String) async throws {
         var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/bookings/\(bookingID)/documents"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "kind", value: kind), URLQueryItem(name: "title", value: title)]
+        components.queryItems = [
+            URLQueryItem(name: "kind", value: kind),
+            URLQueryItem(name: "title", value: title),
+            URLQueryItem(name: "reference", value: bookingReference)
+        ]
         var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")

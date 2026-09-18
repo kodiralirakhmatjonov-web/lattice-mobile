@@ -19,6 +19,8 @@ struct BookingCheckoutAdminCard: View {
     @State private var error: String?
     @State private var showDocumentImporter = false
     @State private var documentKind = "visa"
+    @State private var documentTitle = ""
+    @State private var documentReference = ""
     @State private var imagePreview: BusinessImagePreview?
     @State private var previewLoadingID: String?
     @State private var paymentTemplates: [BusinessPaymentTemplate] = []
@@ -162,7 +164,7 @@ struct BookingCheckoutAdminCard: View {
                                 .font(.subheadline.bold())
                                 .lineLimit(2)
 
-                            Text("Паломник \(traveler.position) · \(travelerTypeTitle(traveler.travelerType))")
+                            Text("\(relationshipTitle(traveler.relationship, position: traveler.position)) · \(travelerTypeTitle(traveler.travelerType))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -211,7 +213,7 @@ struct BookingCheckoutAdminCard: View {
                             travelerDetailRow("Гражданство", value: traveler.nationality)
                             travelerDetailRow("Паспорт", value: traveler.passportNumber)
                             travelerDetailRow("Действует до", value: traveler.passportExpiryDate)
-                            travelerDetailRow("Телефон", value: traveler.phone)
+                            travelerDetailRow("Страна выдачи", value: traveler.passportIssuingCountry)
                         }
                     }
                 }
@@ -239,6 +241,21 @@ struct BookingCheckoutAdminCard: View {
         case "child": return "ребёнок"
         case "infant": return "младенец"
         default: return "взрослый"
+        }
+    }
+
+    private func relationshipTitle(_ raw: String?, position: Int) -> String {
+        switch raw?.lowercased() {
+        case "self": return "сам клиент"
+        case "spouse": return "муж или жена"
+        case "mother": return "мама"
+        case "father": return "папа"
+        case "brother": return "брат"
+        case "sister": return "сестра"
+        case "child": return "ребёнок"
+        case "relative": return "родственник"
+        case "friend": return "друг"
+        default: return position == 1 ? "сам клиент" : "участник поездки"
         }
     }
 
@@ -360,7 +377,7 @@ struct BookingCheckoutAdminCard: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Документы поездки").font(.headline)
-                    Text("Виза, ваучер или другой PDF появится в Beta.")
+                    Text("Загрузите билет, ваучер, визу или страховку в PDF либо как изображение.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -373,6 +390,12 @@ struct BookingCheckoutAdminCard: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(document.title).font(.subheadline.bold())
                             Text(documentKindTitle(document.documentKind)).font(.caption).foregroundStyle(.secondary)
+                            if let reference = document.bookingReference, !reference.isEmpty {
+                                Text("Номер: \(reference)")
+                                    .font(.caption.monospaced().weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
+                            }
                         }
                         Spacer()
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
@@ -381,26 +404,66 @@ struct BookingCheckoutAdminCard: View {
             }
 
             if status == .bookingConfirmed || status == .readyToTravel {
-                Picker("Тип", selection: $documentKind) {
-                    Text("Виза").tag("visa")
-                    Text("Ваучер").tag("voucher")
-                    Text("Страховка").tag("insurance")
-                    Text("Билет").tag("ticket")
-                    Text("Другое").tag("other")
+                Menu {
+                    Picker("Тип документа", selection: $documentKind) {
+                        Text("Авиабилет").tag("ticket")
+                        Text("Ваучер отеля").tag("voucher")
+                        Text("Виза").tag("visa")
+                        Text("Страховка").tag("insurance")
+                        Text("Другое").tag("other")
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "doc.badge.plus")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Тип документа").font(.caption).foregroundStyle(.secondary)
+                            Text(documentKindTitle(documentKind)).font(.subheadline.bold())
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.up.chevron.down").font(.caption.bold()).foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 14)
+                    .frame(height: 56)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
-                .pickerStyle(.segmented)
+                .buttonStyle(.plain)
+
+                paymentField(title: "Название для клиента", text: $documentTitle, icon: "text.alignleft")
+                paymentField(title: documentReferenceTitle, text: $documentReference, icon: "number")
+
+                Label("Клиент увидит этот документ отдельной готовой карточкой. Номер бронирования можно скопировать одним нажатием.", systemImage: "info.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Button {
                     showDocumentImporter = true
                 } label: {
-                    Label("Добавить PDF / изображение", systemImage: "plus.circle.fill")
-                        .font(.subheadline.bold())
+                    HStack(spacing: 10) {
+                        if saving { ProgressView().tint(BusinessDesign.onPrimaryControl) }
+                        Image(systemName: "square.and.arrow.up.fill")
+                        Text(saving ? "Загружаем…" : "Добавить PDF или изображение")
+                    }
+                        .font(.headline)
+                        .foregroundStyle(BusinessDesign.onPrimaryControl)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 46)
-                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .frame(height: 54)
+                        .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .disabled(saving)
             }
+        }
+    }
+
+    private var documentReferenceTitle: String {
+        switch documentKind {
+        case "ticket": return "PNR / номер бронирования авиабилета"
+        case "voucher": return "Номер бронирования отеля"
+        case "visa": return "Номер визы (если уже известен)"
+        case "insurance": return "Номер полиса"
+        default: return "Номер документа (необязательно)"
         }
     }
 
@@ -497,8 +560,18 @@ struct BookingCheckoutAdminCard: View {
         do {
             let data = try Data(contentsOf: url)
             let contentType = url.pathExtension.lowercased() == "pdf" ? "application/pdf" : url.pathExtension.lowercased() == "png" ? "image/png" : "image/jpeg"
-            let title = documentKindTitle(documentKind)
-            try await APIClient.shared.uploadTravelDocument(bookingID: bookingID, kind: documentKind, title: title, data: data, contentType: contentType)
+            let customTitle = documentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = customTitle.isEmpty ? documentKindTitle(documentKind) : customTitle
+            try await APIClient.shared.uploadTravelDocument(
+                bookingID: bookingID,
+                kind: documentKind,
+                title: title,
+                bookingReference: documentReference.trimmingCharacters(in: .whitespacesAndNewlines),
+                data: data,
+                contentType: contentType
+            )
+            documentTitle = ""
+            documentReference = ""
             onReload()
         } catch { self.error = error.localizedDescription }
         saving = false

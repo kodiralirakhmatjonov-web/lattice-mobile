@@ -387,6 +387,7 @@ struct BusinessCheckoutTraveler: Codable, Identifiable, Hashable {
     var id: Int { position }
     let position: Int
     let travelerType: String
+    let relationship: String?
     let firstName: String
     let middleName: String
     let lastName: String
@@ -435,6 +436,7 @@ struct BusinessTravelDocument: Codable, Identifiable, Hashable {
     let contentType: String
     let createdAt: String
     let mediaURL: String
+    let bookingReference: String?
 }
 
 struct BookingESIMProfile: Codable, Identifiable, Hashable {

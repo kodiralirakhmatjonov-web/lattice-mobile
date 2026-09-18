@@ -67,12 +67,6 @@ struct BookingDetailView: View {
         .background(BusinessDesign.background)
         .navigationTitle("Бронирование")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                if saving { ProgressView().controlSize(.small) }
-                else { Button("Сохранить") { Task { await save() } }.fontWeight(.semibold).disabled(detail?.operation == nil) }
-            }
-        }
         .task {
             await load(showLoading: true)
             while !Task.isCancelled {
@@ -217,6 +211,14 @@ struct BookingDetailView: View {
 
             lifecycleTimerCard(detail.operation)
 
+            Label(statusGuidance, systemImage: "lightbulb.fill")
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.yellow.opacity(0.13), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+
             labeledField("Статус оплаты", text: $paymentStatus, placeholder: "Например: оплачено полностью")
             labeledField("Номер бронирования / подтверждения", text: $confirmationNumber, placeholder: "Confirmation number")
 
@@ -243,8 +245,47 @@ struct BookingDetailView: View {
                 }
                 .font(.subheadline.weight(.semibold))
             }
+
+            Button {
+                Task { await save() }
+            } label: {
+                HStack(spacing: 10) {
+                    if saving {
+                        ProgressView().tint(BusinessDesign.onPrimaryControl)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                    }
+                    Text(saving ? "Сохраняем изменения…" : "Сохранить статус и данные")
+                }
+                .font(.headline)
+                .foregroundStyle(BusinessDesign.onPrimaryControl)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(saving || detail.operation == nil)
         }
         .padding(18).businessCard(radius: 28)
+    }
+
+    private var statusGuidance: String {
+        switch status {
+        case .availabilityCheck:
+            return "Сейчас проверьте наличие отеля и авиабилетов. Клиент уже может заполнить данные всех паломников."
+        case .paymentPending:
+            return "Проверьте анкеты и чек оплаты. После подтверждения переведите бронь в следующий статус — клиент увидит это сразу."
+        case .bookingConfirmed:
+            return "Добавьте авиабилет, PNR, ваучер отеля и остальные документы по отдельности."
+        case .readyToTravel:
+            return "Убедитесь, что все обязательные документы выданы клиенту и номера бронирования указаны."
+        case .inTrip:
+            return "Поездка началась. Контролируйте изменения рейса, размещение и обращения клиента."
+        case .completed:
+            return "Поездка завершена. Проверьте, что история статусов и документы сохранены."
+        case .cancelled:
+            return "Бронь отменена. Укажите итоговый статус оплаты и внутреннюю причину для команды."
+        }
     }
 
     @ViewBuilder
