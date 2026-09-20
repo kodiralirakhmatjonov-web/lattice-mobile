@@ -19,17 +19,18 @@ test('hotel sync uses the server-backed permanent URL and only ensures access wh
   assert.match(body, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
   assert.match(body, /ensureHotelSyncAccess\(city: city\)/);
   assert.match(body, /existingStatus\?\.accessURL/);
-  assert.match(body, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
+  assert.match(body, /updateHotelSyncSettings\(city: city, checkIn: date\)/);
   assert.doesNotMatch(body, /revokeHotelSyncAccess\(city: city\)/);
   assert.match(body, /must never revoke or rotate an existing public link/);
 });
 
-test('daily hotel sync saves the snapshot before refreshing backup JSON', () => {
+test('hotel sync updates only feed settings before refreshing backup live JSON', () => {
   const body = syncBody();
-  const save = body.indexOf('saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)');
+  const settings = body.indexOf('updateHotelSyncSettings(city: city, checkIn: date)');
   const readBody = body.indexOf('hotelSyncBody(city: city)');
-  assert.ok(save >= 0, 'snapshot save must exist');
-  assert.ok(readBody > save, 'admin JSON body must be read only after snapshot save');
+  assert.ok(settings >= 0, 'settings update must exist');
+  assert.ok(readBody > settings, 'admin live JSON must be read only after date settings update');
+  assert.doesNotMatch(body, /saveHotelSyncSnapshot\(city: city/);
   assert.doesNotMatch(body, /hotelSyncReadOnlyBody\(from:/);
 });
 
@@ -42,13 +43,14 @@ test('hotel sync UI exposes separate copy-link and copy-JSON controls for each c
   assert.match(source, /citySyncCard\(\s*city: "Madinah"/);
 });
 
-test('stale hotel sync state is visibly distinguished from the current catalog/date', () => {
-  assert.match(source, /let syncIsCurrent = status\?\.enabled == true/);
-  assert.match(source, /status\?\.checkIn == selectedCheckIn/);
-  assert.match(source, /status\?\.hotelCount == cityHotels\.count/);
-  assert.match(source, /Text\(syncIsCurrent \? "Hotel Sync актуален" : "Предыдущая синхронизация"\)/);
-  assert.match(source, /Постоянная ссылка остаётся доступной/);
-  assert.doesNotMatch(source, /\.disabled\(!syncIsCurrent\)/);
+test('hotel sync UI treats the permanent URL as a live feed instead of a stale snapshot', () => {
+  assert.match(source, /let feedIsActive = status\?\.enabled == true && url != nil/);
+  assert.doesNotMatch(source, /status\?\.checkIn == selectedCheckIn/);
+  assert.doesNotMatch(source, /status\?\.hotelCount == cityHotels\.count/);
+  assert.match(source, /Постоянный Live Feed активен/);
+  assert.match(source, /Без срока действия и без лимита открытий/);
+  assert.match(source, /current_nightly_usd не кэшируются/);
+  assert.doesNotMatch(source, /Предыдущая синхронизация/);
 });
 
 test('backup Hotel Sync JSON is fetched through authenticated admin route', () => {

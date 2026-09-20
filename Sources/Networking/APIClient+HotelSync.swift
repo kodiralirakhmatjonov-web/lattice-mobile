@@ -67,6 +67,39 @@ extension APIClient {
         return text
     }
 
+    /// Updates only the monitoring date/occupancy configuration behind the permanent URL.
+    /// Hotel rows are intentionally NOT uploaded: every read of the public feed resolves the
+    /// current catalog, provider identity and nightly price directly from live D1.
+    func updateHotelSyncSettings(city: String, checkIn: Date) async throws -> BusinessHotelSyncSnapshotResponse {
+        guard let canonicalCity = hotelSyncCanonicalCity(city) else { throw APIError.server("HOTEL_SYNC_INVALID_CITY") }
+        let calendar = Calendar(identifier: .gregorian)
+        let normalizedCheckIn = calendar.startOfDay(for: checkIn)
+        guard let checkOut = calendar.date(byAdding: .day, value: 1, to: normalizedCheckIn) else {
+            throw APIError.server("HOTEL_SYNC_INVALID_DATE")
+        }
+
+        let payload = BusinessHotelSyncSettingsPayload(
+            version: 2,
+            city: canonicalCity,
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            checkIn: hotelSyncDateString(normalizedCheckIn),
+            checkOut: hotelSyncDateString(checkOut),
+            rooms: 1,
+            adults: 2,
+            children: 0,
+            currency: "USD"
+        )
+
+        var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/hotel-sync/\(canonicalCity.lowercased())/snapshot"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try encoder.encode(payload)
+        let (data, response) = try await perform(request)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessHotelSyncSnapshotResponse.self, from: data)
+    }
+
     func saveHotelSyncSnapshot(city: String, checkIn: Date, hotels: [HotelListItem]) async throws -> BusinessHotelSyncSnapshotResponse {
         guard let canonicalCity = hotelSyncCanonicalCity(city) else { throw APIError.server("HOTEL_SYNC_INVALID_CITY") }
         let calendar = Calendar(identifier: .gregorian)

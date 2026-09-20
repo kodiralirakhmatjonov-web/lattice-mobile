@@ -133,13 +133,13 @@ struct HotelPriceMonitoringView: View {
                 Spacer()
             }
 
-            Text("Синхронизация фиксирует текущий каталог и даты и готовит два способа передачи в ChatGPT: постоянную read-only ссылку и полный JSON body. Используйте ссылку по умолчанию, а JSON — как запасной вариант, если конкретный чат не сможет открыть URL.")
+            Text("Hotel Sync теперь работает как постоянный live-feed. Ссылка создаётся один раз, не истекает и при каждом открытии сама читает текущий каталог, источники и цены из базы. Отключается только вручную. JSON остаётся запасным способом передачи.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                stepPill("1", "Снимок")
+                stepPill("1", "Live feed")
                 stepPill("2", "Ссылка/JSON")
                 stepPill("3", "ChatGPT")
                 stepPill("4", "Применить")
@@ -175,10 +175,7 @@ struct HotelPriceMonitoringView: View {
     ) -> some View {
         let cityHotels = hotelsForCity(city)
         let selectedCheckIn = Self.syncDateString(date.wrappedValue)
-        let syncIsCurrent = status?.enabled == true
-            && status?.snapshotID != nil
-            && status?.checkIn == selectedCheckIn
-            && status?.hotelCount == cityHotels.count
+        let feedIsActive = status?.enabled == true && url != nil
         return VStack(alignment: .leading, spacing: 15) {
             HStack(spacing: 12) {
                 ZStack {
@@ -195,12 +192,9 @@ struct HotelPriceMonitoringView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if syncIsCurrent {
+                if feedIsActive {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                } else if let status, status.enabled, status.snapshotID != nil {
-                    Image(systemName: "clock.badge.exclamationmark.fill")
-                        .foregroundStyle(.orange)
                 }
             }
 
@@ -222,7 +216,7 @@ struct HotelPriceMonitoringView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            Text("Snapshot теперь хранится только для истории. Для быстрого обновления можно подтвердить цену на ближайшую дату: система проверит тот же hotel/property и что текущая цена в базе всё ещё совпадает с old_nightly_usd.")
+            Text("Дата ниже — только предпочтительная дата проверки провайдера. Она не влияет на срок жизни ссылки. Список отелей и current_nightly_usd не кэшируются в Hotel Sync: они заново читаются из live D1 при каждом открытии URL.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -236,7 +230,7 @@ struct HotelPriceMonitoringView: View {
                     } else {
                         Image(systemName: "arrow.triangle.2.circlepath")
                     }
-                    Text(syncingCity == city ? "Синхронизируем…" : "Синхронизировать")
+                    Text(syncingCity == city ? "Обновляем…" : "Обновить дату проверки")
                         .fontWeight(.semibold)
                     Spacer()
                     Image(systemName: "arrow.triangle.2.circlepath")
@@ -249,12 +243,12 @@ struct HotelPriceMonitoringView: View {
             .buttonStyle(.plain)
             .disabled(syncingCity != nil || applying || previewing || cityHotels.isEmpty)
 
-            if url != nil || jsonBody != nil || status?.snapshotID != nil {
+            if url != nil || jsonBody != nil || status?.enabled == true {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
-                        Image(systemName: syncIsCurrent ? "checkmark.circle.fill" : "clock.fill")
-                            .foregroundStyle(syncIsCurrent ? Color.green : Color.orange)
-                        Text(syncIsCurrent ? "Hotel Sync актуален" : "Предыдущая синхронизация")
+                        Image(systemName: feedIsActive ? "checkmark.circle.fill" : "link.badge.plus")
+                            .foregroundStyle(feedIsActive ? Color.green : Color.secondary)
+                        Text(feedIsActive ? "Постоянный Live Feed активен" : "Live Feed не активирован")
                             .font(.caption.weight(.semibold))
                         Spacer()
                         if let updatedAt = status?.snapshotUpdatedAt {
@@ -264,13 +258,13 @@ struct HotelPriceMonitoringView: View {
                         }
                     }
 
-                    if !syncIsCurrent, let status, status.snapshotID != nil {
+                    if feedIsActive {
                         HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "arrow.clockwise.circle")
-                            Text("Этот snapshot уже не соответствует выбранной дате или текущему списку отелей. Было: \(status.checkIn ?? "—") · \(status.hotelCount) отелей. Сейчас: \(selectedCheckIn) · \(cityHotels.count) отелей. Постоянная ссылка остаётся доступной; нажмите «Синхронизировать», чтобы обновить данные перед проверкой цен.")
+                            Image(systemName: "infinity")
+                            Text("Без срока действия и без лимита открытий. URL всегда остаётся тем же и каждый запрос получает текущие отели и текущие цены из базы. Предпочтительная дата мониторинга: \(status?.checkIn ?? selectedCheckIn).")
                         }
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     }
 
@@ -319,10 +313,10 @@ struct HotelPriceMonitoringView: View {
                         }
                         .buttonStyle(.plain)
                         .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                    } else if syncIsCurrent {
+                    } else if feedIsActive {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "exclamationmark.circle")
-                            Text("Snapshot сохранён, но резервный JSON не загрузился. Нажмите «Синхронизировать» ещё раз. Публичная ссылка при этом не будет заменена.")
+                            Text("Резервный JSON сейчас не загрузился, но постоянная live-ссылка продолжает работать и не меняется.")
                         }
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -609,12 +603,12 @@ struct HotelPriceMonitoringView: View {
         if let serverMakkahURL { try? BusinessSessionVault.setHotelSyncAccessURL(serverMakkahURL, city: "Makkah") }
         if let serverMadinahURL { try? BusinessSessionVault.setHotelSyncAccessURL(serverMadinahURL, city: "Madinah") }
 
-        if makkahStatus?.enabled == true, makkahStatus?.snapshotID != nil {
+        if makkahStatus?.enabled == true {
             makkahJSON = try? await APIClient.shared.hotelSyncBody(city: "Makkah")
         } else {
             makkahJSON = nil
         }
-        if madinahStatus?.enabled == true, madinahStatus?.snapshotID != nil {
+        if madinahStatus?.enabled == true {
             madinahJSON = try? await APIClient.shared.hotelSyncBody(city: "Madinah")
         } else {
             madinahJSON = nil
@@ -649,9 +643,9 @@ struct HotelPriceMonitoringView: View {
                 throw APIError.server("HOTEL_SYNC_ACCESS_URL_MISSING")
             }
 
-            let snapshot = try await APIClient.shared.saveHotelSyncSnapshot(city: city, checkIn: date, hotels: hotels)
+            let snapshot = try await APIClient.shared.updateHotelSyncSettings(city: city, checkIn: date)
 
-            // Authenticated body and public bearer URL serialize the same snapshot.
+            // Authenticated body and public bearer URL serialize the same live database feed.
             let jsonBody = try await APIClient.shared.hotelSyncBody(city: city)
 
             if city == "Makkah" {
@@ -662,7 +656,7 @@ struct HotelPriceMonitoringView: View {
                 madinahJSON = jsonBody
             }
 
-            notice = "\(city): \(snapshot.hotelCount) отелей на \(snapshot.checkIn). Постоянная ссылка и JSON обновлены."
+            notice = "\(city): live-feed обновлён · \(snapshot.hotelCount) отелей · дата проверки \(snapshot.checkIn). URL остался прежним."
 
             if let status = try? await APIClient.shared.hotelSyncStatus(city: city) {
                 if city == "Makkah" {
@@ -680,8 +674,8 @@ struct HotelPriceMonitoringView: View {
                 }
             }
         } catch {
-            // A sync failure must never revoke or rotate an existing public link. The last
-            // good snapshot stays readable and can be opened any number of times.
+            // A settings failure must never revoke or rotate an existing public link. The live
+            // URL remains readable and continues loading current D1 data.
             errorMessage = error.localizedDescription
         }
     }

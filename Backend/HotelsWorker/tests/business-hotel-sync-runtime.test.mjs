@@ -169,7 +169,7 @@ test('durable hotel sync round-trip matches Flight Sync delivery and safely appl
   assert.equal(publicResponse.headers.get('content-type'), 'text/plain; charset=utf-8');
   assert.equal(publicResponse.headers.get('cache-control'), 'no-store, max-age=0');
   const feed = JSON.parse(await publicResponse.text());
-  assert.equal(feed.source, 'iumrah_business_live_app_state');
+  assert.equal(feed.source, 'iumrah_business_live_database');
 
   const adminBodyResponse = await f.api.businessHotelSyncBody(f.env, user, 'Makkah');
   assert.equal(adminBodyResponse.status, 200);
@@ -286,10 +286,51 @@ test('hotel sync rejects only the hotel whose live old price already changed', a
   assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 180);
 });
 
+test('one permanent hotel-sync URL reflects live D1 price and catalog changes without a new snapshot or token', async () => {
+  const f = fixture();
+  const user = { login: 'owner' };
+  const access = await (await f.api.ensureBusinessHotelSyncAccess(f.env, user, 'Makkah')).json();
+  const token = new URL(access.accessURL).pathname.split('/').at(-1);
+
+  const saved = await (await f.api.saveBusinessHotelSyncSnapshot(jsonRequest({
+    version:2, city:'Makkah', generated_at:'2026-09-20T10:00:00Z',
+    check_in:'2026-10-10', check_out:'2026-10-11', rooms:1, adults:2, children:0, currency:'USD'
+  }), f.env, user, 'Makkah')).json();
+  assert.equal(saved.hotelCount, 1);
+
+  const first = JSON.parse(await (await f.api.publicBusinessHotelSyncFeed(f.env, 'makkah', token)).text());
+  assert.equal(first.hotels.length, 1);
+  assert.equal(first.hotels[0].current_nightly_usd, 172.8);
+  assert.equal(first.unlimited_reads, true);
+  assert.equal(first.expires_at, null);
+
+  f.db.prepare('UPDATE hotel_price_cache SET nightly_price_usd=199.25, quote_total_usd=199.25, updated_at=? WHERE hotel_id=?')
+    .run('2026-09-20T10:05:00Z','h1');
+  const now = '2026-09-20T10:05:00Z';
+  f.db.prepare(`INSERT INTO hotels(id,slug,name,city,stars,status,created_at,updated_at) VALUES(?,?,?,?,?,'published',?,?)`)
+    .run('h-live','live-added','Live Added Hotel','Makkah',4,now,now);
+  f.db.prepare(`INSERT INTO hotel_price_overrides(hotel_id,nightly_price_usd,updated_by,created_at,updated_at) VALUES(?,?,?,?,?)`)
+    .run('h-live',88,'owner',now,now);
+
+  const second = JSON.parse(await (await f.api.publicBusinessHotelSyncFeed(f.env, 'makkah', token)).text());
+  assert.equal(second.hotels.length, 2);
+  assert.equal(second.hotels.find(item => item.hotel_id === 'h1').current_nightly_usd, 199.25);
+  assert.equal(second.hotels.find(item => item.hotel_id === 'h-live').current_nightly_usd, 88);
+
+  const accessAgain = await (await f.api.ensureBusinessHotelSyncAccess(f.env, user, 'Makkah')).json();
+  assert.equal(accessAgain.accessURL, access.accessURL);
+});
+
 test('hotel sync keeps hotels without a monitorable provider source instead of failing the whole city snapshot', async () => {
   const f = fixture();
   const user = { login: 'owner' };
   await f.api.rotateBusinessHotelSyncAccess(f.env, user, 'Makkah');
+
+  const now = '2026-09-13T09:00:00.000Z';
+  f.db.prepare(`INSERT INTO hotels(id,slug,name,city,stars,status,created_at,updated_at) VALUES(?,?,?,?,?,'published',?,?)`)
+    .run('h2','manual-hotel','Manual Hotel Without Provider Link','Makkah',3,now,now);
+  f.db.prepare(`INSERT INTO hotel_price_overrides(hotel_id,nightly_price_usd,updated_by,created_at,updated_at) VALUES(?,?,?,?,?)`)
+    .run('h2',45,'owner',now,now);
 
   const savedResponse = await f.api.saveBusinessHotelSyncSnapshot(jsonRequest({
     version: 2,

@@ -1,15 +1,58 @@
 {
-  "patch": "iumrah-business-019-pricing-ignav-usage",
-  "description": "Restored editable generator cost report and shared Ignav monthly usage visibility.",
-  "deployment_order": ["apply_patch", "apply_d1_migration_0019", "deploy_hotels_worker", "build_testflight"],
+  "patch": "iumrah-business-hotel-sync-permanent-live-feed-v4",
+  "description": "Permanent Hotel Sync live-feed URLs: no TTL, no read limit, no automatic token rotation, no snapshot/cache-miss gate; each read resolves the current D1 hotel catalog and current nightly price. Access ends only on explicit manual revoke.",
+  "deployment_order": [
+    "apply_patch",
+    "deploy_hotels_worker",
+    "build_testflight"
+  ],
+  "notes": {
+    "d1_migration_required": false,
+    "existing_links_preserved": true,
+    "testflight_optional_for_backend_behavior": true,
+    "manual_revoke_remains_supported": true,
+    "snapshot_id_semantics": "audit/configuration metadata only; not a link-expiry or global apply lock"
+  },
   "files": [
-    {"path":"BUSINESS_PRICING_IGNAV_019_APPLIED.txt","sha256":"239f4ff9f43b4273aed8e0e3b5582859a0c457d9329a7df7272b0b2fdf809556","bytes":811},
-    {"path":"Backend/HotelsWorker/migrations/0019_ignav_api_usage.sql","sha256":"35df14cd7b43edf51452f8c0f6e1f240bc29b04258648ac6755dd113d012f484","bytes":209},
-    {"path":"Backend/HotelsWorker/src/index.js","sha256":"7bb9ef4e1f8297c8cdf9a7ae078176899545856089f18d001833d3ebddefe012","bytes":325142},
-    {"path":"Backend/HotelsWorker/wrangler.template.jsonc","sha256":"fce676d95ad10c2bf88130613959dee4089faf3065ee266ca2112b4f7e428c0d","bytes":1360},
-    {"path":"Sources/Models/OperationsModels.swift","sha256":"56be68f1c56f30668b75f76c86ffdce49223847784fe3965efa67135cc680d29","bytes":18542},
-    {"path":"Sources/Networking/APIClient.swift","sha256":"f4e82349288c4eec4d90e82bc7ad583f6d3151802c4bd929ae9295d9eb601884","bytes":41170},
-    {"path":"Sources/Views/BookingDetailView.swift","sha256":"6f5a649d4b384079e14622e4a9c4735c814306ff5b07ff2d56b91cbdc12c6e6b","bytes":57617},
-    {"path":"Sources/Views/OverviewView.swift","sha256":"f245c84f49128b2623e903059c1d079ceeba53c3498a7f73cd5dd268bd94b82f","bytes":13786}
+    {
+      "path": "HOTEL_SYNC_PERMANENT_LIVE_FEED_V4.md",
+      "sha256": "b9f30aa915caf584d0304956c05405fc426b69fe967a896b52258e5d9c93e856",
+      "bytes": 2033
+    },
+    {
+      "path": "Backend/HotelsWorker/src/index.js",
+      "sha256": "f4eeef924ec979ef451c4bd0bf658a9bfd2e9f31689eae474b95778013ab9b80",
+      "bytes": 487548
+    },
+    {
+      "path": "Backend/HotelsWorker/tests/business-hotel-sync-runtime.test.mjs",
+      "sha256": "6f6c986f1e97e19ef554600de320114919555148c46ebd32d8810e52977d65be",
+      "bytes": 19815
+    },
+    {
+      "path": "Backend/HotelsWorker/tests/business-hotel-sync-ios-flow-contract.test.mjs",
+      "sha256": "4f1a6b8a9d42689fcaaf868207d91b7ce4d358cbd1b17d4fa06e63589c276c54",
+      "bytes": 4930
+    },
+    {
+      "path": "Backend/HotelsWorker/tests/price-monitor-chatgpt-bridge-contract.test.mjs",
+      "sha256": "fc5b6c8c84d35110144124336c03bda3b2390ddaa858adce2170f09e35f77c6b",
+      "bytes": 7355
+    },
+    {
+      "path": "Sources/Models/HotelSyncModels.swift",
+      "sha256": "87eb81cd87267a4becf14d9d1ea2b7b607e6e15d074c1427ec9ce4ca7191d469",
+      "bytes": 7652
+    },
+    {
+      "path": "Sources/Networking/APIClient+HotelSync.swift",
+      "sha256": "36c812eb9833fafd08ac7730c5bfa8315f61836f6f9ad6e8fff7dbe169afa91e",
+      "bytes": 22507
+    },
+    {
+      "path": "Sources/Views/HotelPriceMonitoringView.swift",
+      "sha256": "6924d05b5fedefb2d47791939eed9e9552f1ca4ad8bf23f0237609d626989c62",
+      "bytes": 40094
+    }
   ]
 }

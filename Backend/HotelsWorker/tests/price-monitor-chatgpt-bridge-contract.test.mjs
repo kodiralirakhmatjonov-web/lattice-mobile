@@ -21,15 +21,17 @@ test('legacy Cloudflare hotel price monitor and old public ChatGPT bridge are re
   assert.doesNotMatch(detailView, /Обновить из источника/);
 });
 
-test('hotel snapshot comes from the already-loaded Business app list and is never rebuilt by the public feed', () => {
-  assert.match(api, /saveHotelSyncSnapshot\(city:\s*String,\s*checkIn:\s*Date,\s*hotels:\s*\[HotelListItem\]\)/);
-  assert.match(api, /let selected = hotels/);
-  const saveStart = api.indexOf('func saveHotelSyncSnapshot');
-  const previewStart = api.indexOf('func previewHotelChatGPTUpdate', saveStart);
-  const saveBody = api.slice(saveStart, previewStart);
-  assert.doesNotMatch(saveBody, /try await hotels\(\)/);
-  assert.match(worker, /source:\s*'iumrah_business_live_app_state'/);
-  assert.match(worker, /snapshot_json/);
+test('hotel public feed is rebuilt from live D1 on every read and the app uploads only monitoring settings', () => {
+  assert.match(api, /updateHotelSyncSettings\(city:\s*String,\s*checkIn:\s*Date\)/);
+  const settingsStart = api.indexOf('func updateHotelSyncSettings');
+  const legacyStart = api.indexOf('func saveHotelSyncSnapshot', settingsStart);
+  const settingsBody = api.slice(settingsStart, legacyStart);
+  assert.doesNotMatch(settingsBody, /hotels:\s*\[HotelListItem\]/);
+  assert.doesNotMatch(settingsBody, /let selected = hotels/);
+  assert.match(worker, /async function businessHotelSyncLiveHotels/);
+  assert.match(worker, /current_nightly_usd:\s*price\?\.nightlyUSD/);
+  assert.match(worker, /source:\s*'iumrah_business_live_database'/);
+  assert.match(worker, /No saved hotel snapshot or cache-miss gate is used/);
   assert.match(migration, /business_hotel_sync_feeds/);
   assert.match(migration, /PRIMARY KEY \(owner_login, city\)/);
 });
@@ -39,6 +41,8 @@ test('Makkah and Madinah use separate durable secret links and the public body c
   assert.match(worker, /hotel-sync\/\$\{hotelSyncCitySlug\(city\)\}\/\$\{encodeURIComponent\(token\)\}/);
   assert.match(worker, /publicBusinessHotelSyncFeed\(env, parts\[1\], parts\[2\]\)/);
   assert.match(worker, /WHERE \(token_hash=\? OR token_hash=\?\) AND city=\? AND enabled=1/);
+  assert.match(worker, /no TTL, no read limit, and no automatic token rotation/);
+  assert.match(worker, /Valid until explicitly revoked/);
   assert.match(worker, /monitoring_url/);
   assert.match(worker, /url\.searchParams\.set\('checkin', checkIn\)/);
   assert.match(worker, /url\.searchParams\.set\('chkin', checkIn\)/);
@@ -66,13 +70,13 @@ test('Makkah and Madinah use separate durable secret links and the public body c
   }
 });
 
-test('hotel sync keeps one durable public link while daily sync refreshes snapshot and admin JSON body', () => {
+test('hotel sync keeps one durable public link while date settings refresh the same live JSON body', () => {
   assert.match(syncView, /let existingURL = city == "Makkah" \? makkahURL : madinahURL/);
   assert.match(syncView, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
   assert.match(syncView, /ensureHotelSyncAccess\(city: city\)/);
   assert.match(syncView, /setHotelSyncAccessURL\(stableURL, city: city\)/);
   assert.match(syncView, /existingStatus\?\.accessURL/);
-  assert.match(syncView, /saveHotelSyncSnapshot\(city: city, checkIn: date, hotels: hotels\)/);
+  assert.match(syncView, /updateHotelSyncSettings\(city: city, checkIn: date\)/);
   assert.match(syncView, /hotelSyncBody\(city: city\)/);
   assert.doesNotMatch(syncView, /hotelSyncReadOnlyBody\(from: accessURL\)/);
   assert.match(syncView, /UIPasteboard\.general\.string = jsonBody/);

@@ -1105,7 +1105,7 @@ async function adminIgnavUsage(env) {
 
 
 const BUSINESS_HOTEL_SYNC_VERSION = 2;
-const BUSINESS_HOTEL_SYNC_MAX_HOTELS = 120;
+const BUSINESS_HOTEL_SYNC_MAX_HOTELS = 500; // legacy upload compatibility only; live feeds are database-backed
 
 function normalizedHotelSyncCity(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/[-_]+/g, ' ');
@@ -1127,6 +1127,60 @@ function businessHotelSyncOwner(user) {
 
 function businessHotelSyncPublicURL(city, token) {
   return `https://iumrah.app/api/catalog/hotels/hotel-sync/${hotelSyncCitySlug(city)}/${encodeURIComponent(token)}`;
+}
+
+function hotelSyncDateFromUTC(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function hotelSyncDefaultDates(now = new Date()) {
+  const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const checkInDate = new Date(base.getTime() + 20 * 24 * 60 * 60_000);
+  const checkOutDate = new Date(checkInDate.getTime() + 24 * 60 * 60_000);
+  return { checkIn: hotelSyncDateFromUTC(checkInDate), checkOut: hotelSyncDateFromUTC(checkOutDate) };
+}
+
+function resolvedHotelSyncDates(row) {
+  const today = hotelSyncDateFromUTC(new Date());
+  const checkIn = validLocalDate(row?.check_in);
+  const checkOut = validLocalDate(row?.check_out);
+  if (checkIn && checkOut && checkOut > checkIn && checkIn >= today) return { checkIn, checkOut };
+  return hotelSyncDefaultDates();
+}
+
+async function businessHotelSyncLiveHotels(env, city, checkIn, checkOut) {
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT
+      h.id, h.name, h.city, h.stars, h.status, h.updated_at,
+      hps.provider AS locked_source_provider,
+      hps.source_url AS locked_source_url,
+      ${HOTEL_PRICE_SELECT}
+    FROM hotels h
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
+    WHERE LOWER(h.city)=LOWER(?)
+    ORDER BY h.name COLLATE NOCASE ASC
+  `).bind(city).all();
+
+  return (result.results || []).map(row => {
+    const price = hotelPriceFromRow(row);
+    const sourceURL = price?.sourceURL || row.locked_source_url || null;
+    const provider = normalizedHotelSyncProvider(price?.provider || row.locked_source_provider, sourceURL);
+    return normalizedHotelSyncItem({
+      hotel_id: row.id,
+      hotel_name: row.name,
+      city,
+      stars: row.stars,
+      current_nightly_usd: price?.nightlyUSD ?? null,
+      catalog_status: row.status || 'published',
+      price_status: price?.status || null,
+      is_manual_override: Boolean(price?.isManualOverride),
+      provider,
+      source_url: sourceURL,
+      last_price_fetched_at: price?.fetchedAt || null
+    }, city, checkIn, checkOut);
+  }).filter(Boolean);
 }
 
 function normalizedHotelSyncProvider(value, sourceURL) {
@@ -1272,24 +1326,29 @@ async function businessHotelSyncStatus(env, user, cityValue) {
     FROM business_hotel_sync_feeds WHERE owner_login=? AND city=? LIMIT 1
   `).bind(owner, city).first().catch(() => null);
   const enabled = Boolean(row && Number(row.enabled) === 1);
+  const dates = resolvedHotelSyncDates(row);
+  const liveHotels = enabled ? await businessHotelSyncLiveHotels(env, city, dates.checkIn, dates.checkOut).catch(() => []) : [];
+  const liveFeedID = row?.snapshot_id || `hotel-sync-${hotelSyncCitySlug(city)}-live`;
   return json({
     ok: true,
     city,
     configured: Boolean(row),
     enabled,
     readOnly: true,
-    source: 'iumrah_business_live_app_state',
-    // token_hash is also a valid bearer token for the public reader. This lets every
-    // authenticated iumrah Business device recover the same permanent read-only URL
-    // without storing the original random token in plaintext or rotating it.
+    live: true,
+    source: 'iumrah_business_live_database',
+    // token_hash is itself accepted as the canonical bearer. There is no TTL and no
+    // automatic rotation: this URL remains valid until the operator explicitly revokes it.
     accessURL: enabled && row?.token_hash ? businessHotelSyncPublicURL(city, row.token_hash) : null,
-    snapshotID: row?.snapshot_id || null,
-    hotelCount: Number(row?.hotel_count || 0),
-    checkIn: row?.check_in || null,
-    checkOut: row?.check_out || null,
-    snapshotUpdatedAt: row?.snapshot_updated_at || null,
+    snapshotID: row ? liveFeedID : null,
+    hotelCount: liveHotels.length,
+    checkIn: dates.checkIn,
+    checkOut: dates.checkOut,
+    snapshotUpdatedAt: row?.snapshot_updated_at || row?.updated_at || null,
     createdAt: row?.created_at || null,
-    updatedAt: row?.updated_at || null
+    updatedAt: row?.updated_at || null,
+    expiresAt: null,
+    unlimitedReads: true
   });
 }
 
@@ -1300,69 +1359,87 @@ async function ensureBusinessHotelSyncAccess(env, user, cityValue) {
   if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
 
   const now = new Date().toISOString();
+  const fallbackDates = hotelSyncDefaultDates();
+  const fallbackFeedID = `hotel-sync-${hotelSyncCitySlug(city)}-live`;
   const existing = await env.HOTELS_DB.prepare(`
-    SELECT token_hash, enabled, created_at
+    SELECT token_hash, enabled, snapshot_id, check_in, check_out, created_at
     FROM business_hotel_sync_feeds
     WHERE owner_login=? AND city=?
     LIMIT 1
   `).bind(owner, city).first().catch(() => null);
 
   if (existing?.token_hash) {
-    if (Number(existing.enabled) !== 1) {
+    const dates = resolvedHotelSyncDates(existing);
+    if (Number(existing.enabled) !== 1 || !existing.snapshot_id || existing.check_in !== dates.checkIn || existing.check_out !== dates.checkOut) {
       await env.HOTELS_DB.prepare(`
-        UPDATE business_hotel_sync_feeds SET enabled=1, updated_at=? WHERE owner_login=? AND city=?
-      `).bind(now, owner, city).run();
+        UPDATE business_hotel_sync_feeds
+        SET enabled=1, snapshot_id=COALESCE(snapshot_id, ?), check_in=?, check_out=?, updated_at=?
+        WHERE owner_login=? AND city=?
+      `).bind(fallbackFeedID, dates.checkIn, dates.checkOut, now, owner, city).run();
     }
     return json({
       ok: true,
       city,
       readOnly: true,
+      live: true,
       accessURL: businessHotelSyncPublicURL(city, existing.token_hash),
       rotatedAt: null,
       createdAt: existing.created_at || null,
       reused: true,
       unlimitedReads: true,
-      note: 'Permanent read-only URL. It can be opened repeatedly from any browser, device, ChatGPT account, or network until explicitly revoked.'
+      expiresAt: null,
+      note: 'Permanent live read-only URL. No TTL, no read limit, no snapshot cache dependency. Valid until explicitly revoked.'
     });
   }
 
   const token = randomToken(32);
   const tokenHash = await sha256Hex(token);
+  const compactState = JSON.stringify({
+    version: BUSINESS_HOTEL_SYNC_VERSION,
+    snapshot_id: fallbackFeedID,
+    source: 'iumrah_business_live_database',
+    city,
+    check_in: fallbackDates.checkIn,
+    check_out: fallbackDates.checkOut,
+    hotels: []
+  });
   await env.HOTELS_DB.prepare(`
     INSERT INTO business_hotel_sync_feeds (
       owner_login, city, token_hash, enabled, snapshot_json, hotel_count,
       snapshot_id, check_in, check_out, snapshot_updated_at, created_at, updated_at
-    ) VALUES (?, ?, ?, 1, '{"version":2,"hotels":[]}', 0, NULL, NULL, NULL, NULL, ?, ?)
+    ) VALUES (?, ?, ?, 1, ?, 0, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(owner_login, city) DO NOTHING
-  `).bind(owner, city, tokenHash, now, now).run();
+  `).bind(owner, city, tokenHash, compactState, fallbackFeedID, fallbackDates.checkIn, fallbackDates.checkOut, now, now, now).run();
 
-  // Two devices can request access at the same moment. Re-read the winner so both devices
-  // receive the exact same permanent URL instead of one request failing or rotating access.
+  // Concurrent devices always converge on the same stored token. We never rotate it here.
   const persisted = await env.HOTELS_DB.prepare(`
-    SELECT token_hash, enabled, created_at
+    SELECT token_hash, enabled, snapshot_id, check_in, check_out, created_at
     FROM business_hotel_sync_feeds
     WHERE owner_login=? AND city=?
     LIMIT 1
   `).bind(owner, city).first().catch(() => null);
   if (!persisted?.token_hash) return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_CREATE_FAILED' }, 500);
-  if (Number(persisted.enabled) !== 1) {
+  const dates = resolvedHotelSyncDates(persisted);
+  if (Number(persisted.enabled) !== 1 || !persisted.snapshot_id || persisted.check_in !== dates.checkIn || persisted.check_out !== dates.checkOut) {
     await env.HOTELS_DB.prepare(`
-      UPDATE business_hotel_sync_feeds SET enabled=1, updated_at=? WHERE owner_login=? AND city=?
-    `).bind(now, owner, city).run();
+      UPDATE business_hotel_sync_feeds
+      SET enabled=1, snapshot_id=COALESCE(snapshot_id, ?), check_in=?, check_out=?, updated_at=?
+      WHERE owner_login=? AND city=?
+    `).bind(fallbackFeedID, dates.checkIn, dates.checkOut, now, owner, city).run();
   }
 
   return json({
     ok: true,
     city,
     readOnly: true,
-    // Return the stored hash as the canonical bearer token. The public reader accepts both
-    // this canonical form and legacy raw tokens, so every previously copied URL stays valid.
+    live: true,
     accessURL: businessHotelSyncPublicURL(city, persisted.token_hash),
     rotatedAt: null,
     createdAt: persisted.created_at || now,
     reused: persisted.token_hash !== tokenHash,
     unlimitedReads: true,
-    note: 'Permanent read-only URL. It can be opened repeatedly from any browser, device, ChatGPT account, or network until explicitly revoked.'
+    expiresAt: null,
+    note: 'Permanent live read-only URL. No TTL, no read limit, no snapshot cache dependency. Valid until explicitly revoked.'
   });
 }
 
@@ -1397,8 +1474,10 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
     return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_NOT_ENABLED' }, 409);
   }
 
+  // Legacy clients may still upload their hotel list here. It is accepted only as input
+  // compatibility; the public feed NEVER reads those rows. Live D1 is the source of truth.
   const raw = await request.text();
-  if (raw.length > 800_000) return json({ ok: false, error: 'HOTEL_SYNC_SNAPSHOT_TOO_LARGE' }, 413);
+  if (raw.length > 800_000) return json({ ok: false, error: 'HOTEL_SYNC_SETTINGS_TOO_LARGE' }, 413);
   let payload;
   try { payload = JSON.parse(raw); } catch { return json({ ok: false, error: 'INVALID_JSON' }, 400); }
 
@@ -1407,24 +1486,23 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
   const checkOut = validLocalDate(payload?.check_out || payload?.checkOut);
   if (payloadCity !== city) return json({ ok: false, error: 'HOTEL_SYNC_CITY_MISMATCH' }, 400);
   if (!checkIn || !checkOut || checkOut <= checkIn) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_DATES' }, 400);
-  if (Number(payload?.rooms) !== 1 || Number(payload?.adults) !== 2 || Number(payload?.children || 0) !== 0) {
+  if (Number(payload?.rooms ?? 1) !== 1 || Number(payload?.adults ?? 2) !== 2 || Number(payload?.children || 0) !== 0) {
     return json({ ok: false, error: 'HOTEL_SYNC_INVALID_OCCUPANCY' }, 400);
   }
-  if (!Array.isArray(payload?.hotels) || payload.hotels.length < 1) return json({ ok: false, error: 'HOTEL_SYNC_HOTELS_REQUIRED' }, 400);
-  if (payload.hotels.length > BUSINESS_HOTEL_SYNC_MAX_HOTELS) return json({ ok: false, error: 'HOTEL_SYNC_TOO_MANY_HOTELS' }, 400);
-
-  const hotels = payload.hotels.map(item => normalizedHotelSyncItem(item, city, checkIn, checkOut)).filter(Boolean);
-  if (hotels.length !== payload.hotels.length) {
-    return json({ ok: false, error: 'HOTEL_SYNC_INVALID_HOTEL', accepted: hotels.length, received: payload.hotels.length }, 400);
+  // Preserve a generous compatibility ceiling for old app builds, but do not use uploaded
+  // hotel data as the feed or as an authorization gate. New builds send no hotel array.
+  if (Array.isArray(payload?.hotels) && payload.hotels.length > BUSINESS_HOTEL_SYNC_MAX_HOTELS) {
+    return json({ ok: false, error: 'HOTEL_SYNC_TOO_MANY_LEGACY_HOTELS' }, 400);
   }
 
   const now = new Date().toISOString();
   const snapshotID = `hotel-sync-${hotelSyncCitySlug(city)}-${crypto.randomUUID()}`;
-  const snapshot = {
+  const liveHotels = await businessHotelSyncLiveHotels(env, city, checkIn, checkOut);
+  const compactState = {
     version: BUSINESS_HOTEL_SYNC_VERSION,
     snapshot_id: snapshotID,
-    source: 'iumrah_business_live_app_state',
-    generated_at: cleanText(payload.generated_at || payload.generatedAt, 80) || now,
+    source: 'iumrah_business_live_database',
+    generated_at: now,
     city,
     check_in: checkIn,
     check_out: checkOut,
@@ -1432,22 +1510,23 @@ async function saveBusinessHotelSyncSnapshot(request, env, user, cityValue) {
     adults: 2,
     children: 0,
     currency: 'USD',
-    hotels
+    hotels: []
   };
 
   await env.HOTELS_DB.prepare(`
     UPDATE business_hotel_sync_feeds
     SET snapshot_id=?, snapshot_json=?, hotel_count=?, check_in=?, check_out=?, snapshot_updated_at=?, updated_at=?
     WHERE owner_login=? AND city=? AND enabled=1
-  `).bind(snapshotID, JSON.stringify(snapshot), hotels.length, checkIn, checkOut, now, now, owner, city).run();
+  `).bind(snapshotID, JSON.stringify(compactState), liveHotels.length, checkIn, checkOut, now, now, owner, city).run();
 
   return json({
     ok: true,
     city,
     readOnly: true,
-    source: 'iumrah_business_live_app_state',
+    live: true,
+    source: 'iumrah_business_live_database',
     snapshotID,
-    hotelCount: hotels.length,
+    hotelCount: liveHotels.length,
     checkIn,
     checkOut,
     snapshotUpdatedAt: now
@@ -1461,13 +1540,13 @@ async function businessHotelSyncBody(env, user, cityValue) {
   if (!city) return json({ ok: false, error: 'HOTEL_SYNC_INVALID_CITY' }, 400);
 
   const row = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at, updated_at
     FROM business_hotel_sync_feeds
     WHERE owner_login=? AND city=? AND enabled=1
     LIMIT 1
   `).bind(owner, city).first().catch(() => null);
   if (!row) return json({ ok: false, error: 'HOTEL_SYNC_ACCESS_NOT_ENABLED' }, 404);
-  return businessHotelSyncFeedResponse(row, city);
+  return businessHotelSyncFeedResponse(env, row, city);
 }
 
 async function publicBusinessHotelSyncFeed(env, citySlug, token) {
@@ -1476,41 +1555,50 @@ async function publicBusinessHotelSyncFeed(env, citySlug, token) {
   if (!city || !cleanToken || cleanToken.length < 24) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
   const hashedToken = await sha256Hex(cleanToken);
   const row = await env.HOTELS_DB.prepare(`
-    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at
+    SELECT snapshot_id, snapshot_json, hotel_count, check_in, check_out, snapshot_updated_at, updated_at
     FROM business_hotel_sync_feeds
     WHERE (token_hash=? OR token_hash=?) AND city=? AND enabled=1
     LIMIT 1
   `).bind(cleanToken, hashedToken, city).first().catch(() => null);
   if (!row) return json({ ok: false, error: 'HOTEL_SYNC_NOT_FOUND' }, 404);
-  return businessHotelSyncFeedResponse(row, city);
+  return businessHotelSyncFeedResponse(env, row, city);
 }
 
-function businessHotelSyncFeedResponse(row, city) {
-  let snapshot = { version: BUSINESS_HOTEL_SYNC_VERSION, hotels: [] };
-  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
+async function businessHotelSyncFeedResponse(env, row, city) {
+  const dates = resolvedHotelSyncDates(row);
+  const snapshotID = row.snapshot_id || `hotel-sync-${hotelSyncCitySlug(city)}-live`;
+  const liveGeneratedAt = new Date().toISOString();
+  const hotels = await businessHotelSyncLiveHotels(env, city, dates.checkIn, dates.checkOut);
   const payload = {
     ok: true,
     type: 'iumrah_business_hotel_prices',
     read_only: true,
-    source: 'iumrah_business_live_app_state',
-    version: Number(snapshot.version || BUSINESS_HOTEL_SYNC_VERSION),
-    snapshot_id: row.snapshot_id || snapshot.snapshot_id || null,
-    updated_at: row.snapshot_updated_at || null,
+    live: true,
+    feed_mode: 'live_database',
+    source: 'iumrah_business_live_database',
+    version: BUSINESS_HOTEL_SYNC_VERSION,
+    snapshot_id: snapshotID,
+    updated_at: liveGeneratedAt,
+    live_generated_at: liveGeneratedAt,
+    expires_at: null,
+    unlimited_reads: true,
     city,
-    check_in: row.check_in || snapshot.check_in || null,
-    check_out: row.check_out || snapshot.check_out || null,
+    check_in: dates.checkIn,
+    check_out: dates.checkOut,
     rooms: 1,
     adults: 2,
     children: 0,
     currency: 'USD',
-    hotel_count: Number(row.hotel_count || 0),
+    hotel_count: hotels.length,
     monitoring_rules: {
       primary_method: 'Open monitoring_url for each hotel first. It is the exact stored Expedia/Booking property with the preferred feed dates applied.',
-      fallback_method: 'If monitoring_url cannot be read, web search may only recover the same provider/property. Never use a Google/search-result price snippet as a verified price.',
+      fallback_method: 'If the stored provider cannot expose a reliable live rate, Booking.com may be used only for the exact same physical property. Never use a Google/search-result price snippet as a verified price.',
       exact_property_only: true,
       exact_dates_required: false,
       date_policy: 'Prefer the feed dates. If the provider does not expose them, a directly verified nearby stay date for the same property and occupancy is acceptable; keep the feed check_in/check_out in the JSON and mention the observed stay date in reason.',
-      snapshot_policy: 'snapshot_id is audit/history only. A newer snapshot does not invalidate a result. Apply is protected per hotel by live hotel ID + provider/property + current old_nightly_usd compare-and-set.',
+      link_policy: 'This bearer URL has no TTL, no read limit, and no automatic token rotation. It remains valid until the operator explicitly revokes it in iumrah Business.',
+      freshness_policy: 'Hotels, provider/source identity, and current_nightly_usd are read directly from the live iumrah D1 catalog on every request. No saved hotel snapshot or cache-miss gate is used.',
+      snapshot_policy: 'snapshot_id is audit/history/configuration metadata only. It never expires the link and never invalidates a result globally. Apply is protected per hotel by live hotel ID + provider/property + current old_nightly_usd compare-and-set.',
       occupancy: '1 room, 2 adults, 0 children, 1 night',
       unverified_when_not_provable: true,
       result_schema: 'iumrah.hotel-price-update.v2',
@@ -1520,10 +1608,10 @@ function businessHotelSyncFeedResponse(row, city) {
     result_template: {
       schema: 'iumrah.hotel-price-update.v2',
       version: 2,
-      snapshot_id: row.snapshot_id || null,
+      snapshot_id: snapshotID,
       city,
-      check_in: row.check_in || null,
-      check_out: row.check_out || null,
+      check_in: dates.checkIn,
+      check_out: dates.checkOut,
       rooms: 1,
       adults: 2,
       currency: 'USD',
@@ -1532,16 +1620,16 @@ function businessHotelSyncFeedResponse(row, city) {
         hotel_id: 'copy from feed',
         hotel_name: 'copy from feed',
         status: 'changed | unchanged | unverified',
-        old_nightly_usd: 'copy current_nightly_usd from feed',
+        old_nightly_usd: 'copy freshly fetched current_nightly_usd from this live feed immediately before building JSON',
         new_nightly_usd: 'verified USD nightly price or null',
         observed_nightly_amount: 'exact displayed amount or null',
         observed_currency: 'USD | SAR | other exact displayed currency',
         provider: 'copy from feed',
-        source_url: 'copy from feed',
-        monitoring_url: 'copy from feed',
-        checked_source_url: 'actual verified URL for the same provider/property; nearby dates are allowed, or null',
-        check_in: row.check_in || null,
-        check_out: row.check_out || null,
+        source_url: 'copy from feed exactly',
+        monitoring_url: 'copy from feed exactly',
+        checked_source_url: 'exact property page actually used; may be Booking.com only when it is the exact same physical property',
+        check_in: dates.checkIn,
+        check_out: dates.checkOut,
         rooms: 1,
         adults: 2,
         currency: 'USD',
@@ -1550,7 +1638,7 @@ function businessHotelSyncFeedResponse(row, city) {
         checked_at: 'ISO-8601 timestamp'
       }]
     },
-    hotels: Array.isArray(snapshot.hotels) ? snapshot.hotels : []
+    hotels
   };
 
   return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
@@ -1558,7 +1646,9 @@ function businessHotelSyncFeedResponse(row, city) {
     headers: {
       'content-type': 'text/plain; charset=utf-8',
       'x-content-type-options': 'nosniff',
-      'cache-control': 'no-store, max-age=0'
+      'cache-control': 'no-store, max-age=0',
+      'pragma': 'no-cache',
+      'expires': '0'
     }
   });
 }

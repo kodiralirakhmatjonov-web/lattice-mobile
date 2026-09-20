@@ -80,6 +80,25 @@ struct BusinessHotelSyncSnapshotPayload: Codable, Hashable {
     }
 }
 
+struct BusinessHotelSyncSettingsPayload: Codable, Hashable {
+    let version: Int
+    let city: String
+    let generatedAt: String
+    let checkIn: String
+    let checkOut: String
+    let rooms: Int
+    let adults: Int
+    let children: Int
+    let currency: String
+
+    enum CodingKeys: String, CodingKey {
+        case version, city, rooms, adults, children, currency
+        case generatedAt = "generated_at"
+        case checkIn = "check_in"
+        case checkOut = "check_out"
+    }
+}
+
 struct BusinessHotelSyncAccessResponse: Codable, Hashable {
     let ok: Bool
     let city: String
