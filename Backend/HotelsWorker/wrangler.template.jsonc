@@ -20,6 +20,14 @@
     {
       "pattern": "iumrah.app/api/catalog/hotels*",
       "zone_id": "__ZONE_ID__"
+    },
+    {
+      "pattern": "iumrah.app/.well-known/oauth-protected-resource*",
+      "zone_id": "__ZONE_ID__"
+    },
+    {
+      "pattern": "iumrah.app/.well-known/oauth-authorization-server*",
+      "zone_id": "__ZONE_ID__"
     }
   ],
   "d1_databases": [

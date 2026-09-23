@@ -4,60 +4,35 @@ import fs from 'node:fs';
 
 const source = fs.readFileSync(new URL('../../../Sources/Views/HotelPriceMonitoringView.swift', import.meta.url), 'utf8');
 const api = fs.readFileSync(new URL('../../../Sources/Networking/APIClient+HotelSync.swift', import.meta.url), 'utf8');
+const models = fs.readFileSync(new URL('../../../Sources/Models/HotelSyncModels.swift', import.meta.url), 'utf8');
 
-function syncBody() {
-  const start = source.indexOf('private func syncAndCopy(city: String, date: Date) async');
-  const end = source.indexOf('\n    @MainActor\n    private func revoke(city: String)', start);
-  assert.notEqual(start, -1, 'sync function must exist');
-  assert.notEqual(end, -1, 'revoke boundary must exist');
-  return source.slice(start, end);
-}
-
-test('hotel sync uses the server-backed permanent URL and only ensures access when missing', () => {
-  const body = syncBody();
-  assert.match(body, /let existingURL = city == "Makkah" \? makkahURL : madinahURL/);
-  assert.match(body, /if existingStatus\?\.enabled != true \|\| accessURL == nil/);
-  assert.match(body, /ensureHotelSyncAccess\(city: city\)/);
-  assert.match(body, /existingStatus\?\.accessURL/);
-  assert.match(body, /updateHotelSyncSettings\(city: city, checkIn: date\)/);
-  assert.doesNotMatch(body, /revokeHotelSyncAccess\(city: city\)/);
-  assert.match(body, /must never revoke or rotate an existing public link/);
+test('Hotel Sync is a single manual ChatGPT access switch with no links, snapshot or date picker', () => {
+  assert.match(source, /Открыть доступ ChatGPT/);
+  assert.match(source, /Закрыть доступ ChatGPT/);
+  assert.match(source, /setChatGPTHotelAccess\(enabled: enabled\)/);
+  assert.match(source, /Доступ постоянный до ручного отключения/);
+  assert.doesNotMatch(source, /DatePicker\(/);
+  assert.doesNotMatch(source, /Скопировать ссылку/);
+  assert.doesNotMatch(source, /makkahURL|madinahURL|snapshotID|checkIn|checkOut/);
 });
 
-test('hotel sync updates only feed settings before refreshing backup live JSON', () => {
-  const body = syncBody();
-  const settings = body.indexOf('updateHotelSyncSettings(city: city, checkIn: date)');
-  const readBody = body.indexOf('hotelSyncBody(city: city)');
-  assert.ok(settings >= 0, 'settings update must exist');
-  assert.ok(readBody > settings, 'admin live JSON must be read only after date settings update');
-  assert.doesNotMatch(body, /saveHotelSyncSnapshot\(city: city/);
-  assert.doesNotMatch(body, /hotelSyncReadOnlyBody\(from:/);
+test('Business app reads and toggles one server-backed live access state', () => {
+  assert.match(api, /func chatGPTHotelAccessStatus\(\)/);
+  assert.match(api, /\/api\/admin\/hotels\/operations\/chatgpt-hotels/);
+  assert.match(api, /func setChatGPTHotelAccess\(enabled: Bool\)/);
+  assert.match(api, /request\.httpMethod = enabled \? "POST" : "DELETE"/);
+  assert.doesNotMatch(api, /ensureHotelSyncAccess|updateHotelSyncSettings|saveHotelSyncSnapshot/);
 });
 
-test('hotel sync UI exposes separate copy-link and copy-JSON controls for each city card', () => {
-  assert.match(source, /Label\("Скопировать ссылку", systemImage: "link"\)/);
-  assert.match(source, /UIPasteboard\.general\.string = url\.absoluteString/);
-  assert.match(source, /Label\("Скопировать JSON", systemImage: "doc\.text"\)/);
-  assert.match(source, /UIPasteboard\.general\.string = jsonBody/);
-  assert.match(source, /citySyncCard\(\s*city: "Makkah"/);
-  assert.match(source, /citySyncCard\(\s*city: "Madinah"/);
-});
-
-test('hotel sync UI treats the permanent URL as a live feed instead of a stale snapshot', () => {
-  assert.match(source, /let feedIsActive = status\?\.enabled == true && url != nil/);
-  assert.doesNotMatch(source, /status\?\.checkIn == selectedCheckIn/);
-  assert.doesNotMatch(source, /status\?\.hotelCount == cityHotels\.count/);
-  assert.match(source, /Постоянный Live Feed активен/);
-  assert.match(source, /Без срока действия и без лимита открытий/);
-  assert.match(source, /current_nightly_usd не кэшируются/);
-  assert.doesNotMatch(source, /Предыдущая синхронизация/);
-});
-
-test('backup Hotel Sync JSON is fetched through authenticated admin route', () => {
-  assert.match(api, /func hotelSyncBody\(city: String\)/);
-  assert.match(api, /hotel-sync\/\\\(canonical\.lowercased\(\)\)\/body/);
-  assert.match(api, /let \(data, response\) = try await perform\(from: url\)/);
-  assert.doesNotMatch(syncBody(), /URLSession\.shared\.data/);
+test('ChatGPT price result is v3 and has no snapshot/date/occupancy document gate', () => {
+  assert.match(models, /schemaName = "iumrah\.hotel-price-update\.v3"/);
+  const documentStart = models.indexOf('struct BusinessHotelPriceUpdateDocument');
+  const previewStart = models.indexOf('struct BusinessHotelPricePreviewItem', documentStart);
+  const document = models.slice(documentStart, previewStart);
+  assert.doesNotMatch(document, /snapshotID|checkIn|checkOut|rooms|adults|currency/);
+  assert.match(api, /PRICE_ALREADY_CHANGED/);
+  assert.match(api, /chatGPTHotelSameProperty/);
+  assert.match(api, /\/api\/admin\/hotels\/operations\/chatgpt-hotels\/apply/);
 });
 
 test('Hotel Sync JSON editor can dismiss the keyboard without leaving the screen', () => {
@@ -76,7 +51,7 @@ test('Hotel Sync returns to the top after applying prices so content shrink cann
 
   const applyStart = source.indexOf('private func applySelected() async');
   assert.notEqual(applyStart, -1, 'applySelected must exist');
-  const applyBody = source.slice(applyStart, source.indexOf('\n    private func hotelsForCity', applyStart));
+  const applyBody = source.slice(applyStart, source.indexOf('\n    private func canonicalCity', applyStart));
   const clearPreview = applyBody.indexOf('preview = nil');
   const requestScroll = applyBody.indexOf('scrollToTopRequest &+= 1');
   assert.ok(clearPreview >= 0, 'successful apply must clear preview');

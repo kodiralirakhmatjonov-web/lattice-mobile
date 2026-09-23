@@ -1,19 +1,10 @@
 import SwiftUI
-import UIKit
 
 struct HotelPriceMonitoringView: View {
     @Binding var hotels: [HotelListItem]
 
-    @State private var makkahDate = Self.defaultCheckInDate()
-    @State private var madinahDate = Self.defaultCheckInDate()
-    @State private var makkahURL: URL?
-    @State private var madinahURL: URL?
-    @State private var makkahJSON: String?
-    @State private var madinahJSON: String?
-    @State private var makkahStatus: BusinessHotelSyncStatusResponse?
-    @State private var madinahStatus: BusinessHotelSyncStatusResponse?
-    @State private var syncingCity: String?
-    @State private var revokingCity: String?
+    @State private var accessStatus: BusinessChatGPTHotelAccessStatusResponse?
+    @State private var changingAccess = false
 
     @State private var pastedJSON = ""
     @State private var importedDocument: BusinessHotelPriceUpdateDocument?
@@ -30,62 +21,36 @@ struct HotelPriceMonitoringView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    Color.clear
-                        .frame(height: 0)
-                        .id("hotel-sync-top")
-
+                    Color.clear.frame(height: 0).id("hotel-sync-top")
                     introCard
+                    accessCard
+                    resultImportCard
 
-                Text("Ссылки и JSON для ChatGPT")
-                    .font(.title2.bold())
-
-                citySyncCard(
-                    city: "Makkah",
-                    title: "Makkah",
-                    date: $makkahDate,
-                    url: makkahURL,
-                    jsonBody: makkahJSON,
-                    status: makkahStatus,
-                    symbol: "building.2.crop.circle"
-                )
-
-                citySyncCard(
-                    city: "Madinah",
-                    title: "Madinah",
-                    date: $madinahDate,
-                    url: madinahURL,
-                    jsonBody: madinahJSON,
-                    status: madinahStatus,
-                    symbol: "building.columns.circle"
-                )
-
-                resultImportCard
-
-                if let preview {
-                    previewSummary(preview)
-                    resultControls(preview)
-                    ForEach(preview.items) { item in
-                        resultRow(item)
+                    if let preview {
+                        previewSummary(preview)
+                        resultControls(preview)
+                        ForEach(preview.items) { item in
+                            resultRow(item)
+                        }
                     }
-                }
 
-                if let notice {
-                    Label(notice, systemImage: "checkmark.circle.fill")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.green)
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                }
+                    if let notice {
+                        Label(notice, systemImage: "checkmark.circle.fill")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.green)
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
 
-                if let errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.red)
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                }
+                    if let errorMessage {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.red)
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
                 }
                 .padding(.vertical, 14)
             }
@@ -107,7 +72,7 @@ struct HotelPriceMonitoringView: View {
                         .fontWeight(.semibold)
                 }
             }
-            .task { await loadSyncState() }
+            .task { await loadAccessState() }
         }
     }
 
@@ -118,31 +83,31 @@ struct HotelPriceMonitoringView: View {
                     RoundedRectangle(cornerRadius: 17, style: .continuous)
                         .fill(BusinessDesign.primaryControl)
                         .frame(width: 52, height: 52)
-                    Image(systemName: "arrow.triangle.2.circlepath.icloud.fill")
+                    Image(systemName: "sparkles.rectangle.stack.fill")
                         .font(.system(size: 20, weight: .bold))
                         .foregroundStyle(BusinessDesign.onPrimaryControl)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("ChatGPT Hotel Sync")
+                    Text("ChatGPT · живая база отелей")
                         .font(.title2.bold())
-                    Text("Каталог приложения → ссылка или JSON → ChatGPT → подтверждение")
+                    Text("Iumrah Business HOTELS_DB → ChatGPT → JSON цен → подтверждение")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            Text("Hotel Sync теперь работает как постоянный live-feed. Ссылка создаётся один раз, не истекает и при каждом открытии сама читает текущий каталог, источники и цены из базы. Отключается только вручную. JSON остаётся запасным способом передачи.")
+            Text("Без snapshot, без дат доступа, без временных ссылок и без срока действия. Пока доступ открыт вручную, ChatGPT каждый запрос читает текущую базу Мекки и Медины напрямую. Закрыли доступ — чтение сразу прекращается.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                stepPill("1", "Live feed")
-                stepPill("2", "Ссылка/JSON")
-                stepPill("3", "ChatGPT")
-                stepPill("4", "Применить")
+                stepPill("1", "Открыть доступ")
+                stepPill("2", "ChatGPT читает DB")
+                stepPill("3", "Получить JSON")
+                stepPill("4", "Обновить цены")
             }
         }
         .padding(16)
@@ -164,197 +129,91 @@ struct HotelPriceMonitoringView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func citySyncCard(
-        city: String,
-        title: String,
-        date: Binding<Date>,
-        url: URL?,
-        jsonBody: String?,
-        status: BusinessHotelSyncStatusResponse?,
-        symbol: String
-    ) -> some View {
-        let cityHotels = hotelsForCity(city)
-        let selectedCheckIn = Self.syncDateString(date.wrappedValue)
-        let feedIsActive = status?.enabled == true && url != nil
-        return VStack(alignment: .leading, spacing: 15) {
+    private var accessCard: some View {
+        let enabled = accessStatus?.enabled == true
+        let makkah = accessStatus?.makkahCount ?? hotels.filter { canonicalCity($0.city) == "Makkah" }.count
+        let madinah = accessStatus?.madinahCount ?? hotels.filter { canonicalCity($0.city) == "Madinah" }.count
+        let total = accessStatus?.hotelCount ?? (makkah + madinah)
+
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(BusinessDesign.secondarySurface)
-                        .frame(width: 50, height: 50)
-                    Image(systemName: symbol)
+                        .fill(enabled ? Color.green.opacity(0.12) : BusinessDesign.secondarySurface)
+                        .frame(width: 52, height: 52)
+                    Image(systemName: enabled ? "lock.open.fill" : "lock.fill")
                         .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(enabled ? .green : .secondary)
                 }
+
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.headline)
-                    Text("\(cityHotels.count) отелей · текущий список приложения")
+                    Text(enabled ? "Доступ ChatGPT открыт" : "Доступ ChatGPT закрыт")
+                        .font(.headline)
+                    Text("\(total) отелей · Makkah \(makkah) · Madinah \(madinah)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if feedIsActive {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                }
+                Circle()
+                    .fill(enabled ? Color.green : Color.secondary.opacity(0.35))
+                    .frame(width: 10, height: 10)
             }
 
-            DatePicker(
-                "Дата проверки цены",
-                selection: date,
-                in: Self.minimumCheckInDate()...,
-                displayedComponents: .date
-            )
-            .datePickerStyle(.compact)
-            .font(.subheadline.weight(.semibold))
-
-            HStack(spacing: 7) {
-                Label("2 взрослых", systemImage: "person.2.fill")
+            HStack(spacing: 8) {
+                Label("Live HOTELS_DB", systemImage: "cylinder.split.1x2.fill")
                 Text("·")
-                Label("1 номер", systemImage: "bed.double.fill")
-                Text("· 1 ночь · USD")
+                Text("без snapshot")
+                Text("·")
+                Text("без TTL")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
 
-            Text("Дата ниже — только предпочтительная дата проверки провайдера. Она не влияет на срок жизни ссылки. Список отелей и current_nightly_usd не кэшируются в Hotel Sync: они заново читаются из live D1 при каждом открытии URL.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(enabled
+                 ? "ChatGPT может в любой момент читать внутренние отели, текущие nightly USD, provider и source URL. Ничего синхронизировать повторно не нужно."
+                 : "Откройте доступ один раз. Он останется открытым постоянно, пока Вы сами не нажмёте «Закрыть доступ»."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
 
             Button {
-                Task { await syncAndCopy(city: city, date: date.wrappedValue) }
+                Task { await changeAccess(to: !enabled) }
             } label: {
-                HStack(spacing: 8) {
-                    if syncingCity == city {
-                        ProgressView().tint(BusinessDesign.onPrimaryControl)
+                HStack(spacing: 9) {
+                    if changingAccess {
+                        ProgressView().tint(enabled ? Color.primary : BusinessDesign.onPrimaryControl)
                     } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Image(systemName: enabled ? "lock.fill" : "lock.open.fill")
                     }
-                    Text(syncingCity == city ? "Обновляем…" : "Обновить дату проверки")
+                    Text(changingAccess ? "Обновляем…" : (enabled ? "Закрыть доступ ChatGPT" : "Открыть доступ ChatGPT"))
                         .fontWeight(.semibold)
                     Spacer()
-                    Image(systemName: "arrow.triangle.2.circlepath")
                 }
                 .padding(.horizontal, 16)
-                .frame(height: 50)
-                .foregroundStyle(BusinessDesign.onPrimaryControl)
-                .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                .frame(height: 52)
+                .foregroundStyle(enabled ? Color.primary : BusinessDesign.onPrimaryControl)
+                .background(enabled ? BusinessDesign.secondarySurface : BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(syncingCity != nil || applying || previewing || cityHotels.isEmpty)
+            .disabled(changingAccess || applying || previewing)
 
-            if url != nil || jsonBody != nil || status?.enabled == true {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 8) {
-                        Image(systemName: feedIsActive ? "checkmark.circle.fill" : "link.badge.plus")
-                            .foregroundStyle(feedIsActive ? Color.green : Color.secondary)
-                        Text(feedIsActive ? "Постоянный Live Feed активен" : "Live Feed не активирован")
-                            .font(.caption.weight(.semibold))
-                        Spacer()
-                        if let updatedAt = status?.snapshotUpdatedAt {
-                            Text(formatTimestamp(updatedAt))
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if feedIsActive {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "infinity")
-                            Text("Без срока действия и без лимита открытий. URL всегда остаётся тем же и каждый запрос получает текущие отели и текущие цены из базы. Предпочтительная дата мониторинга: \(status?.checkIn ?? selectedCheckIn).")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    if let url {
-                        Text(url.absoluteString)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                            .textSelection(.enabled)
-
-                        Button {
-                            UIPasteboard.general.string = url.absoluteString
-                            notice = "Ссылка \(city) скопирована. Вставьте её в ChatGPT."
-                            errorMessage = nil
-                        } label: {
-                            HStack {
-                                Label("Скопировать ссылку", systemImage: "link")
-                                    .font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Image(systemName: "doc.on.doc")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 14)
-                            .frame(height: 46)
-                        }
-                        .buttonStyle(.plain)
-                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                    }
-
-                    if let jsonBody {
-                        Button {
-                            UIPasteboard.general.string = jsonBody
-                            notice = "JSON \(city) скопирован. Вставьте его прямо в ChatGPT."
-                            errorMessage = nil
-                        } label: {
-                            HStack {
-                                Label("Скопировать JSON", systemImage: "doc.text")
-                                    .font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Text("\(max(1, jsonBody.utf8.count / 1024)) KB")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 14)
-                            .frame(height: 46)
-                        }
-                        .buttonStyle(.plain)
-                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                    } else if feedIsActive {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "exclamationmark.circle")
-                            Text("Резервный JSON сейчас не загрузился, но постоянная live-ссылка продолжает работать и не меняется.")
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                    }
-
-                    HStack {
-                        Label("Read-only доступ активен", systemImage: "lock.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button(role: .destructive) {
-                            Task { await revoke(city: city) }
-                        } label: {
-                            if revokingCity == city {
-                                ProgressView().frame(width: 36, height: 36)
-                            } else {
-                                Image(systemName: "link.badge.minus")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .frame(width: 36, height: 36)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(13)
-                .background(Color.green.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            if enabled {
+                Label("Доступ постоянный до ручного отключения", systemImage: "infinity")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.green)
             }
         }
         .padding(16)
-        .businessCard(radius: 26)
+        .businessCard(radius: 28)
     }
 
     private var resultImportCard: some View {
         VStack(alignment: .leading, spacing: 13) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Результат ChatGPT")
+                Text("Новые цены от ChatGPT")
                     .font(.title2.bold())
-                Text("Вставьте iumrah.hotel-price-update.v2 JSON из ChatGPT")
+                Text("Вставьте JSON schema iumrah.hotel-price-update.v3")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -369,7 +228,7 @@ struct HotelPriceMonitoringView: View {
                     .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 if pastedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("{\n  \"schema\": \"iumrah.hotel-price-update.v2\",\n  ...\n}")
+                    Text("{\n  \"schema\": \"iumrah.hotel-price-update.v3\",\n  \"hotels\": [...]\n}")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 16)
@@ -421,7 +280,7 @@ struct HotelPriceMonitoringView: View {
             .foregroundStyle(.primary)
             .disabled(previewing || applying || pastedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-            Text("Snapshot не блокирует обновление. Для changed/high-confidence проверяются live hotel ID, provider/property и текущая old_nightly_usd. Если цена уже успела измениться, только этот отель получит конфликт.")
+            Text("Даты и snapshot не участвуют в применении. Для каждой изменённой цены проверяются только живой hotel_id, город, provider/property и текущая old_nightly_usd. Это защищает от записи цены другого отеля, но не ограничивает мониторинг датой.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -435,7 +294,7 @@ struct HotelPriceMonitoringView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Предпросмотр").font(.title2.bold())
-                    Text("\(preview.city) · \(preview.checkIn) → \(preview.checkOut)")
+                    Text("Live-проверка по текущей базе")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -520,7 +379,7 @@ struct HotelPriceMonitoringView: View {
                         Text(item.hotelName)
                             .font(.headline)
                             .multilineTextAlignment(.leading)
-                        Text(item.hotelID)
+                        Text("\(item.city) · \(item.hotelID)")
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                     }
@@ -583,114 +442,26 @@ struct HotelPriceMonitoringView: View {
     }
 
     @MainActor
-    private func loadSyncState() async {
-        let storedMakkahURL = BusinessSessionVault.hotelSyncAccessURL(city: "Makkah")
-        let storedMadinahURL = BusinessSessionVault.hotelSyncAccessURL(city: "Madinah")
-
-        async let makkah = try? APIClient.shared.hotelSyncStatus(city: "Makkah")
-        async let madinah = try? APIClient.shared.hotelSyncStatus(city: "Madinah")
-        makkahStatus = await makkah
-        madinahStatus = await madinah
-
-        // The server is the source of truth for the permanent bearer URL. Keychain is only
-        // a compatibility fallback for an app talking to an older backend. This means a new
-        // phone/session can recover the same URL instead of silently rotating and killing it.
-        let serverMakkahURL = makkahStatus?.accessURL.flatMap { URL(string: $0) }
-        let serverMadinahURL = madinahStatus?.accessURL.flatMap { URL(string: $0) }
-        makkahURL = serverMakkahURL ?? storedMakkahURL
-        madinahURL = serverMadinahURL ?? storedMadinahURL
-
-        if let serverMakkahURL { try? BusinessSessionVault.setHotelSyncAccessURL(serverMakkahURL, city: "Makkah") }
-        if let serverMadinahURL { try? BusinessSessionVault.setHotelSyncAccessURL(serverMadinahURL, city: "Madinah") }
-
-        if makkahStatus?.enabled == true {
-            makkahJSON = try? await APIClient.shared.hotelSyncBody(city: "Makkah")
-        } else {
-            makkahJSON = nil
-        }
-        if madinahStatus?.enabled == true {
-            madinahJSON = try? await APIClient.shared.hotelSyncBody(city: "Madinah")
-        } else {
-            madinahJSON = nil
-        }
-    }
-
-    @MainActor
-    private func syncAndCopy(city: String, date: Date) async {
-        syncingCity = city
-        notice = nil
-        errorMessage = nil
-        defer { syncingCity = nil }
-
-        let existingURL = city == "Makkah" ? makkahURL : madinahURL
-        let existingStatus = city == "Makkah" ? makkahStatus : madinahStatus
-        var accessURL = existingStatus?.accessURL.flatMap { URL(string: $0) } ?? existingURL
-
+    private func loadAccessState() async {
         do {
-            // Access is permanent and idempotent. POST /access only creates the bearer once
-            // (or re-enables the same bearer after an explicit revoke); it never rotates it.
-            // Therefore the same copied URL remains reusable across browsers/devices/accounts.
-            if existingStatus?.enabled != true || accessURL == nil {
-                let access = try await APIClient.shared.ensureHotelSyncAccess(city: city)
-                guard let stableURL = URL(string: access.accessURL) else {
-                    throw APIError.server("HOTEL_SYNC_INVALID_ACCESS_URL")
-                }
-                try BusinessSessionVault.setHotelSyncAccessURL(stableURL, city: city)
-                accessURL = stableURL
-            }
-
-            guard let accessURL else {
-                throw APIError.server("HOTEL_SYNC_ACCESS_URL_MISSING")
-            }
-
-            let snapshot = try await APIClient.shared.updateHotelSyncSettings(city: city, checkIn: date)
-
-            // Authenticated body and public bearer URL serialize the same live database feed.
-            let jsonBody = try await APIClient.shared.hotelSyncBody(city: city)
-
-            if city == "Makkah" {
-                makkahURL = accessURL
-                makkahJSON = jsonBody
-            } else {
-                madinahURL = accessURL
-                madinahJSON = jsonBody
-            }
-
-            notice = "\(city): live-feed обновлён · \(snapshot.hotelCount) отелей · дата проверки \(snapshot.checkIn). URL остался прежним."
-
-            if let status = try? await APIClient.shared.hotelSyncStatus(city: city) {
-                if city == "Makkah" {
-                    makkahStatus = status
-                    if let value = status.accessURL, let url = URL(string: value) {
-                        makkahURL = url
-                        try? BusinessSessionVault.setHotelSyncAccessURL(url, city: city)
-                    }
-                } else {
-                    madinahStatus = status
-                    if let value = status.accessURL, let url = URL(string: value) {
-                        madinahURL = url
-                        try? BusinessSessionVault.setHotelSyncAccessURL(url, city: city)
-                    }
-                }
-            }
+            accessStatus = try await APIClient.shared.chatGPTHotelAccessStatus()
+            errorMessage = nil
         } catch {
-            // A settings failure must never revoke or rotate an existing public link. The live
-            // URL remains readable and continues loading current D1 data.
             errorMessage = error.localizedDescription
         }
     }
 
     @MainActor
-    private func revoke(city: String) async {
-        revokingCity = city
-        defer { revokingCity = nil }
+    private func changeAccess(to enabled: Bool) async {
+        changingAccess = true
+        notice = nil
+        errorMessage = nil
+        defer { changingAccess = false }
         do {
-            _ = try await APIClient.shared.revokeHotelSyncAccess(city: city)
-            BusinessSessionVault.clearHotelSyncAccessURL(city: city)
-            if city == "Makkah" { makkahURL = nil; makkahJSON = nil; makkahStatus = nil }
-            else { madinahURL = nil; madinahJSON = nil; madinahStatus = nil }
-            notice = "Ссылка \(city) отключена."
-            errorMessage = nil
+            accessStatus = try await APIClient.shared.setChatGPTHotelAccess(enabled: enabled)
+            notice = enabled
+                ? "Доступ ChatGPT открыт. Он останется активным, пока Вы не закроете его вручную."
+                : "Доступ ChatGPT закрыт."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -713,7 +484,7 @@ struct HotelPriceMonitoringView: View {
             importedDocument = document
             preview = resolved
             selectedHotelIDs = Set(resolved.items.filter(\.selectable).map(\.hotelID))
-            notice = resolved.changed == 0 ? "JSON проверен. Подтверждённых изменений нет." : "JSON проверен. Ничего ещё не опубликовано."
+            notice = resolved.changed == 0 ? "JSON проверен. Подтверждённых изменений нет." : "JSON проверен по живой базе. Ничего ещё не опубликовано."
         } catch {
             importedDocument = nil
             preview = nil
@@ -735,35 +506,26 @@ struct HotelPriceMonitoringView: View {
             let freshPreview = try await APIClient.shared.previewHotelChatGPTUpdate(document, currentHotels: freshHotels)
             let allowed = Set(freshPreview.items.filter(\.selectable).map(\.hotelID))
             let finalSelection = selectedHotelIDs.intersection(allowed)
-            guard !finalSelection.isEmpty else { throw APIError.server("HOTEL_SYNC_SELECTION_NO_LONGER_VALID") }
+            guard !finalSelection.isEmpty else { throw APIError.server("CHATGPT_HOTEL_SELECTION_NO_LONGER_VALID") }
 
             let response = try await APIClient.shared.applyHotelChatGPTUpdate(document, selectedHotelIDs: finalSelection)
             hotels = try await APIClient.shared.hotels()
             if response.appliedCount > 0 {
-                notice = "Обновлено цен: \(response.appliedCount). Каталог уже перечитан с новыми значениями."
+                notice = "Обновлено цен: \(response.appliedCount). База уже перечитана с новыми значениями."
             }
             if response.rejectedCount > 0 {
-                let first = response.rejected.first?.error ?? "HOTEL_SYNC_REJECTED"
+                let first = response.rejected.first?.error ?? "CHATGPT_HOTEL_REJECTED"
                 errorMessage = "Не применено: \(response.rejectedCount). \(issueText(first))"
             }
             selectedHotelIDs.removeAll()
             preview = nil
             importedDocument = nil
             pastedJSON = ""
-
-            // The result list can be much taller than the base Hotel Sync screen.
-            // Once it is removed, SwiftUI may preserve the old deep scroll offset,
-            // leaving the user on an apparently blank white screen. Explicitly
-            // return to the top after a successful apply.
             await Task.yield()
             scrollToTopRequest &+= 1
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    private func hotelsForCity(_ city: String) -> [HotelListItem] {
-        hotels.filter { canonicalCity($0.city) == city }
     }
 
     private func canonicalCity(_ value: String) -> String? {
@@ -783,30 +545,16 @@ struct HotelPriceMonitoringView: View {
 
     private func issueText(_ issue: String) -> String {
         switch issue {
-        case "PRICE_ALREADY_CHANGED", "HOTEL_SYNC_PRICE_ALREADY_CHANGED", "PRICE_CHANGED_AFTER_SNAPSHOT", "HOTEL_SYNC_PRICE_CHANGED_AFTER_SNAPSHOT": return "Цена в базе уже изменилась после проверки. Обновите только этот отель свежим результатом."
-        case "PROPERTY_CHANGED", "SOURCE_CHANGED_AFTER_SNAPSHOT", "HOTEL_SYNC_SOURCE_CHANGED_AFTER_SNAPSHOT": return "Текущий provider/property отеля уже другой."
-        case "DATES_OR_OCCUPANCY_MISMATCH", "HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH": return "Внутри JSON не совпадают дата, номер или число гостей."
-        case "CHECKED_SOURCE_DATES_NOT_VERIFIED", "HOTEL_SYNC_CHECKED_SOURCE_DATES_MISMATCH": return "Старая проверка точных дат. В новой версии ближайшая дата разрешена."
-        case "CHECKED_SOURCE_NOT_VERIFIED", "HOTEL_SYNC_SOURCE_NOT_VERIFIED": return "Не подтверждён точный provider/property отеля."
-        case "HOTEL_SYNC_PROPERTY_MISMATCH": return "Проверена другая гостиница/property."
-        case "HOTEL_SYNC_SNAPSHOT_CHANGED": return "Старый сервер всё ещё требует snapshot. Задеплойте Hotel Sync Fast Update."
+        case "PRICE_ALREADY_CHANGED", "CHATGPT_HOTEL_PRICE_ALREADY_CHANGED": return "Цена в базе уже изменилась после проверки. Возьмите свежую old_nightly_usd и повторите только этот отель."
+        case "PROPERTY_CHANGED", "CHATGPT_HOTEL_PROPERTY_MISMATCH": return "Источник ведёт на другой hotel/property."
+        case "CHECKED_SOURCE_NOT_VERIFIED", "CHATGPT_HOTEL_SOURCE_NOT_VERIFIED": return "Не подтверждён точный provider/property этого отеля."
         case "LOW_CONFIDENCE": return "Недостаточная уверенность проверки."
         case "PRICE_NOT_VERIFIED": return "Цена не подтверждена источником."
-        case "INVALID_NEW_PRICE", "HOTEL_SYNC_INVALID_NEW_PRICE": return "Новая цена некорректна."
-        case "HOTEL_NOT_FOUND": return "Отель больше не найден в текущем каталоге."
-        case "CITY_MISMATCH": return "Город не совпадает."
+        case "INVALID_NEW_PRICE", "CHATGPT_HOTEL_INVALID_NEW_PRICE": return "Новая цена некорректна."
+        case "HOTEL_NOT_FOUND": return "Отель больше не найден в текущей базе."
+        case "CITY_MISMATCH": return "Город отеля не совпадает с живой базой."
         default: return issue.replacingOccurrences(of: "_", with: " ").capitalized
         }
-    }
-
-    private func formatTimestamp(_ value: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: value) else { return value }
-        let output = DateFormatter()
-        output.locale = Locale(identifier: "ru_RU")
-        output.timeZone = TimeZone(identifier: "Asia/Tashkent")
-        output.dateFormat = "dd.MM HH:mm"
-        return output.string(from: date)
     }
 
     private func formatMoney(_ value: Double, currency: String) -> String {
@@ -816,19 +564,5 @@ struct HotelPriceMonitoringView: View {
 
     private static func usd(_ value: Double) -> String {
         "$" + String(format: value.rounded() == value ? "%.0f" : "%.2f", value)
-    }
-
-    private static func syncDateString(_ date: Date) -> String {
-        let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
-        guard let year = parts.year, let month = parts.month, let day = parts.day else { return "" }
-        return String(format: "%04d-%02d-%02d", year, month, day)
-    }
-
-    private static func minimumCheckInDate() -> Date {
-        Calendar.current.startOfDay(for: Date())
-    }
-
-    private static func defaultCheckInDate() -> Date {
-        Calendar.current.date(byAdding: .day, value: 20, to: minimumCheckInDate()) ?? minimumCheckInDate()
     }
 }

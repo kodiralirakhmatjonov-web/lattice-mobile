@@ -24,6 +24,10 @@ export default {
         });
       }
 
+      if (url.pathname.startsWith('/.well-known/oauth-protected-resource') || url.pathname === '/.well-known/oauth-authorization-server') {
+        return withCors(await businessChatGPTHotelOAuthWellKnown(request, env, url), request);
+      }
+
       if (url.pathname.startsWith('/api/admin/ziyarats')) {
         const staff = await requireStaff(request, env);
         if (!staff.ok) return staff.response;
@@ -863,6 +867,19 @@ async function handleCatalog(request, env, url) {
     return publicPrimaryHotels(env, url);
   }
 
+  if (parts[0] === 'chatgpt-hotels') {
+    if (parts.length !== 1 || request.method !== 'GET') return methodNotAllowed();
+    return publicBusinessChatGPTHotelFeed(env, url);
+  }
+
+  if (parts[0] === 'chatgpt-mcp') {
+    if (parts.length >= 2 && parts[1] === 'oauth') {
+      return businessChatGPTHotelOAuth(request, env, url, parts.slice(2));
+    }
+    if (parts.length !== 1) return json({ ok: false, error: 'NOT_FOUND' }, 404);
+    return businessChatGPTHotelMCP(request, env);
+  }
+
   if (parts[0] === 'flight-sync') {
     if (parts.length !== 2 || request.method !== 'GET') return methodNotAllowed();
     return publicBusinessFlightSyncFeed(env, parts[1]);
@@ -954,6 +971,15 @@ async function handleBusinessOperations(request, env, url, parts, user, business
   if (parts.length === 1 && parts[0] === 'ignav-usage') {
     if (request.method !== 'GET') return methodNotAllowed();
     return adminIgnavUsage(env);
+  }
+
+  if (parts[0] === 'chatgpt-hotels') {
+    if (parts.length === 1 && request.method === 'GET') return businessChatGPTHotelAccessStatus(env);
+    if (parts.length === 2 && parts[1] === 'access' && request.method === 'POST') return setBusinessChatGPTHotelAccess(env, user, true);
+    if (parts.length === 2 && parts[1] === 'access' && request.method === 'DELETE') return setBusinessChatGPTHotelAccess(env, user, false);
+    if (parts.length === 2 && parts[1] === 'body' && request.method === 'GET') return businessChatGPTHotelFeedResponse(env);
+    if (parts.length === 2 && parts[1] === 'apply' && request.method === 'POST') return applyBusinessChatGPTHotelUpdates(request, env, user);
+    return methodNotAllowed();
   }
 
   if (parts[0] === 'flight-sync') {
@@ -1816,6 +1842,789 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
   }
 
   return json({ ok: true, city, snapshotID, applied, rejected, appliedCount: applied.length, rejectedCount: rejected.length });
+}
+
+
+const BUSINESS_CHATGPT_MCP_URL = 'https://iumrah.app/api/catalog/hotels/chatgpt-mcp';
+const BUSINESS_CHATGPT_OAUTH_ISSUER = 'https://iumrah.app';
+const BUSINESS_CHATGPT_OAUTH_AUTHORIZE_URL = 'https://iumrah.app/api/catalog/hotels/chatgpt-mcp/oauth/authorize';
+const BUSINESS_CHATGPT_OAUTH_TOKEN_URL = 'https://iumrah.app/api/catalog/hotels/chatgpt-mcp/oauth/token';
+const BUSINESS_CHATGPT_OAUTH_RESOURCE_METADATA_URL = 'https://iumrah.app/.well-known/oauth-protected-resource/api/catalog/hotels/chatgpt-mcp';
+const BUSINESS_CHATGPT_OAUTH_SCOPES = ['hotels.read', 'offline_access'];
+const BUSINESS_CHATGPT_OAUTH_ACCESS_TTL_SECONDS = 30 * 24 * 60 * 60;
+const BUSINESS_CHATGPT_OAUTH_REFRESH_TTL_SECONDS = 10 * 365 * 24 * 60 * 60;
+const BUSINESS_CHATGPT_OAUTH_CODE_TTL_SECONDS = 10 * 60;
+
+function businessChatGPTISOAfter(seconds) {
+  return new Date(Date.now() + Number(seconds || 0) * 1000).toISOString();
+}
+
+function businessChatGPTNormalizeOAuthScopes(value, allowDefault = false) {
+  const raw = cleanText(value, 600);
+  if (!raw && allowDefault) return [...BUSINESS_CHATGPT_OAUTH_SCOPES];
+  const allowed = new Set(BUSINESS_CHATGPT_OAUTH_SCOPES);
+  const scopes = [];
+  for (const scope of String(raw || '').split(/\s+/).filter(Boolean)) {
+    if (!allowed.has(scope)) return null;
+    if (!scopes.includes(scope)) scopes.push(scope);
+  }
+  return scopes;
+}
+
+function businessChatGPTAllowedOAuthClientID(value) {
+  const clientID = cleanText(value, 1200);
+  if (!clientID) return false;
+  try {
+    const url = new URL(clientID);
+    return url.protocol === 'https:' && url.hostname === 'chatgpt.com';
+  } catch (_) {
+    return false;
+  }
+}
+
+function businessChatGPTAllowedOAuthRedirect(value) {
+  const redirect = cleanText(value, 1600);
+  if (!redirect) return false;
+  try {
+    const url = new URL(redirect);
+    return url.protocol === 'https:' && url.hostname === 'chatgpt.com';
+  } catch (_) {
+    return false;
+  }
+}
+
+async function businessChatGPTPKCEChallenge(verifier) {
+  const data = new TextEncoder().encode(String(verifier || ''));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+  return base64urlBytes(digest);
+}
+
+function businessChatGPTOAuthError(code, description, status = 400) {
+  return json({ error: code, error_description: description }, status);
+}
+
+function businessChatGPTOAuthChallenge(description = 'Connect Iumrah Business Hotels to continue.') {
+  const safe = String(description || '').replaceAll('"', "'");
+  return `Bearer resource_metadata="${BUSINESS_CHATGPT_OAUTH_RESOURCE_METADATA_URL}", scope="hotels.read", error="invalid_token", error_description="${safe}"`;
+}
+
+async function businessChatGPTHotelOAuthWellKnown(request, env, url) {
+  if (request.method !== 'GET') return new Response(null, { status: 405, headers: { allow: 'GET' } });
+  if (url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
+    return json({
+      resource: BUSINESS_CHATGPT_MCP_URL,
+      authorization_servers: [BUSINESS_CHATGPT_OAUTH_ISSUER],
+      scopes_supported: BUSINESS_CHATGPT_OAUTH_SCOPES,
+      resource_documentation: 'https://iumrah.app/support',
+      resource_policy_uri: 'https://iumrah.app/privacy',
+      resource_tos_uri: 'https://iumrah.app/terms'
+    });
+  }
+  if (url.pathname === '/.well-known/oauth-authorization-server') {
+    return json({
+      issuer: BUSINESS_CHATGPT_OAUTH_ISSUER,
+      authorization_endpoint: BUSINESS_CHATGPT_OAUTH_AUTHORIZE_URL,
+      token_endpoint: BUSINESS_CHATGPT_OAUTH_TOKEN_URL,
+      client_id_metadata_document_supported: true,
+      token_endpoint_auth_methods_supported: ['none'],
+      code_challenge_methods_supported: ['S256'],
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
+      scopes_supported: BUSINESS_CHATGPT_OAUTH_SCOPES
+    });
+  }
+  return json({ ok: false, error: 'NOT_FOUND' }, 404);
+}
+
+async function businessChatGPTCreateOAuthCode(env, { clientID, redirectURI, resource, scopes, codeChallenge }) {
+  const code = randomToken(32);
+  const codeHash = await sha256Hex(code);
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_chatgpt_oauth_codes(
+      code_hash, client_id, redirect_uri, resource, scope, code_challenge, expires_at, used_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+  `).bind(
+    codeHash,
+    clientID,
+    redirectURI,
+    resource,
+    scopes.join(' '),
+    codeChallenge,
+    businessChatGPTISOAfter(BUSINESS_CHATGPT_OAUTH_CODE_TTL_SECONDS),
+    now
+  ).run();
+  return code;
+}
+
+async function businessChatGPTIssueOAuthTokens(env, { clientID, resource, scopes, includeRefresh = true }) {
+  const now = new Date().toISOString();
+  const accessToken = randomToken(40);
+  const accessHash = await sha256Hex(accessToken);
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_chatgpt_oauth_tokens(token_hash, token_type, client_id, resource, scope, expires_at, last_used_at, created_at)
+    VALUES (?, 'access', ?, ?, ?, ?, NULL, ?)
+  `).bind(
+    accessHash,
+    clientID,
+    resource,
+    scopes.join(' '),
+    businessChatGPTISOAfter(BUSINESS_CHATGPT_OAUTH_ACCESS_TTL_SECONDS),
+    now
+  ).run();
+
+  let refreshToken = null;
+  if (includeRefresh && scopes.includes('offline_access')) {
+    refreshToken = randomToken(48);
+    const refreshHash = await sha256Hex(refreshToken);
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO business_chatgpt_oauth_tokens(token_hash, token_type, client_id, resource, scope, expires_at, last_used_at, created_at)
+      VALUES (?, 'refresh', ?, ?, ?, ?, NULL, ?)
+    `).bind(
+      refreshHash,
+      clientID,
+      resource,
+      scopes.join(' '),
+      businessChatGPTISOAfter(BUSINESS_CHATGPT_OAUTH_REFRESH_TTL_SECONDS),
+      now
+    ).run();
+  }
+
+  return {
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: BUSINESS_CHATGPT_OAUTH_ACCESS_TTL_SECONDS,
+    scope: scopes.join(' '),
+    ...(refreshToken ? { refresh_token: refreshToken } : {})
+  };
+}
+
+async function businessChatGPTValidateOAuthAccessToken(request, env) {
+  const header = cleanText(request.headers.get('authorization'), 4096);
+  if (!header.toLowerCase().startsWith('bearer ')) return false;
+  const token = header.slice(7).trim();
+  if (!token) return false;
+  const tokenHash = await sha256Hex(token);
+  const row = await env.HOTELS_DB.prepare(`
+    SELECT token_hash, resource, scope, expires_at
+    FROM business_chatgpt_oauth_tokens
+    WHERE token_hash=? AND token_type='access'
+    LIMIT 1
+  `).bind(tokenHash).first().catch(() => null);
+  if (!row || row.resource !== BUSINESS_CHATGPT_MCP_URL || Date.parse(row.expires_at || '') <= Date.now()) return false;
+  const scopes = businessChatGPTNormalizeOAuthScopes(row.scope) || [];
+  if (!scopes.includes('hotels.read')) return false;
+  await env.HOTELS_DB.prepare('UPDATE business_chatgpt_oauth_tokens SET last_used_at=? WHERE token_hash=?')
+    .bind(new Date().toISOString(), tokenHash).run().catch(() => {});
+  return true;
+}
+
+async function businessChatGPTHotelOAuth(request, env, url, parts) {
+  const action = cleanText(parts?.[0], 80);
+  if (action === 'authorize') {
+    if (request.method !== 'GET') return methodNotAllowed();
+    if (!(await businessChatGPTHotelAccessEnabled(env))) {
+      return new Response(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Iumrah Business</title><body style="font-family:-apple-system;padding:32px;max-width:640px;margin:auto"><h1>ChatGPT access is closed</h1><p>Open “ChatGPT access” in Iumrah Business, then connect again. There is no snapshot, date limit, or expiring access link.</p></body>`, { status: 403, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+    }
+    const responseType = cleanText(url.searchParams.get('response_type'), 80);
+    const clientID = cleanText(url.searchParams.get('client_id'), 1200);
+    const redirectURI = cleanText(url.searchParams.get('redirect_uri'), 1600);
+    const resource = cleanText(url.searchParams.get('resource'), 1600) || BUSINESS_CHATGPT_MCP_URL;
+    const state = cleanText(url.searchParams.get('state'), 2000);
+    const codeChallenge = cleanText(url.searchParams.get('code_challenge'), 300);
+    const codeChallengeMethod = cleanText(url.searchParams.get('code_challenge_method'), 40);
+    const scopes = businessChatGPTNormalizeOAuthScopes(url.searchParams.get('scope'), true);
+    if (responseType !== 'code') return businessChatGPTOAuthError('unsupported_response_type', 'Only authorization code is supported.');
+    if (!businessChatGPTAllowedOAuthClientID(clientID)) return businessChatGPTOAuthError('invalid_client', 'ChatGPT client_id is required.');
+    if (!businessChatGPTAllowedOAuthRedirect(redirectURI)) return businessChatGPTOAuthError('invalid_request', 'ChatGPT redirect_uri is required.');
+    if (resource !== BUSINESS_CHATGPT_MCP_URL) return businessChatGPTOAuthError('invalid_target', 'Unexpected MCP resource.');
+    if (!scopes) return businessChatGPTOAuthError('invalid_scope', 'Unsupported OAuth scope.');
+    if (codeChallengeMethod !== 'S256' || !/^[A-Za-z0-9_-]{43,128}$/.test(codeChallenge)) {
+      return businessChatGPTOAuthError('invalid_request', 'PKCE S256 is required.');
+    }
+    const code = await businessChatGPTCreateOAuthCode(env, { clientID, redirectURI, resource, scopes, codeChallenge });
+    const target = new URL(redirectURI);
+    target.searchParams.set('code', code);
+    if (state) target.searchParams.set('state', state);
+    target.searchParams.set('iss', BUSINESS_CHATGPT_OAUTH_ISSUER);
+    return Response.redirect(target.toString(), 302);
+  }
+
+  if (action === 'token') {
+    if (request.method !== 'POST') return methodNotAllowed();
+    const form = new URLSearchParams(await request.text());
+    const grantType = cleanText(form.get('grant_type'), 80);
+    const clientID = cleanText(form.get('client_id'), 1200);
+    const resource = cleanText(form.get('resource'), 1600) || BUSINESS_CHATGPT_MCP_URL;
+    if (!businessChatGPTAllowedOAuthClientID(clientID)) return businessChatGPTOAuthError('invalid_client', 'ChatGPT client_id is required.', 401);
+    if (resource !== BUSINESS_CHATGPT_MCP_URL) return businessChatGPTOAuthError('invalid_target', 'Unexpected MCP resource.');
+
+    if (grantType === 'authorization_code') {
+      const code = cleanText(form.get('code'), 1600);
+      const redirectURI = cleanText(form.get('redirect_uri'), 1600);
+      const verifier = cleanText(form.get('code_verifier'), 300);
+      if (!code || !redirectURI || !verifier) return businessChatGPTOAuthError('invalid_request', 'code, redirect_uri and code_verifier are required.');
+      const codeHash = await sha256Hex(code);
+      const row = await env.HOTELS_DB.prepare(`
+        SELECT * FROM business_chatgpt_oauth_codes WHERE code_hash=? LIMIT 1
+      `).bind(codeHash).first().catch(() => null);
+      if (!row || row.used_at || Date.parse(row.expires_at || '') <= Date.now()) return businessChatGPTOAuthError('invalid_grant', 'Authorization code is invalid or expired.');
+      if (row.client_id !== clientID || row.redirect_uri !== redirectURI || row.resource !== resource) return businessChatGPTOAuthError('invalid_grant', 'Authorization code context does not match.');
+      if (await businessChatGPTPKCEChallenge(verifier) !== row.code_challenge) return businessChatGPTOAuthError('invalid_grant', 'PKCE verification failed.');
+      const consumed = await env.HOTELS_DB.prepare('UPDATE business_chatgpt_oauth_codes SET used_at=? WHERE code_hash=? AND used_at IS NULL')
+        .bind(new Date().toISOString(), codeHash).run();
+      if (Number(consumed?.meta?.changes || 0) !== 1) return businessChatGPTOAuthError('invalid_grant', 'Authorization code has already been used.');
+      const scopes = businessChatGPTNormalizeOAuthScopes(row.scope, true) || [...BUSINESS_CHATGPT_OAUTH_SCOPES];
+      return json(await businessChatGPTIssueOAuthTokens(env, { clientID, resource, scopes }));
+    }
+
+    if (grantType === 'refresh_token') {
+      const refreshToken = cleanText(form.get('refresh_token'), 1800);
+      if (!refreshToken) return businessChatGPTOAuthError('invalid_request', 'refresh_token is required.');
+      const tokenHash = await sha256Hex(refreshToken);
+      const row = await env.HOTELS_DB.prepare(`
+        SELECT * FROM business_chatgpt_oauth_tokens
+        WHERE token_hash=? AND token_type='refresh' LIMIT 1
+      `).bind(tokenHash).first().catch(() => null);
+      if (!row || row.client_id !== clientID || row.resource !== resource || Date.parse(row.expires_at || '') <= Date.now()) {
+        return businessChatGPTOAuthError('invalid_grant', 'Refresh token is invalid or expired.');
+      }
+      await env.HOTELS_DB.prepare('UPDATE business_chatgpt_oauth_tokens SET last_used_at=? WHERE token_hash=?')
+        .bind(new Date().toISOString(), tokenHash).run().catch(() => {});
+      const scopes = businessChatGPTNormalizeOAuthScopes(row.scope, true) || [...BUSINESS_CHATGPT_OAUTH_SCOPES];
+      return json(await businessChatGPTIssueOAuthTokens(env, { clientID, resource, scopes, includeRefresh: false }));
+    }
+
+    return businessChatGPTOAuthError('unsupported_grant_type', 'Only authorization_code and refresh_token are supported.');
+  }
+
+  return json({ ok: false, error: 'NOT_FOUND' }, 404);
+}
+
+const BUSINESS_CHATGPT_HOTEL_SCHEMA = 'iumrah.business-hotels.live.v1';
+const BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA = 'iumrah.hotel-price-update.v3';
+
+async function businessChatGPTHotelAccessRow(env) {
+  return env.HOTELS_DB.prepare(`
+    SELECT enabled, updated_by, enabled_at, disabled_at, updated_at
+    FROM business_chatgpt_hotel_access
+    WHERE id='global'
+    LIMIT 1
+  `).first().catch(() => null);
+}
+
+async function businessChatGPTHotelAccessEnabled(env) {
+  const row = await businessChatGPTHotelAccessRow(env);
+  return Number(row?.enabled || 0) === 1;
+}
+
+async function businessChatGPTHotelRows(env) {
+  const result = await env.HOTELS_DB.prepare(`
+    SELECT
+      h.id, h.slug, h.name, h.city, h.stars, h.status, h.created_at, h.updated_at,
+      hps.source_id AS locked_source_id,
+      hps.provider AS locked_source_provider,
+      hps.source_url AS locked_source_url,
+      ${HOTEL_PRICE_SELECT}
+    FROM hotels h
+    LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
+    LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
+    LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
+    ORDER BY h.city COLLATE NOCASE ASC, h.name COLLATE NOCASE ASC
+  `).all();
+
+  return (result.results || []).map(row => {
+    const city = normalizedHotelSyncCity(row.city) || cleanText(row.city, 120) || null;
+    const price = hotelPriceFromRow(row);
+    const sourceURL = price?.sourceURL || row.locked_source_url || null;
+    const provider = normalizedHotelSyncProvider(price?.provider || row.locked_source_provider, sourceURL);
+    const propertyIdentity = sourceURL && provider ? hotelSyncPropertyIdentity(sourceURL, provider) : null;
+    const currentNightly = Number(price?.nightlyUSD);
+    const sourceNightly = Number(price?.sourceNightlyUSD);
+    const manualNightly = Number(row.price_manual_nightly_usd);
+    return {
+      hotel_id: row.id,
+      hotel_name: row.name,
+      slug: row.slug || null,
+      city,
+      stars: Number.isFinite(Number(row.stars)) ? Number(row.stars) : null,
+      catalog_status: row.status || null,
+      current_nightly_usd: Number.isFinite(currentNightly) && currentNightly > 0 ? Math.round(currentNightly * 100) / 100 : null,
+      source_nightly_usd: Number.isFinite(sourceNightly) && sourceNightly > 0 ? Math.round(sourceNightly * 100) / 100 : null,
+      manual_override_nightly_usd: Number.isFinite(manualNightly) && manualNightly > 0 ? Math.round(manualNightly * 100) / 100 : null,
+      currency: 'USD',
+      price_status: price?.sourceStatus || price?.status || null,
+      price_method: price?.method || null,
+      provider: provider || null,
+      source_url: sourceURL || null,
+      property_identity: propertyIdentity,
+      last_price_fetched_at: price?.fetchedAt || null,
+      price_expires_at: price?.sourceExpiresAt || null,
+      last_price_attempt_at: price?.lastAttemptAt || null,
+      price_error: price?.sourceError || null,
+      quote_check_in: price?.checkIn || null,
+      quote_check_out: price?.checkOut || null,
+      quote_adults: price?.adults || null,
+      quote_rooms: price?.rooms || null,
+      hotel_updated_at: row.updated_at || null
+    };
+  });
+}
+
+function businessChatGPTHotelMonitoringContract() {
+  return {
+    access_policy: 'This is a live internal feed. There is no snapshot id, bearer link, TTL, read limit, or date gate. Access exists only while the operator keeps ChatGPT access enabled in iumrah Business.',
+    source_of_truth: 'Read hotels and current prices directly from live HOTELS_DB every time.',
+    exact_property_only: true,
+    provider_rule: 'Use the stored provider/source_url for the exact same physical property. A checked source must resolve to the same provider/property identity before a changed price can be applied.',
+    date_rule: 'Monitoring dates are observation metadata only. They never authorize or block an update. Prefer a comparable 1-room / 2-adult nightly rate when possible.',
+    price_rule: 'Return only a directly verified sellable nightly rate. Never use another property, a search-result snippet, a crossed-out reference price, or an unverified recommendation card.',
+    currency_rule: 'Return new_nightly_usd in USD. If only SAR is directly shown, convert at 1 USD = 3.75 SAR and preserve observed_nightly_amount and observed_currency.',
+    apply_rule: 'The server checks live hotel_id + city + provider/property identity + live old_nightly_usd immediately before writing. No snapshot or date is checked.',
+    result_schema: BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA
+  };
+}
+
+function businessChatGPTHotelResultTemplate() {
+  return {
+    schema: BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA,
+    version: 3,
+    checked_at: 'ISO-8601 timestamp',
+    hotels: [{
+      hotel_id: 'copy from live feed',
+      hotel_name: 'copy from live feed',
+      city: 'Makkah | Madinah',
+      status: 'changed | unchanged | unverified',
+      old_nightly_usd: 'copy current_nightly_usd from the live feed used for this check, or null if no current price exists',
+      new_nightly_usd: 'verified USD nightly price or null',
+      observed_nightly_amount: 'exact displayed amount or null',
+      observed_currency: 'exact displayed currency or null',
+      provider: 'copy from live feed',
+      source_url: 'copy from live feed exactly',
+      checked_source_url: 'exact property page actually checked',
+      observed_check_in: 'optional YYYY-MM-DD; audit only',
+      observed_check_out: 'optional YYYY-MM-DD; audit only',
+      confidence: 'high | none',
+      reason: 'short reason or null',
+      checked_at: 'ISO-8601 timestamp'
+    }]
+  };
+}
+
+async function businessChatGPTHotelFeedPayload(env) {
+  const hotels = await businessChatGPTHotelRows(env);
+  const makkahCount = hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Makkah').length;
+  const madinahCount = hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Madinah').length;
+  const generatedAt = new Date().toISOString();
+  return {
+    ok: true,
+    schema: BUSINESS_CHATGPT_HOTEL_SCHEMA,
+    version: 1,
+    internal: true,
+    live: true,
+    source: 'iumrah_business_HOTELS_DB',
+    generated_at: generatedAt,
+    expires_at: null,
+    snapshot_id: null,
+    date_gate: false,
+    hotel_count: hotels.length,
+    city_counts: { Makkah: makkahCount, Madinah: madinahCount },
+    monitoring_rules: businessChatGPTHotelMonitoringContract(),
+    result_template: businessChatGPTHotelResultTemplate(),
+    hotels
+  };
+}
+
+async function businessChatGPTHotelAccessStatus(env) {
+  const row = await businessChatGPTHotelAccessRow(env);
+  const hotels = await businessChatGPTHotelRows(env).catch(() => []);
+  const enabled = Number(row?.enabled || 0) === 1;
+  return json({
+    ok: true,
+    enabled,
+    readOnly: true,
+    live: true,
+    source: 'iumrah_business_HOTELS_DB',
+    hotelCount: hotels.length,
+    makkahCount: hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Makkah').length,
+    madinahCount: hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Madinah').length,
+    enabledAt: row?.enabled_at || null,
+    disabledAt: row?.disabled_at || null,
+    updatedAt: row?.updated_at || null,
+    note: enabled
+      ? 'ChatGPT live access is open. It remains open until an operator closes it manually.'
+      : 'ChatGPT live access is closed.'
+  });
+}
+
+async function setBusinessChatGPTHotelAccess(env, user, enabled) {
+  const actor = businessStaffLogin(user) || 'admin';
+  const now = new Date().toISOString();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_chatgpt_hotel_access(id, enabled, updated_by, enabled_at, disabled_at, updated_at)
+    VALUES('global', ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      enabled=excluded.enabled,
+      updated_by=excluded.updated_by,
+      enabled_at=CASE WHEN excluded.enabled=1 THEN excluded.enabled_at ELSE business_chatgpt_hotel_access.enabled_at END,
+      disabled_at=CASE WHEN excluded.enabled=0 THEN excluded.disabled_at ELSE NULL END,
+      updated_at=excluded.updated_at
+  `).bind(enabled ? 1 : 0, actor, enabled ? now : null, enabled ? null : now, now).run();
+  return businessChatGPTHotelAccessStatus(env);
+}
+
+async function businessChatGPTHotelFeedResponse(env) {
+  const payload = await businessChatGPTHotelFeedPayload(env);
+  return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store, max-age=0',
+      'pragma': 'no-cache',
+      'expires': '0',
+      'x-content-type-options': 'nosniff'
+    }
+  });
+}
+
+async function publicBusinessChatGPTHotelFeed(env, url) {
+  if (!(await businessChatGPTHotelAccessEnabled(env))) {
+    return json({ ok: false, error: 'CHATGPT_HOTEL_ACCESS_DISABLED' }, 403);
+  }
+  const payload = await businessChatGPTHotelFeedPayload(env);
+  const requestedCity = normalizedHotelSyncCity(url?.searchParams?.get('city'));
+  if (url?.searchParams?.get('city') && !requestedCity) return json({ ok: false, error: 'CHATGPT_HOTEL_INVALID_CITY' }, 400);
+  if (requestedCity) {
+    payload.hotels = payload.hotels.filter(item => normalizedHotelSyncCity(item.city) === requestedCity);
+    payload.hotel_count = payload.hotels.length;
+  }
+  return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store, max-age=0',
+      'pragma': 'no-cache',
+      'expires': '0',
+      'x-content-type-options': 'nosniff'
+    }
+  });
+}
+
+function chatGPTHotelMCPToolDescriptor(name, description, inputSchema) {
+  return {
+    name,
+    description,
+    inputSchema,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    securitySchemes: [{ type: 'oauth2', scopes: ['hotels.read'] }],
+    _meta: { securitySchemes: [{ type: 'oauth2', scopes: ['hotels.read'] }] }
+  };
+}
+
+function businessChatGPTHotelMCPTools() {
+  return [
+    chatGPTHotelMCPToolDescriptor(
+      'list_internal_hotel_databases',
+      'Read the current internal Iumrah Business hotel database summary for Makkah and Madinah. Data is live and has no snapshot/date gate.',
+      { type: 'object', properties: {}, additionalProperties: false }
+    ),
+    chatGPTHotelMCPToolDescriptor(
+      'search_internal_hotels',
+      'Search live internal Iumrah Business hotels and internal nightly prices. Use for operational hotel/price questions.',
+      {
+        type: 'object',
+        properties: {
+          city: { type: 'string', enum: ['Makkah', 'Madinah'] },
+          query: { type: 'string' },
+          stars: { type: 'integer', minimum: 1, maximum: 5 },
+          has_price: { type: 'boolean' },
+          limit: { type: 'integer', minimum: 1, maximum: 200, default: 100 }
+        },
+        additionalProperties: false
+      }
+    ),
+    chatGPTHotelMCPToolDescriptor(
+      'get_internal_hotel',
+      'Get the full live internal hotel record, internal price, provider identity, and source URL for one Iumrah Business hotel.',
+      {
+        type: 'object',
+        required: ['hotel_id'],
+        properties: { hotel_id: { type: 'string', minLength: 1 } },
+        additionalProperties: false
+      }
+    ),
+    chatGPTHotelMCPToolDescriptor(
+      'export_internal_hotel_prices',
+      'Export the live Iumrah Business hotel-price JSON used for monitoring and comparison. Includes the strict v3 result template for returning updated prices.',
+      {
+        type: 'object',
+        properties: { city: { type: 'string', enum: ['Makkah', 'Madinah'] } },
+        additionalProperties: false
+      }
+    )
+  ];
+}
+
+function mcpJSONRPCResult(id, result) {
+  return json({ jsonrpc: '2.0', id, result });
+}
+
+function mcpJSONRPCError(id, code, message) {
+  return json({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
+}
+
+function mcpToolResult(payload) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+    isError: false
+  };
+}
+
+async function businessChatGPTHotelMCP(request, env) {
+  if (request.method === 'GET') return methodNotAllowed();
+  if (request.method !== 'POST') return methodNotAllowed();
+  if (!(await businessChatGPTHotelAccessEnabled(env))) {
+    return json({ ok: false, error: 'CHATGPT_HOTEL_ACCESS_DISABLED' }, 403);
+  }
+  if (!(await businessChatGPTValidateOAuthAccessToken(request, env))) {
+    return json({ ok: false, error: 'CHATGPT_OAUTH_REQUIRED' }, 401, {
+      'www-authenticate': businessChatGPTOAuthChallenge()
+    });
+  }
+
+  const parsed = await readJSON(request, 1_000_000);
+  if (!parsed.ok) return parsed.response;
+  const rpc = parsed.value || {};
+  const id = rpc.id ?? null;
+  const method = cleanText(rpc.method, 120);
+
+  if (method === 'notifications/initialized' || (id === null && String(method || '').startsWith('notifications/'))) {
+    return new Response(null, { status: 202 });
+  }
+  if (method === 'initialize') {
+    const requestedVersion = cleanText(rpc.params?.protocolVersion, 80) || '2025-06-18';
+    return mcpJSONRPCResult(id, {
+      protocolVersion: requestedVersion,
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'Iumrah Business Hotels', version: '1.0.0' },
+      instructions: 'Private operational hotel database access. All hotel and price data is live from Iumrah Business HOTELS_DB. No snapshots or date gates are used.'
+    });
+  }
+  if (method === 'ping') return mcpJSONRPCResult(id, {});
+  if (method === 'tools/list') return mcpJSONRPCResult(id, { tools: businessChatGPTHotelMCPTools() });
+  if (method !== 'tools/call') return mcpJSONRPCError(id, -32601, 'Method not found');
+
+  const toolName = cleanText(rpc.params?.name, 120);
+  const args = rpc.params?.arguments && typeof rpc.params.arguments === 'object' ? rpc.params.arguments : {};
+  const hotels = await businessChatGPTHotelRows(env);
+
+  if (toolName === 'list_internal_hotel_databases') {
+    const payload = {
+      ok: true,
+      source: 'iumrah_business_HOTELS_DB',
+      live: true,
+      snapshot_id: null,
+      date_gate: false,
+      total_hotels: hotels.length,
+      databases: [
+        { city: 'Makkah', hotel_count: hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Makkah').length },
+        { city: 'Madinah', hotel_count: hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Madinah').length }
+      ]
+    };
+    return mcpJSONRPCResult(id, mcpToolResult(payload));
+  }
+
+  if (toolName === 'search_internal_hotels') {
+    const city = args.city ? normalizedHotelSyncCity(args.city) : '';
+    if (args.city && !city) return mcpJSONRPCError(id, -32602, 'Invalid city');
+    const query = cleanText(args.query, 240)?.toLowerCase() || '';
+    const stars = Number.isFinite(Number(args.stars)) ? Math.trunc(Number(args.stars)) : null;
+    const hasPrice = typeof args.has_price === 'boolean' ? args.has_price : null;
+    const limit = Math.max(1, Math.min(200, Math.trunc(Number(args.limit || 100))));
+    const filtered = hotels.filter(item => {
+      if (city && normalizedHotelSyncCity(item.city) !== city) return false;
+      if (query && !`${item.hotel_name || ''} ${item.hotel_id || ''}`.toLowerCase().includes(query)) return false;
+      if (stars && Number(item.stars) !== stars) return false;
+      if (hasPrice !== null && Boolean(Number.isFinite(Number(item.current_nightly_usd)) && Number(item.current_nightly_usd) > 0) !== hasPrice) return false;
+      return true;
+    }).slice(0, limit);
+    return mcpJSONRPCResult(id, mcpToolResult({ ok: true, live: true, count: filtered.length, hotels: filtered }));
+  }
+
+  if (toolName === 'get_internal_hotel') {
+    const hotelID = cleanText(args.hotel_id, 220);
+    if (!hotelID) return mcpJSONRPCError(id, -32602, 'hotel_id is required');
+    const hotel = hotels.find(item => item.hotel_id === hotelID);
+    if (!hotel) return mcpJSONRPCResult(id, { content: [{ type: 'text', text: 'Hotel not found' }], isError: true });
+    return mcpJSONRPCResult(id, mcpToolResult({ ok: true, live: true, hotel }));
+  }
+
+  if (toolName === 'export_internal_hotel_prices') {
+    const city = args.city ? normalizedHotelSyncCity(args.city) : '';
+    if (args.city && !city) return mcpJSONRPCError(id, -32602, 'Invalid city');
+    const payload = await businessChatGPTHotelFeedPayload(env);
+    if (city) {
+      payload.hotels = payload.hotels.filter(item => normalizedHotelSyncCity(item.city) === city);
+      payload.hotel_count = payload.hotels.length;
+    }
+    return mcpJSONRPCResult(id, mcpToolResult(payload));
+  }
+
+  return mcpJSONRPCError(id, -32602, 'Unknown tool');
+}
+
+function normalizedBusinessChatGPTPriceUpdateItem(value) {
+  if (!value || typeof value !== 'object') return null;
+  const hotelID = cleanText(value.hotel_id || value.hotelID, 220);
+  const city = normalizedHotelSyncCity(value.city);
+  const status = cleanText(value.status, 40)?.toLowerCase();
+  if (!hotelID || !city || !['changed', 'unchanged', 'unverified'].includes(status)) return null;
+  const oldRaw = value.old_nightly_usd ?? value.oldNightlyUSD;
+  const newRaw = value.new_nightly_usd ?? value.newNightlyUSD;
+  const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
+  const checkedSourceURL = safeHotelSyncSourceURL(value.checked_source_url || value.checkedSourceURL);
+  return {
+    hotel_id: hotelID,
+    hotel_name: safeHumanText(value.hotel_name || value.hotelName, 300) || null,
+    city,
+    status,
+    old_nightly_usd: oldRaw === null || oldRaw === undefined || oldRaw === '' ? null : Number(oldRaw),
+    new_nightly_usd: newRaw === null || newRaw === undefined || newRaw === '' ? null : Number(newRaw),
+    observed_nightly_amount: value.observed_nightly_amount == null ? null : Number(value.observed_nightly_amount),
+    observed_currency: cleanText(value.observed_currency, 12)?.toUpperCase() || null,
+    provider: normalizedHotelSyncProvider(value.provider, checkedSourceURL || sourceURL),
+    source_url: sourceURL,
+    checked_source_url: checkedSourceURL,
+    observed_check_in: validLocalDate(value.observed_check_in || value.observedCheckIn),
+    observed_check_out: validLocalDate(value.observed_check_out || value.observedCheckOut),
+    confidence: cleanText(value.confidence, 40)?.toLowerCase() || 'none',
+    reason: safeHumanText(value.reason, 700) || null,
+    checked_at: cleanText(value.checked_at || value.checkedAt, 80) || null
+  };
+}
+
+async function applyBusinessChatGPTHotelUpdates(request, env, user) {
+  if (!businessStaffLogin(user)) return json({ ok: false, error: 'CHATGPT_HOTEL_ADMIN_REQUIRED' }, 403);
+  const parsed = await readJSON(request, 1_500_000);
+  if (!parsed.ok) return parsed.response;
+  const document = parsed.value?.result;
+  if (!document || document.schema !== BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA) {
+    return json({ ok: false, error: 'CHATGPT_HOTEL_INVALID_RESULT_SCHEMA' }, 400);
+  }
+  const updates = Array.isArray(document.hotels) ? document.hotels.map(normalizedBusinessChatGPTPriceUpdateItem).filter(Boolean) : [];
+  const updateByID = new Map(updates.map(item => [item.hotel_id, item]));
+  const selectedIDs = Array.isArray(parsed.value?.hotel_ids)
+    ? parsed.value.hotel_ids.map(item => cleanText(item, 220)).filter(Boolean)
+    : updates.filter(item => item.status === 'changed').map(item => item.hotel_id);
+  if (!selectedIDs.length) return json({ ok: false, error: 'CHATGPT_HOTEL_NO_SELECTION' }, 400);
+
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + HOTEL_PRICE_TTL_MS).toISOString();
+  const applied = [];
+  const rejected = [];
+
+  for (const hotelID of selectedIDs) {
+    const update = updateByID.get(hotelID);
+    if (!update) { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_ITEM_NOT_FOUND' }); continue; }
+    if (update.status !== 'changed' || update.confidence !== 'high') { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_ITEM_NOT_VERIFIED' }); continue; }
+
+    const nextPrice = Number(update.new_nightly_usd);
+    if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_INVALID_NEW_PRICE' }); continue; }
+
+    const hotel = await env.HOTELS_DB.prepare('SELECT id, city, status FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first().catch(() => null);
+    if (!hotel) { rejected.push({ hotelID, error: 'HOTEL_NOT_FOUND' }); continue; }
+    if (normalizedHotelSyncCity(hotel.city) !== update.city) { rejected.push({ hotelID, error: 'CITY_MISMATCH' }); continue; }
+
+    const currentRow = await readHotelPriceRow(env, hotelID);
+    const currentPriceRaw = hotelPriceFromRow(currentRow)?.nightlyUSD;
+    const currentPrice = Number(currentPriceRaw);
+    const oldPrice = Number(update.old_nightly_usd);
+    const currentHasPrice = Number.isFinite(currentPrice) && currentPrice > 0;
+    const oldHasPrice = Number.isFinite(oldPrice) && oldPrice > 0;
+    if ((currentHasPrice || oldHasPrice) && (!currentHasPrice || !oldHasPrice || Math.abs(currentPrice - oldPrice) >= 0.01)) {
+      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_PRICE_ALREADY_CHANGED' }); continue;
+    }
+
+    const source = await ensureHotelPriceSourceLock(env, hotelID);
+    const currentProvider = normalizedHotelSyncProvider(source?.provider, source?.source_url);
+    if (!source?.source_url || !currentProvider || !update.provider || currentProvider !== update.provider) {
+      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_SOURCE_NOT_VERIFIED' }); continue;
+    }
+    if (update.source_url && !hotelSyncSameProperty(source.source_url, update.source_url, currentProvider)) {
+      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_PROPERTY_MISMATCH' }); continue;
+    }
+    if (!update.checked_source_url || !hotelSyncSameProperty(source.source_url, update.checked_source_url, currentProvider)) {
+      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_PROPERTY_MISMATCH' }); continue;
+    }
+
+    const observedCheckIn = update.observed_check_in || null;
+    const observedCheckOut = update.observed_check_out || null;
+    const observedCurrency = /^[A-Z]{3}$/.test(update.observed_currency || '') ? update.observed_currency : 'USD';
+    const observedAmount = Number(update.observed_nightly_amount);
+    const amountOriginal = Number.isFinite(observedAmount) && observedAmount > 0 ? observedAmount : nextPrice;
+
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO hotel_price_cache (
+        hotel_id, source_id, provider, source_url, resolved_url,
+        amount_original, currency_original, price_basis, nightly_price_usd, quote_total_usd,
+        quote_check_in, quote_check_out, quote_nights, quote_adults, quote_rooms,
+        confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
+        last_http_status, error, pending_nightly_price_usd, pending_seen_count,
+        pending_first_seen_at, pending_last_seen_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'nightly', ?, ?, ?, ?, NULL, NULL, NULL, 0.99, 'chatgpt-json-v3', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
+      ON CONFLICT(hotel_id) DO UPDATE SET
+        source_id=excluded.source_id,
+        provider=excluded.provider,
+        source_url=excluded.source_url,
+        resolved_url=excluded.resolved_url,
+        amount_original=excluded.amount_original,
+        currency_original=excluded.currency_original,
+        price_basis='nightly',
+        nightly_price_usd=excluded.nightly_price_usd,
+        quote_total_usd=excluded.quote_total_usd,
+        quote_check_in=excluded.quote_check_in,
+        quote_check_out=excluded.quote_check_out,
+        quote_nights=NULL,
+        quote_adults=NULL,
+        quote_rooms=NULL,
+        confidence=0.99,
+        method='chatgpt-json-v3',
+        status='fresh',
+        fetched_at=excluded.fetched_at,
+        expires_at=excluded.expires_at,
+        last_attempt_at=excluded.last_attempt_at,
+        next_retry_at=NULL,
+        last_http_status=200,
+        error=NULL,
+        pending_nightly_price_usd=NULL,
+        pending_seen_count=0,
+        pending_first_seen_at=NULL,
+        pending_last_seen_at=NULL,
+        updated_at=excluded.updated_at
+    `).bind(
+      hotelID,
+      source.source_id || null,
+      currentProvider,
+      source.source_url,
+      update.checked_source_url,
+      amountOriginal,
+      observedCurrency,
+      Math.round(nextPrice * 100) / 100,
+      Math.round(nextPrice * 100) / 100,
+      observedCheckIn,
+      observedCheckOut,
+      now,
+      expiresAt,
+      now,
+      now,
+      now
+    ).run();
+    await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
+    applied.push(hotelID);
+  }
+
+  return json({ ok: true, schema: BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA, applied, rejected, appliedCount: applied.length, rejectedCount: rejected.length });
 }
 
 const BUSINESS_FLIGHT_SYNC_VERSION = 1;
