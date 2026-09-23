@@ -1,6 +1,17 @@
 import SwiftUI
 import UIKit
 
+private struct BusinessUsesPersistentSidebarKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var businessUsesPersistentSidebar: Bool {
+        get { self[BusinessUsesPersistentSidebarKey.self] }
+        set { self[BusinessUsesPersistentSidebarKey.self] = newValue }
+    }
+}
+
 @MainActor
 final class BusinessSidebarStore: ObservableObject {
     @Published var isOpen = false
@@ -33,13 +44,17 @@ enum BusinessSidebarRoute: String, Identifiable {
 
 struct BusinessSidebarButton: View {
     @EnvironmentObject private var sidebar: BusinessSidebarStore
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
 
+    @ViewBuilder
     var body: some View {
-        Button { sidebar.open() } label: {
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 17, weight: .semibold))
+        if !usesPersistentSidebar {
+            Button { sidebar.open() } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 17, weight: .semibold))
+            }
+            .accessibilityLabel("Меню")
         }
-        .accessibilityLabel("Меню")
     }
 }
 
