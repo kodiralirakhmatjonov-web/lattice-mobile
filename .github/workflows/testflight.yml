@@ -286,7 +286,9 @@ jobs:
 
           IOS_APS=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:aps-environment' "$RUNNER_TEMP/ios-profile.plist" 2>/dev/null || true)
           MAC_APS=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.aps-environment' "$RUNNER_TEMP/mac-profile.plist" 2>/dev/null || true)
-          MAC_SANDBOX=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.security.app-sandbox' "$RUNNER_TEMP/mac-profile.plist" 2>/dev/null || true)
+          # App Sandbox is an app-signing entitlement, not a required key in the
+          # Mac App Store Connect provisioning profile. It is verified earlier in
+          # Resources/iumrahBusinessMac.entitlements and again on the signed archive.
 
           test "$IOS_APS" = 'production' || {
             echo "iOS App Store profile must contain aps-environment=production; found: ${IOS_APS:-missing}"
@@ -295,10 +297,6 @@ jobs:
           test "$MAC_APS" = 'production' || {
             echo "Mac App Store Connect profile must contain com.apple.developer.aps-environment=production; found: ${MAC_APS:-missing}"
             echo 'Enable Push Notifications for the App ID and regenerate the Mac Catalyst profile.'
-            exit 1
-          }
-          test "$MAC_SANDBOX" = 'true' || {
-            echo "Mac App Store Connect profile must contain com.apple.security.app-sandbox=true; found: ${MAC_SANDBOX:-missing}"
             exit 1
           }
 
