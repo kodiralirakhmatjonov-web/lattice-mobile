@@ -31,7 +31,8 @@ extension APIClient {
 
     func previewHotelChatGPTUpdate(
         _ document: BusinessHotelPriceUpdateDocument,
-        currentHotels: [HotelListItem]
+        currentHotels: [HotelListItem],
+        primaryHotelIDs: Set<String> = []
     ) async throws -> BusinessHotelPricePreview {
         guard document.schema == BusinessHotelPriceUpdateDocument.schemaName else {
             throw APIError.server("CHATGPT_HOTEL_UNSUPPORTED_UPDATE_SCHEMA")
@@ -44,6 +45,9 @@ extension APIClient {
         let items = document.hotels.map { update -> BusinessHotelPricePreviewItem in
             guard let hotel = currentByID[update.hotelID] else {
                 return chatGPTHotelPreviewItem(update, name: update.hotelName ?? update.hotelID, reviewStatus: "invalid", issue: "HOTEL_NOT_FOUND", selectable: false)
+            }
+            if primaryHotelIDs.contains(update.hotelID) {
+                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "PRIMARY_HOTEL_MANUAL_PRICE_ONLY", selectable: false)
             }
 
             let expectedCity = chatGPTHotelCanonicalCity(update.city)

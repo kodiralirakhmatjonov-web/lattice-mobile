@@ -7,6 +7,7 @@ struct BusinessChatGPTHotelAccessStatusResponse: Codable, Hashable {
     let live: Bool
     let source: String
     let hotelCount: Int
+    let primaryHotelCount: Int?
     let makkahCount: Int
     let madinahCount: Int
     let enabledAt: String?

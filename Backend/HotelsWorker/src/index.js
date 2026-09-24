@@ -1186,6 +1186,7 @@ async function businessHotelSyncLiveHotels(env, city, checkIn, checkOut) {
     LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
     LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
     WHERE LOWER(h.city)=LOWER(?)
+      AND NOT EXISTS (SELECT 1 FROM primary_hotels p WHERE p.hotel_id=h.id)
     ORDER BY h.name COLLATE NOCASE ASC
   `).bind(city).all();
 
@@ -1746,6 +1747,7 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
     const nextPrice = Number(update.new_nightly_usd);
     const oldPrice = Number(update.old_nightly_usd);
     if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'HOTEL_SYNC_INVALID_NEW_PRICE' }); continue; }
+    if (await isPrimaryHotel(env, hotelID)) { rejected.push({ hotelID, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' }); continue; }
     if (!Number.isFinite(oldPrice)) { rejected.push({ hotelID, error: 'HOTEL_SYNC_BASELINE_MISMATCH' }); continue; }
     if (update.check_in !== checkIn || update.check_out !== checkOut || update.rooms !== 1 || update.adults !== 2 || update.currency !== 'USD') {
       rejected.push({ hotelID, error: 'HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH' }); continue;
@@ -2130,6 +2132,7 @@ async function businessChatGPTHotelRows(env) {
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
     LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
     LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
+    WHERE NOT EXISTS (SELECT 1 FROM primary_hotels p WHERE p.hotel_id=h.id)
     ORDER BY h.city COLLATE NOCASE ASC, h.name COLLATE NOCASE ASC
   `).all();
 
@@ -2174,13 +2177,13 @@ async function businessChatGPTHotelRows(env) {
 function businessChatGPTHotelMonitoringContract() {
   return {
     access_policy: 'This is a live internal feed. There is no snapshot id, bearer link, TTL, read limit, or date gate. Access exists only while the operator keeps ChatGPT access enabled in iumrah Business.',
-    source_of_truth: 'Read hotels and current prices directly from live HOTELS_DB every time.',
+    source_of_truth: 'Read non-Primary hotels and current prices directly from live HOTELS_DB every time. Primary Hotels are a separate manual-pricing layer and are never exported to ChatGPT price monitoring.',
     exact_property_only: true,
     provider_rule: 'Use the stored provider/source_url for the exact same physical property. A checked source must resolve to the same provider/property identity before a changed price can be applied.',
     date_rule: 'Monitoring dates are observation metadata only. They never authorize or block an update. Prefer a comparable 1-room / 2-adult nightly rate when possible.',
     price_rule: 'Return only a directly verified sellable nightly rate. Never use another property, a search-result snippet, a crossed-out reference price, or an unverified recommendation card.',
     currency_rule: 'Return new_nightly_usd in USD. If only SAR is directly shown, convert at 1 USD = 3.75 SAR and preserve observed_nightly_amount and observed_currency.',
-    apply_rule: 'The server checks live hotel_id + city + provider/property identity + live old_nightly_usd immediately before writing. No snapshot or date is checked.',
+    apply_rule: 'The server checks that the hotel is not Primary, then checks live hotel_id + city + provider/property identity + live old_nightly_usd immediately before writing. No snapshot or date is checked.',
     result_schema: BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA
   };
 }
@@ -2211,8 +2214,14 @@ function businessChatGPTHotelResultTemplate() {
   };
 }
 
+async function businessPrimaryHotelCount(env) {
+  const row = await env.HOTELS_DB.prepare('SELECT COUNT(DISTINCT hotel_id) AS count FROM primary_hotels').first().catch(() => null);
+  return Math.max(0, Number(row?.count || 0));
+}
+
 async function businessChatGPTHotelFeedPayload(env) {
   const hotels = await businessChatGPTHotelRows(env);
+  const primaryHotelCount = await businessPrimaryHotelCount(env);
   const makkahCount = hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Makkah').length;
   const madinahCount = hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Madinah').length;
   const generatedAt = new Date().toISOString();
@@ -2227,7 +2236,9 @@ async function businessChatGPTHotelFeedPayload(env) {
     expires_at: null,
     snapshot_id: null,
     date_gate: false,
+    price_scope: 'non_primary_only',
     hotel_count: hotels.length,
+    excluded_primary_hotel_count: primaryHotelCount,
     city_counts: { Makkah: makkahCount, Madinah: madinahCount },
     monitoring_rules: businessChatGPTHotelMonitoringContract(),
     result_template: businessChatGPTHotelResultTemplate(),
@@ -2238,6 +2249,7 @@ async function businessChatGPTHotelFeedPayload(env) {
 async function businessChatGPTHotelAccessStatus(env) {
   const row = await businessChatGPTHotelAccessRow(env);
   const hotels = await businessChatGPTHotelRows(env).catch(() => []);
+  const primaryHotelCount = await businessPrimaryHotelCount(env);
   const enabled = Number(row?.enabled || 0) === 1;
   return json({
     ok: true,
@@ -2246,13 +2258,14 @@ async function businessChatGPTHotelAccessStatus(env) {
     live: true,
     source: 'iumrah_business_HOTELS_DB',
     hotelCount: hotels.length,
+    primaryHotelCount,
     makkahCount: hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Makkah').length,
     madinahCount: hotels.filter(item => normalizedHotelSyncCity(item.city) === 'Madinah').length,
     enabledAt: row?.enabled_at || null,
     disabledAt: row?.disabled_at || null,
     updatedAt: row?.updated_at || null,
     note: enabled
-      ? 'ChatGPT live access is open. It remains open until an operator closes it manually.'
+      ? 'ChatGPT live access is open for non-Primary hotels. Primary Hotels remain manual-only until an operator changes their price in Primary Hotels.'
       : 'ChatGPT live access is closed.'
   });
 }
@@ -2531,6 +2544,7 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
 
     const nextPrice = Number(update.new_nightly_usd);
     if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_INVALID_NEW_PRICE' }); continue; }
+    if (await isPrimaryHotel(env, hotelID)) { rejected.push({ hotelID, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' }); continue; }
 
     const hotel = await env.HOTELS_DB.prepare('SELECT id, city, status FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first().catch(() => null);
     if (!hotel) { rejected.push({ hotelID, error: 'HOTEL_NOT_FOUND' }); continue; }
@@ -5774,7 +5788,7 @@ async function adminPrimaryHotels(env, url) {
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY p.city, p.star_category, p.position
   `).bind(...values).all();
-  return json({ ok: true, assignments: (result.results || []).map(row => ({ city: row.primary_city, stars: Number(row.star_category), position: Number(row.position), hotel: hotelSummary(row, true) })) });
+  return json({ ok: true, manualPricingOnly: true, assignments: (result.results || []).map(row => ({ city: row.primary_city, stars: Number(row.star_category), position: Number(row.position), hotel: hotelSummary(row, true, { manualOnlyPrice: true }) })) });
 }
 
 async function savePrimaryHotels(request, env) {
@@ -5820,7 +5834,7 @@ async function publicPrimaryHotels(env, url) {
     WHERE LOWER(p.city)=LOWER(?) AND p.star_category=? AND h.status='published'
     ORDER BY p.position ASC
   `).bind(city, stars).all();
-  return json({ ok: true, city, stars, recommendationLabel: 'Рекомендует iumrah', hotels: (result.results || []).map(row => ({ ...hotelSummary(row, false, { publicUsablePrice: true }), primaryPosition: Number(row.position) })) }, 200, PUBLIC_CACHE_HEADERS);
+  return json({ ok: true, city, stars, recommendationLabel: 'Рекомендует iumrah', manualPricingOnly: true, hotels: (result.results || []).map(row => ({ ...hotelSummary(row, false, { publicUsablePrice: true, manualOnlyPrice: true }), primaryPosition: Number(row.position) })) }, 200, PUBLIC_CACHE_HEADERS);
 }
 
 async function handleClientOperations(request, env, parts) {
@@ -6506,12 +6520,26 @@ async function requireStaff(request, env, options = {}) {
 }
 
 
+async function isPrimaryHotel(env, hotelID) {
+  const id = safeID(hotelID);
+  if (!id) return false;
+  const row = await env.HOTELS_DB.prepare('SELECT 1 AS yes FROM primary_hotels WHERE hotel_id=? LIMIT 1').bind(id).first().catch(() => null);
+  return !!row;
+}
+
+async function primaryHotelsTableAvailable(env) {
+  const row = await env.HOTELS_DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='primary_hotels' LIMIT 1").first().catch(() => null);
+  return !!row;
+}
+
 function hotelPriceFromRow(row, options = {}) {
   if (!row) return null;
   const manualNightly = row.price_manual_nightly_usd == null ? null : Number(row.price_manual_nightly_usd);
   const sourceNightly = row.price_nightly_price_usd == null ? null : Number(row.price_nightly_price_usd);
   const hasManual = Number.isFinite(manualNightly) && manualNightly > 0;
+  const manualOnly = options.manualOnly === true;
   const effectiveNightly = hasManual ? manualNightly : sourceNightly;
+  if (manualOnly && !hasManual) return null;
   if (!hasManual && row.price_status == null) return null;
 
   const sourceStatus = hasManual ? 'manual' : row.price_status;
@@ -6533,14 +6561,14 @@ function hotelPriceFromRow(row, options = {}) {
       : sourceExpiresAt;
 
   return {
-    provider: row.price_provider || row.price_locked_provider || null,
-    sourceURL: row.price_source_url || row.price_locked_source_url || null,
+    provider: manualOnly ? null : (row.price_provider || row.price_locked_provider || null),
+    sourceURL: manualOnly ? null : (row.price_source_url || row.price_locked_source_url || null),
     resolvedURL: row.price_resolved_url || null,
     amountOriginal: row.price_amount_original == null ? null : Number(row.price_amount_original),
     currencyOriginal: row.price_currency_original || null,
     priceBasis: row.price_basis || null,
     nightlyUSD: effectiveNightly,
-    sourceNightlyUSD: sourceNightly,
+    sourceNightlyUSD: manualOnly ? null : sourceNightly,
     isManualOverride: hasManual,
     quoteTotalUSD: hasManual ? null : (row.price_quote_total_usd == null ? null : Number(row.price_quote_total_usd)),
     checkIn: row.price_quote_check_in || null,
@@ -6555,11 +6583,11 @@ function hotelPriceFromRow(row, options = {}) {
     fallbackPrice: usingFallback,
     fetchedAt: hasManual ? (row.price_manual_updated_at || null) : (row.price_fetched_at || null),
     expiresAt: publicExpiresAt,
-    sourceExpiresAt,
-    lastAttemptAt: row.price_last_attempt_at || null,
-    nextRetryAt: row.price_next_retry_at || null,
-    error: publicUsable ? null : (row.price_error || null),
-    sourceError: row.price_error || null
+    sourceExpiresAt: manualOnly ? null : sourceExpiresAt,
+    lastAttemptAt: manualOnly ? null : (row.price_last_attempt_at || null),
+    nextRetryAt: manualOnly ? null : (row.price_next_retry_at || null),
+    error: manualOnly ? null : (publicUsable ? null : (row.price_error || null)),
+    sourceError: manualOnly ? null : (row.price_error || null)
   };
 }
 
@@ -6628,6 +6656,7 @@ function hasImportedHotelPrice(sources) {
 }
 
 async function persistImportedHotelPriceSnapshots(env, id, sources) {
+  if (await isPrimaryHotel(env, id)) return false;
   const best = importedHotelPriceCandidates(sources)[0];
   if (!best) return false;
 
@@ -6752,10 +6781,12 @@ async function runHotelPriceMaintenance(env) {
   if (!env?.HOTELS_DB) return;
   const now = new Date().toISOString();
 
+  const primaryTableAvailable = await primaryHotelsTableAvailable(env);
+  const stalePrimaryFilter = primaryTableAvailable ? ' AND hotel_id NOT IN (SELECT hotel_id FROM primary_hotels)' : '';
   await env.HOTELS_DB.prepare(`
     UPDATE hotel_price_cache
     SET status='stale', updated_at=?
-    WHERE status='fresh' AND expires_at IS NOT NULL AND expires_at<=?
+    WHERE status='fresh' AND expires_at IS NOT NULL AND expires_at<=?${stalePrimaryFilter}
   `).bind(now, now).run().catch(error => {
     console.error('HOTEL_PRICE_MAINTENANCE_MARK_STALE_FAILED', String(error?.message || error));
   });
@@ -6773,6 +6804,7 @@ async function runHotelPriceMaintenance(env) {
       LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
       LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
       WHERE h.status='published'
+        ${primaryTableAvailable ? 'AND NOT EXISTS (SELECT 1 FROM primary_hotels p WHERE p.hotel_id=h.id)' : ''}
         AND ((hps.source_url IS NOT NULL AND hps.source_url!='') OR EXISTS (
           SELECT 1 FROM hotel_sources hs WHERE hs.hotel_id=h.id
             AND LOWER(hs.provider) IN ('booking','booking.com','expedia','expedia.com')
@@ -6905,6 +6937,7 @@ async function ensureHotelPriceSourceLock(env, hotelID) {
 }
 
 async function fetchExactHotelSourcePrice(env, hotelID, options = {}) {
+  if (await isPrimaryHotel(env, hotelID)) throw new Error('PRIMARY_HOTEL_MANUAL_PRICE_ONLY');
   const token = crypto.randomUUID();
   const startedAt = new Date().toISOString();
   const leaseUntil = new Date(Date.now() + 180000).toISOString();
@@ -7077,6 +7110,7 @@ function bookingHotelIdentityKey(value) {
 async function saveBrowserHotelPrice(request, env, hotelID) {
   const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
   if (!hotel) return json({ ok: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
+  if (await isPrimaryHotel(env, hotelID)) return json({ ok: false, price: null, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' }, 409);
 
   let payload;
   try { payload = await request.json(); }
@@ -7189,6 +7223,10 @@ async function saveBrowserHotelPrice(request, env, hotelID) {
 async function refreshHotelPriceResponse(env, hotelID) {
   const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first();
   if (!hotel) return json({ ok: false, refreshed: false, changed: false, price: null, error: 'HOTEL_NOT_FOUND' }, 404);
+  if (await isPrimaryHotel(env, hotelID)) {
+    const row = await readHotelPriceRow(env, hotelID);
+    return json({ ok: false, refreshed: false, changed: false, price: hotelPriceFromRow(row, { manualOnly: true }), error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' }, 409);
+  }
 
   // The button has a strict semantic contract: `ok/refreshed=true` means this
   // request really obtained a new live provider snapshot and persisted it. A
@@ -9526,7 +9564,7 @@ function hotelSummary(row, includeSource = true, options = {}) {
     coverImageURL: row.cover_image_id ? publicImagePath(row.id, row.cover_image_id) : null,
     imageCount: Number(row.image_count || 0),
     roomCount: Number(row.room_count || 0),
-    price: hotelPriceFromRow(row, { publicUsable: options.publicUsablePrice === true }),
+    price: hotelPriceFromRow(row, { publicUsable: options.publicUsablePrice === true, manualOnly: options.manualOnlyPrice === true }),
     sourceProvider: includeSource ? (row.locked_source_provider || row.price_provider || null) : null,
     sourceURL: includeSource ? (row.locked_source_url || row.price_source_url || null) : null,
     updatedAt: row.updated_at

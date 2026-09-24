@@ -98,7 +98,7 @@ struct HotelPriceMonitoringView: View {
                 Spacer()
             }
 
-            Text("Без snapshot, без дат доступа, без временных ссылок и без срока действия. Пока доступ открыт вручную, ChatGPT каждый запрос читает текущую базу Мекки и Медины напрямую. Закрыли доступ — чтение сразу прекращается.")
+            Text("Без snapshot, без дат доступа, без временных ссылок и без срока действия. ChatGPT читает только обычные отели. Primary Hotels полностью исключены из отчёта и массового обновления: их цены меняются вручную во вкладке Primary Hotels.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -134,6 +134,7 @@ struct HotelPriceMonitoringView: View {
         let makkah = accessStatus?.makkahCount ?? hotels.filter { canonicalCity($0.city) == "Makkah" }.count
         let madinah = accessStatus?.madinahCount ?? hotels.filter { canonicalCity($0.city) == "Madinah" }.count
         let total = accessStatus?.hotelCount ?? (makkah + madinah)
+        let primary = accessStatus?.primaryHotelCount ?? 0
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
@@ -149,7 +150,7 @@ struct HotelPriceMonitoringView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(enabled ? "Доступ ChatGPT открыт" : "Доступ ChatGPT закрыт")
                         .font(.headline)
-                    Text("\(total) отелей · Makkah \(makkah) · Madinah \(madinah)")
+                    Text("ChatGPT: \(total) · Makkah \(makkah) · Madinah \(madinah) · Primary вручную: \(primary)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -170,7 +171,7 @@ struct HotelPriceMonitoringView: View {
             .foregroundStyle(.secondary)
 
             Text(enabled
-                 ? "ChatGPT может в любой момент читать внутренние отели, текущие nightly USD, provider и source URL. Ничего синхронизировать повторно не нужно."
+                 ? "ChatGPT может читать все обычные отели, nightly USD, provider и source URL. Primary Hotels сюда не входят и остаются полностью ручными."
                  : "Откройте доступ один раз. Он останется открытым постоянно, пока Вы сами не нажмёте «Закрыть доступ»."
             )
             .font(.caption)
@@ -478,9 +479,12 @@ struct HotelPriceMonitoringView: View {
             let json = extractJSONObject(from: pastedJSON)
             guard let data = json.data(using: .utf8) else { throw APIError.server("INVALID_JSON") }
             let document = try JSONDecoder().decode(BusinessHotelPriceUpdateDocument.self, from: data)
-            let freshHotels = try await APIClient.shared.hotels()
+            async let hotelRequest = APIClient.shared.hotels()
+            async let primaryIDsRequest = livePrimaryHotelIDs()
+            let freshHotels = try await hotelRequest
+            let primaryIDs = try await primaryIDsRequest
             hotels = freshHotels
-            let resolved = try await APIClient.shared.previewHotelChatGPTUpdate(document, currentHotels: freshHotels)
+            let resolved = try await APIClient.shared.previewHotelChatGPTUpdate(document, currentHotels: freshHotels, primaryHotelIDs: primaryIDs)
             importedDocument = document
             preview = resolved
             selectedHotelIDs = Set(resolved.items.filter(\.selectable).map(\.hotelID))
@@ -501,9 +505,12 @@ struct HotelPriceMonitoringView: View {
         errorMessage = nil
         defer { applying = false }
         do {
-            let freshHotels = try await APIClient.shared.hotels()
+            async let hotelRequest = APIClient.shared.hotels()
+            async let primaryIDsRequest = livePrimaryHotelIDs()
+            let freshHotels = try await hotelRequest
+            let primaryIDs = try await primaryIDsRequest
             hotels = freshHotels
-            let freshPreview = try await APIClient.shared.previewHotelChatGPTUpdate(document, currentHotels: freshHotels)
+            let freshPreview = try await APIClient.shared.previewHotelChatGPTUpdate(document, currentHotels: freshHotels, primaryHotelIDs: primaryIDs)
             let allowed = Set(freshPreview.items.filter(\.selectable).map(\.hotelID))
             let finalSelection = selectedHotelIDs.intersection(allowed)
             guard !finalSelection.isEmpty else { throw APIError.server("CHATGPT_HOTEL_SELECTION_NO_LONGER_VALID") }
@@ -526,6 +533,13 @@ struct HotelPriceMonitoringView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func livePrimaryHotelIDs() async throws -> Set<String> {
+        async let makkah = APIClient.shared.primaryHotels(city: "Makkah")
+        async let madinah = APIClient.shared.primaryHotels(city: "Madinah")
+        let (makkahAssignments, madinahAssignments) = try await (makkah, madinah)
+        return Set((makkahAssignments + madinahAssignments).map { $0.hotel.id })
     }
 
     private func canonicalCity(_ value: String) -> String? {
@@ -553,6 +567,7 @@ struct HotelPriceMonitoringView: View {
         case "INVALID_NEW_PRICE", "CHATGPT_HOTEL_INVALID_NEW_PRICE": return "Новая цена некорректна."
         case "HOTEL_NOT_FOUND": return "Отель больше не найден в текущей базе."
         case "CITY_MISMATCH": return "Город отеля не совпадает с живой базой."
+        case "PRIMARY_HOTEL_MANUAL_PRICE_ONLY": return "Primary Hotel исключён из массового мониторинга. Измените его цену вручную во вкладке Primary Hotels."
         default: return issue.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }

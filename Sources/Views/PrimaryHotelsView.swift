@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct PrimaryHotelsView: View {
@@ -8,6 +9,8 @@ struct PrimaryHotelsView: View {
     @State private var assignments: [PrimaryHotelAssignment] = []
     @State private var loading = true
     @State private var errorMessage: String?
+    @State private var priceEditor: PrimaryHotelPriceEditorContext?
+    @State private var priceNotice: String?
 
     var body: some View {
         ScrollView {
@@ -20,7 +23,7 @@ struct PrimaryHotelsView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Primary Hotels").font(.largeTitle.bold())
-                    Text("До 3 рекомендуемых iumrah отелей на каждую категорию генератора. Фактическая звёздность отеля может отличаться от категории — например, 1★ отель можно назначить в 3★.")
+                    Text("Primary Hotels — отдельный ручной ценовой слой. Они не попадают в ChatGPT Hotel Sync, массовый JSON и автоматическое обновление цены. Для каждого Primary цена задаётся здесь вручную.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
 
@@ -36,6 +39,16 @@ struct PrimaryHotelsView: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                if !primaryPricingAssignments.isEmpty {
+                    primaryPricingSection
+                }
+
+                if let priceNotice {
+                    Label(priceNotice, systemImage: "checkmark.circle.fill")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.green)
+                }
             }
             .padding(18)
         }
@@ -49,6 +62,12 @@ struct PrimaryHotelsView: View {
         .overlay { if loading { ProgressView() } }
         .task { await load() }
         .onChange(of: city) { _, _ in Task { await load() } }
+        .sheet(item: $priceEditor) { context in
+            PrimaryHotelManualPriceSheet(context: context) {
+                priceNotice = "Ручная цена Primary Hotel сохранена и уже используется как текущая."
+                Task { await load() }
+            }
+        }
     }
 
     private func selectedIDs(for stars: Int) -> [String] {
@@ -60,6 +79,67 @@ struct PrimaryHotelsView: View {
         return hotels.filter {
             $0.city.caseInsensitiveCompare(city) == .orderedSame && $0.status == "published"
         }
+    }
+
+    private var primaryPricingAssignments: [PrimaryHotelAssignment] {
+        var seen = Set<String>()
+        return assignments
+            .filter { $0.city.caseInsensitiveCompare(city) == .orderedSame }
+            .sorted { lhs, rhs in
+                if lhs.stars != rhs.stars { return lhs.stars < rhs.stars }
+                return lhs.position < rhs.position
+            }
+            .filter { seen.insert($0.hotel.id).inserted }
+    }
+
+    private var primaryPricingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Ручные цены Primary Hotels")
+                    .font(.title3.bold())
+                Text("Эти отели исключены из ChatGPT и массового мониторинга. Цена ниже — единственная цена, которую использует Primary Hotel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(primaryPricingAssignments) { item in
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.hotel.name)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(2)
+                        HStack(spacing: 6) {
+                            Text("Primary")
+                            Text("·")
+                            if let nightly = item.hotel.price?.nightlyUSD {
+                                Text("$\(nightly.formatted(.number.precision(.fractionLength(0...2)))) / ночь")
+                                    .foregroundStyle(.primary)
+                            } else {
+                                Text("ручная цена не задана")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Изменить") {
+                        priceEditor = PrimaryHotelPriceEditorContext(
+                            hotelID: item.hotel.id,
+                            hotelName: item.hotel.name,
+                            city: item.city,
+                            currentNightlyUSD: item.hotel.price?.nightlyUSD
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption.weight(.semibold))
+                }
+                .padding(.vertical, 3)
+                if item.hotel.id != primaryPricingAssignments.last?.hotel.id { Divider() }
+            }
+        }
+        .padding(16)
+        .businessCard(radius: 26)
     }
 
     private func categoryCard(_ stars: Int) -> some View {
@@ -79,7 +159,18 @@ struct PrimaryHotelsView: View {
                             .frame(width: 46, height: 46)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        Text(item.hotel.name).font(.subheadline.weight(.semibold)).lineLimit(2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.hotel.name).font(.subheadline.weight(.semibold)).lineLimit(2)
+                            if let nightly = item.hotel.price?.nightlyUSD {
+                                Text("Ручная цена · $\(nightly.formatted(.number.precision(.fractionLength(0...2))))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("Ручная цена не задана")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.orange)
+                            }
+                        }
                         Spacer()
                     }
                 }
@@ -98,6 +189,102 @@ struct PrimaryHotelsView: View {
             errorMessage = nil
         } catch { errorMessage = error.localizedDescription }
         loading = false
+    }
+}
+
+private struct PrimaryHotelPriceEditorContext: Identifiable {
+    let hotelID: String
+    let hotelName: String
+    let city: String
+    let currentNightlyUSD: Double?
+    var id: String { hotelID }
+}
+
+private struct PrimaryHotelManualPriceSheet: View {
+    let context: PrimaryHotelPriceEditorContext
+    let onSaved: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var priceText: String
+    @State private var saving = false
+    @State private var errorMessage: String?
+
+    init(context: PrimaryHotelPriceEditorContext, onSaved: @escaping () -> Void) {
+        self.context = context
+        self.onSaved = onSaved
+        _priceText = State(initialValue: context.currentNightlyUSD.map { String(format: "%.2f", $0).replacingOccurrences(of: ".00", with: "") } ?? "")
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(context.hotelName)
+                        .font(.title3.bold())
+                    Text("\(context.city) · Primary Hotel · только ручная цена")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Цена за ночь · USD")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Text("$").font(.title2.bold())
+                        TextField("180", text: $priceText)
+                            .keyboardType(.decimalPad)
+                            .font(.title2.monospacedDigit())
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 56)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+
+                Text("Эта цена не будет заменена ChatGPT, Hotel Sync, массовым JSON или автоматическим refresh. Она действует, пока Вы не измените её вручную.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let errorMessage {
+                    Text(errorMessage).font(.footnote).foregroundStyle(.red)
+                }
+
+                Button { Task { await save() } } label: {
+                    if saving { ProgressView().frame(maxWidth: .infinity) }
+                    else { Text("Сохранить ручную цену").font(.headline).frame(maxWidth: .infinity) }
+                }
+                .frame(height: 54)
+                .buttonStyle(.borderedProminent)
+                .disabled(saving || parsedPrice == nil)
+
+                Spacer()
+            }
+            .padding(18)
+            .background(BusinessDesign.background)
+            .navigationTitle("Цена Primary Hotel")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Закрыть") { dismiss() } } }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var parsedPrice: Double? {
+        let normalized = priceText.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(normalized), value >= 1, value <= 10_000 else { return nil }
+        return value
+    }
+
+    @MainActor private func save() async {
+        guard let value = parsedPrice else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            _ = try await APIClient.shared.setManualHotelPrice(id: context.hotelID, nightlyUSD: value)
+            onSaved()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
