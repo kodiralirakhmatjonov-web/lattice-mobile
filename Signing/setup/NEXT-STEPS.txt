@@ -1,0 +1,32 @@
+IUMRAH BUSINESS — UNIVERSAL TESTFLIGHT SIGNING
+
+DEFAULT / RECOMMENDED: mac-catalyst-add-on
+This keeps the current iOS Apple Distribution key/profile unchanged.
+
+1. developer.apple.com → Certificates → + → Mac Installer Distribution.
+2. Upload iumrah-business-mac-installer.certSigningRequest.
+3. Download the generated certificate and rename it exactly:
+   iumrah-business-mac-installer.cer
+4. developer.apple.com → Profiles → + → Mac App Store Connect.
+5. Select the App ID for com.iumrah.business.
+6. IMPORTANT: choose the SAME Apple Distribution certificate already used by
+   Signing/iumrah-business.mobileprovision. The artifact includes
+   CURRENT-IOS-SIGNING.txt with the current certificate fingerprint.
+7. Download the Mac Catalyst profile and rename it exactly:
+   iumrah-business-mac.provisionprofile
+8. Add these three new files to lattice-mobile/Signing/:
+   - mac-installer-private-key.enc
+   - iumrah-business-mac-installer.cer
+   - iumrah-business-mac.provisionprofile
+9. Keep the existing files too:
+   - distribution-private-key.enc
+   - iumrah-business.mobileprovision
+10. Run "Build iumrah Business / Universal TestFlight — iPhone + iPad + Mac"
+    first with upload_to_testflight=false. After compile preflight passes,
+    run it again with upload_to_testflight=true.
+
+If mode full-new-signing-set was selected, the artifact also contains a NEW
+distribution-private-key.enc + iumrah-business.certSigningRequest. Do not
+replace the existing distribution key unless you intentionally create a new
+Apple Distribution certificate and regenerate BOTH the iOS and Mac Catalyst
+App Store Connect provisioning profiles with that new certificate.

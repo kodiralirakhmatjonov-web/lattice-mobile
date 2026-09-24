@@ -1,0 +1,17 @@
+CURRENT IUMRAH BUSINESS iOS SIGNING PROFILE
+Profile name: iumrah Business App Store
+UUID: 66f30de2-3a94-4a2f-a68c-44d2d0045b61
+Team: 2DQ678JTNG
+Application identifier: 2DQ678JTNG.com.iumrah.business
+APNs: production
+Distribution certificates in profile: 1
+
+When creating the Mac App Store Connect profile, select the Apple
+Distribution certificate whose fingerprint below matches.
+Certificate: certificate-0.der
+subject=UID = 2DQ678JTNG, CN = Apple Distribution: Kodirali Rakhmatjonov (2DQ678JTNG), OU = 2DQ678JTNG, O = Kodirali Rakhmatjonov, C = UZ
+serial=2D65E5E74FE26E6989E5EE414148E87A
+notBefore=Aug 23 06:53:50 2026 GMT
+notAfter=Aug 23 06:53:49 2027 GMT
+sha256 Fingerprint=62:CB:98:15:36:34:36:77:55:99:70:89:AE:BC:77:61:32:21:0C:C7:E7:AE:C3:2B:D8:05:6A:74:35:6B:37:97
+
