@@ -24,6 +24,7 @@ jobs:
       BUNDLE_ID: com.iumrah.business
       IOS_ARCHIVE: build/iumrahBusiness-iOS.xcarchive
       MAC_ARCHIVE: build/iumrahBusiness-MacCatalyst.xcarchive
+      MAC_APP_CATEGORY: public.app-category.business
 
     steps:
       - name: Checkout
@@ -161,6 +162,7 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            INFOPLIST_KEY_LSApplicationCategoryType="$MAC_APP_CATEGORY" \
             -showBuildSettings > build/diagnostics/mac-build-settings.txt
 
           grep -Eq 'TARGETED_DEVICE_FAMILY = 1,2$|TARGETED_DEVICE_FAMILY = "1,2"$' build/diagnostics/ios-build-settings.txt || {
@@ -197,6 +199,11 @@ jobs:
             grep 'MACOSX_DEPLOYMENT_TARGET' build/diagnostics/mac-build-settings.txt || true
             exit 1
           }
+          grep -Eq 'INFOPLIST_KEY_LSApplicationCategoryType = public\.app-category\.business$' build/diagnostics/mac-build-settings.txt || {
+            echo 'Mac Catalyst App Store category is missing; expected public.app-category.business.'
+            grep 'INFOPLIST_KEY_LSApplicationCategoryType' build/diagnostics/mac-build-settings.txt || true
+            exit 1
+          }
 
       - name: Compile iPhone + iPad target without signing
         run: |
@@ -218,6 +225,7 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Debug \
             -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            INFOPLIST_KEY_LSApplicationCategoryType="$MAC_APP_CATEGORY" \
             CODE_SIGNING_ALLOWED=NO \
             ARCHS='x86_64 arm64' \
             ONLY_ACTIVE_ARCH=NO \
@@ -511,6 +519,7 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=macOS,variant=Mac Catalyst' \
+            INFOPLIST_KEY_LSApplicationCategoryType="$MAC_APP_CATEGORY" \
             -archivePath "$PWD/$MAC_ARCHIVE" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             CODE_SIGN_STYLE=Manual \
@@ -558,6 +567,13 @@ jobs:
           test "$BUNDLE" = "$BUNDLE_ID" || {
             echo "Mac bundle mismatch: $BUNDLE"; exit 1;
           }
+
+          CATEGORY=$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$INFO" 2>/dev/null || true)
+          test "$CATEGORY" = "$MAC_APP_CATEGORY" || {
+            echo "Mac Info.plist category mismatch: expected $MAC_APP_CATEGORY, got ${CATEGORY:-missing}."
+            exit 1
+          }
+          echo "Mac App Store category: $CATEGORY" | tee build/diagnostics/mac-app-category.txt
 
           BIN="$APP_PATH/Contents/MacOS/$EXECUTABLE"
           test -f "$BIN" || BIN="$APP_PATH/$EXECUTABLE"
