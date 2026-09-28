@@ -44,18 +44,18 @@ test('MCP exposes only read-only internal hotel tools and is gated by the same m
   assert.match(worker, /BUSINESS_CHATGPT_OAUTH_REFRESH_TTL_SECONDS/);
 });
 
-test('v3 returned-price JSON is snapshot-free and server writes only after live hotel/provider/property/old-price checks', () => {
+test('v3 returned-price JSON uses direct operator-confirmed hotel_id pricing with no source verification gates', () => {
   assert.match(models, /schemaName = "iumrah\.hotel-price-update\.v3"/);
   assert.match(worker, /BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA = 'iumrah\.hotel-price-update\.v3'/);
-  assert.match(worker, /CHATGPT_HOTEL_PRICE_ALREADY_CHANGED/);
-  assert.match(worker, /CHATGPT_HOTEL_PROPERTY_MISMATCH/);
-  assert.match(worker, /currentProvider !== update\.provider/);
-  assert.match(worker, /hotelSyncSameProperty\(source\.source_url, update\.checked_source_url, currentProvider\)/);
-  assert.match(worker, /method='chatgpt-json-v3'|method, status, fetched_at/);
+  assert.match(worker, /direct_json_apply: true/);
+  assert.match(worker, /chatgpt-json-v3-direct/);
+  assert.match(worker, /const nextPrice = Number\(update\.new_nightly_usd\)/);
 
   const applyStart = worker.indexOf('async function applyBusinessChatGPTHotelUpdates');
   const applyEnd = worker.indexOf('const BUSINESS_FLIGHT_SYNC_VERSION', applyStart);
   const applyBody = worker.slice(applyStart, applyEnd);
+  assert.doesNotMatch(applyBody, /CHATGPT_HOTEL_PRICE_ALREADY_CHANGED|CHATGPT_HOTEL_PROPERTY_MISMATCH|CHATGPT_HOTEL_SOURCE_NOT_VERIFIED|CHATGPT_HOTEL_ITEM_NOT_VERIFIED/);
+  assert.doesNotMatch(applyBody, /currentProvider !== update\.provider|hotelSyncSameProperty|old_nightly_usd/);
   assert.doesNotMatch(applyBody, /snapshot_id|snapshotID|INVALID_DATES|INVALID_OCCUPANCY/);
   assert.doesNotMatch(api, /hotelSyncURLContainsDates/);
 });
@@ -63,7 +63,7 @@ test('v3 returned-price JSON is snapshot-free and server writes only after live 
 test('Business UI accepts ChatGPT v3 JSON and keeps hotel importer plus Flight Sync separate', () => {
   assert.match(syncView, /TextEditor\(text: \$pastedJSON\)/);
   assert.match(syncView, /iumrah\.hotel-price-update\.v3/);
-  assert.match(syncView, /Проверить JSON/);
+  assert.match(syncView, /Прочитать JSON/);
   assert.match(syncView, /Обновить выбранные цены/);
   assert.match(api, /applyHotelChatGPTUpdate/);
   assert.match(hotelsView, /AddHotelView\(\)/);

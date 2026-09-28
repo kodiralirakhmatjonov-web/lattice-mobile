@@ -2177,13 +2177,11 @@ async function businessChatGPTHotelRows(env) {
 function businessChatGPTHotelMonitoringContract() {
   return {
     access_policy: 'This is a live internal feed. There is no snapshot id, bearer link, TTL, read limit, or date gate. Access exists only while the operator keeps ChatGPT access enabled in iumrah Business.',
-    source_of_truth: 'Read non-Primary hotels and current prices directly from live HOTELS_DB every time. Primary Hotels are a separate manual-pricing layer and are never exported to ChatGPT price monitoring.',
-    exact_property_only: true,
-    provider_rule: 'Use the stored provider/source_url for the exact same physical property. A checked source must resolve to the same provider/property identity before a changed price can be applied.',
-    date_rule: 'Monitoring dates are observation metadata only. They never authorize or block an update. Prefer a comparable 1-room / 2-adult nightly rate when possible.',
-    price_rule: 'Return only a directly verified sellable nightly rate. Never use another property, a search-result snippet, a crossed-out reference price, or an unverified recommendation card.',
-    currency_rule: 'Return new_nightly_usd in USD. If only SAR is directly shown, convert at 1 USD = 3.75 SAR and preserve observed_nightly_amount and observed_currency.',
-    apply_rule: 'The server checks that the hotel is not Primary, then checks live hotel_id + city + provider/property identity + live old_nightly_usd immediately before writing. No snapshot or date is checked.',
+    source_of_truth: 'Read non-Primary hotels and current prices directly from live HOTELS_DB every time. Primary Hotels remain a separate manual-pricing layer and are not exported.',
+    direct_json_apply: true,
+    update_key: 'hotel_id',
+    price_rule: 'Return the best usable nightly price in new_nightly_usd. If the observed price is in SAR, new_nightly_usd may be observed_nightly_amount / 3.75. provider/source/confidence/old price are audit metadata only and do not block an operator-confirmed update.',
+    apply_rule: 'After the operator selects hotels, the server writes the supplied usable price by hotel_id. It does not reject because provider, property identity, confidence, city, source URL, checked URL, or old_nightly_usd changed. Primary Hotels remain manual-only.',
     result_schema: BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA
   };
 }
@@ -2198,17 +2196,17 @@ function businessChatGPTHotelResultTemplate() {
       hotel_name: 'copy from live feed',
       city: 'Makkah | Madinah',
       status: 'changed | unchanged | unverified',
-      old_nightly_usd: 'copy current_nightly_usd from the live feed used for this check, or null if no current price exists',
-      new_nightly_usd: 'verified USD nightly price or null',
-      observed_nightly_amount: 'exact displayed amount or null',
-      observed_currency: 'exact displayed currency or null',
-      provider: 'copy from live feed',
-      source_url: 'copy from live feed exactly',
-      checked_source_url: 'exact property page actually checked',
+      old_nightly_usd: 'optional audit value; may copy current_nightly_usd',
+      new_nightly_usd: 'preferred usable USD nightly price; this is the direct update value',
+      observed_nightly_amount: 'optional observed amount; used as fallback when new_nightly_usd is null',
+      observed_currency: 'USD or SAR when observed_nightly_amount is used',
+      provider: 'optional audit metadata',
+      source_url: 'optional audit metadata',
+      checked_source_url: 'optional audit metadata',
       observed_check_in: 'optional YYYY-MM-DD; audit only',
       observed_check_out: 'optional YYYY-MM-DD; audit only',
-      confidence: 'high | none',
-      reason: 'short reason or null',
+      confidence: 'optional audit metadata',
+      reason: 'optional note',
       checked_at: 'ISO-8601 timestamp'
     }]
   };
@@ -2502,28 +2500,39 @@ async function businessChatGPTHotelMCP(request, env) {
 function normalizedBusinessChatGPTPriceUpdateItem(value) {
   if (!value || typeof value !== 'object') return null;
   const hotelID = cleanText(value.hotel_id || value.hotelID, 220);
-  const city = normalizedHotelSyncCity(value.city);
-  const status = cleanText(value.status, 40)?.toLowerCase();
-  if (!hotelID || !city || !['changed', 'unchanged', 'unverified'].includes(status)) return null;
+  if (!hotelID) return null;
+  const city = normalizedHotelSyncCity(value.city) || cleanText(value.city, 120) || null;
+  const status = cleanText(value.status, 40)?.toLowerCase() || 'changed';
   const oldRaw = value.old_nightly_usd ?? value.oldNightlyUSD;
   const newRaw = value.new_nightly_usd ?? value.newNightlyUSD;
   const sourceURL = safeHotelSyncSourceURL(value.source_url || value.sourceURL);
   const checkedSourceURL = safeHotelSyncSourceURL(value.checked_source_url || value.checkedSourceURL);
+  const observedAmountRaw = value.observed_nightly_amount ?? value.observedNightlyAmount;
+  const observedAmount = observedAmountRaw === null || observedAmountRaw === undefined || observedAmountRaw === '' ? null : Number(observedAmountRaw);
+  const observedCurrency = cleanText(value.observed_currency || value.observedCurrency, 12)?.toUpperCase() || null;
+  let nextPrice = newRaw === null || newRaw === undefined || newRaw === '' ? null : Number(newRaw);
+  if (!(Number.isFinite(nextPrice) && nextPrice > 0) && Number.isFinite(observedAmount) && observedAmount > 0) {
+    if (observedCurrency === 'SAR') nextPrice = observedAmount / 3.75;
+    else if (!observedCurrency || observedCurrency === 'USD') nextPrice = observedAmount;
+  }
+  if (Number.isFinite(nextPrice) && nextPrice > 0) nextPrice = Math.round(nextPrice * 100) / 100;
+  else nextPrice = null;
+
   return {
     hotel_id: hotelID,
     hotel_name: safeHumanText(value.hotel_name || value.hotelName, 300) || null,
     city,
     status,
     old_nightly_usd: oldRaw === null || oldRaw === undefined || oldRaw === '' ? null : Number(oldRaw),
-    new_nightly_usd: newRaw === null || newRaw === undefined || newRaw === '' ? null : Number(newRaw),
-    observed_nightly_amount: value.observed_nightly_amount == null ? null : Number(value.observed_nightly_amount),
-    observed_currency: cleanText(value.observed_currency, 12)?.toUpperCase() || null,
+    new_nightly_usd: nextPrice,
+    observed_nightly_amount: Number.isFinite(observedAmount) && observedAmount > 0 ? observedAmount : null,
+    observed_currency: observedCurrency,
     provider: normalizedHotelSyncProvider(value.provider, checkedSourceURL || sourceURL),
     source_url: sourceURL,
     checked_source_url: checkedSourceURL,
     observed_check_in: validLocalDate(value.observed_check_in || value.observedCheckIn),
     observed_check_out: validLocalDate(value.observed_check_out || value.observedCheckOut),
-    confidence: cleanText(value.confidence, 40)?.toLowerCase() || 'none',
+    confidence: cleanText(value.confidence, 40)?.toLowerCase() || null,
     reason: safeHumanText(value.reason, 700) || null,
     checked_at: cleanText(value.checked_at || value.checkedAt, 80) || null
   };
@@ -2537,11 +2546,12 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
   if (!document || document.schema !== BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA) {
     return json({ ok: false, error: 'CHATGPT_HOTEL_INVALID_RESULT_SCHEMA' }, 400);
   }
+
   const updates = Array.isArray(document.hotels) ? document.hotels.map(normalizedBusinessChatGPTPriceUpdateItem).filter(Boolean) : [];
   const updateByID = new Map(updates.map(item => [item.hotel_id, item]));
   const selectedIDs = Array.isArray(parsed.value?.hotel_ids)
     ? parsed.value.hotel_ids.map(item => cleanText(item, 220)).filter(Boolean)
-    : updates.filter(item => item.status === 'changed').map(item => item.hotel_id);
+    : updates.filter(item => Number.isFinite(Number(item.new_nightly_usd)) && Number(item.new_nightly_usd) > 0).map(item => item.hotel_id);
   if (!selectedIDs.length) return json({ ok: false, error: 'CHATGPT_HOTEL_NO_SELECTION' }, 400);
 
   const now = new Date().toISOString();
@@ -2552,43 +2562,31 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
   for (const hotelID of selectedIDs) {
     const update = updateByID.get(hotelID);
     if (!update) { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_ITEM_NOT_FOUND' }); continue; }
-    if (update.status !== 'changed' || update.confidence !== 'high') { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_ITEM_NOT_VERIFIED' }); continue; }
 
     const nextPrice = Number(update.new_nightly_usd);
-    if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'CHATGPT_HOTEL_INVALID_NEW_PRICE' }); continue; }
-    if (await isPrimaryHotel(env, hotelID)) { rejected.push({ hotelID, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' }); continue; }
+    if (!Number.isFinite(nextPrice) || nextPrice <= 0 || nextPrice >= 100000) {
+      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_INVALID_NEW_PRICE' });
+      continue;
+    }
+    if (await isPrimaryHotel(env, hotelID)) {
+      rejected.push({ hotelID, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' });
+      continue;
+    }
 
-    const hotel = await env.HOTELS_DB.prepare('SELECT id, city, status FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first().catch(() => null);
+    const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first().catch(() => null);
     if (!hotel) { rejected.push({ hotelID, error: 'HOTEL_NOT_FOUND' }); continue; }
-    if (normalizedHotelSyncCity(hotel.city) !== update.city) { rejected.push({ hotelID, error: 'CITY_MISMATCH' }); continue; }
 
-    const currentRow = await readHotelPriceRow(env, hotelID);
-    const currentPriceRaw = hotelPriceFromRow(currentRow)?.nightlyUSD;
-    const currentPrice = Number(currentPriceRaw);
-    const oldPrice = Number(update.old_nightly_usd);
-    const currentHasPrice = Number.isFinite(currentPrice) && currentPrice > 0;
-    const oldHasPrice = Number.isFinite(oldPrice) && oldPrice > 0;
-    if ((currentHasPrice || oldHasPrice) && (!currentHasPrice || !oldHasPrice || Math.abs(currentPrice - oldPrice) >= 0.01)) {
-      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_PRICE_ALREADY_CHANGED' }); continue;
-    }
-
-    const source = await ensureHotelPriceSourceLock(env, hotelID);
-    const currentProvider = normalizedHotelSyncProvider(source?.provider, source?.source_url);
-    if (!source?.source_url || !currentProvider || !update.provider || currentProvider !== update.provider) {
-      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_SOURCE_NOT_VERIFIED' }); continue;
-    }
-    if (update.source_url && !hotelSyncSameProperty(source.source_url, update.source_url, currentProvider)) {
-      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_PROPERTY_MISMATCH' }); continue;
-    }
-    if (!update.checked_source_url || !hotelSyncSameProperty(source.source_url, update.checked_source_url, currentProvider)) {
-      rejected.push({ hotelID, error: 'CHATGPT_HOTEL_PROPERTY_MISMATCH' }); continue;
-    }
-
+    // Metadata is preserved when available, but it is never an authorization gate.
+    const source = await ensureHotelPriceSourceLock(env, hotelID).catch(() => null);
+    const sourceURL = source?.source_url || update.source_url || update.checked_source_url || null;
+    const resolvedURL = update.checked_source_url || sourceURL || null;
+    const provider = normalizedHotelSyncProvider(source?.provider || update.provider, sourceURL || resolvedURL) || null;
     const observedCheckIn = update.observed_check_in || null;
     const observedCheckOut = update.observed_check_out || null;
     const observedCurrency = /^[A-Z]{3}$/.test(update.observed_currency || '') ? update.observed_currency : 'USD';
     const observedAmount = Number(update.observed_nightly_amount);
     const amountOriginal = Number.isFinite(observedAmount) && observedAmount > 0 ? observedAmount : nextPrice;
+    const roundedPrice = Math.round(nextPrice * 100) / 100;
 
     await env.HOTELS_DB.prepare(`
       INSERT INTO hotel_price_cache (
@@ -2598,12 +2596,12 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
         confidence, method, status, fetched_at, expires_at, last_attempt_at, next_retry_at,
         last_http_status, error, pending_nightly_price_usd, pending_seen_count,
         pending_first_seen_at, pending_last_seen_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'nightly', ?, ?, ?, ?, NULL, NULL, NULL, 0.99, 'chatgpt-json-v3', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'nightly', ?, ?, ?, ?, NULL, NULL, NULL, 1.0, 'chatgpt-json-v3-direct', 'fresh', ?, ?, ?, NULL, 200, NULL, NULL, 0, NULL, NULL, ?, ?)
       ON CONFLICT(hotel_id) DO UPDATE SET
-        source_id=excluded.source_id,
-        provider=excluded.provider,
-        source_url=excluded.source_url,
-        resolved_url=excluded.resolved_url,
+        source_id=COALESCE(excluded.source_id, hotel_price_cache.source_id),
+        provider=COALESCE(excluded.provider, hotel_price_cache.provider),
+        source_url=COALESCE(excluded.source_url, hotel_price_cache.source_url),
+        resolved_url=COALESCE(excluded.resolved_url, hotel_price_cache.resolved_url),
         amount_original=excluded.amount_original,
         currency_original=excluded.currency_original,
         price_basis='nightly',
@@ -2614,8 +2612,8 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
         quote_nights=NULL,
         quote_adults=NULL,
         quote_rooms=NULL,
-        confidence=0.99,
-        method='chatgpt-json-v3',
+        confidence=1.0,
+        method='chatgpt-json-v3-direct',
         status='fresh',
         fetched_at=excluded.fetched_at,
         expires_at=excluded.expires_at,
@@ -2630,14 +2628,14 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
         updated_at=excluded.updated_at
     `).bind(
       hotelID,
-      source.source_id || null,
-      currentProvider,
-      source.source_url,
-      update.checked_source_url,
+      source?.source_id || null,
+      provider,
+      sourceURL,
+      resolvedURL,
       amountOriginal,
       observedCurrency,
-      Math.round(nextPrice * 100) / 100,
-      Math.round(nextPrice * 100) / 100,
+      roundedPrice,
+      roundedPrice,
       observedCheckIn,
       observedCheckOut,
       now,
@@ -2646,6 +2644,8 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
       now,
       now
     ).run();
+
+    // JSON price becomes the active catalog price immediately.
     await env.HOTELS_DB.prepare('DELETE FROM hotel_price_overrides WHERE hotel_id=?').bind(hotelID).run();
     applied.push(hotelID);
   }

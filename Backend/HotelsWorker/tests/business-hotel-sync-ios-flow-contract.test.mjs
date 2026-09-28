@@ -30,8 +30,9 @@ test('ChatGPT price result is v3 and has no snapshot/date/occupancy document gat
   const previewStart = models.indexOf('struct BusinessHotelPricePreviewItem', documentStart);
   const document = models.slice(documentStart, previewStart);
   assert.doesNotMatch(document, /snapshotID|checkIn|checkOut|rooms|adults|currency/);
-  assert.match(api, /PRICE_ALREADY_CHANGED/);
-  assert.match(api, /chatGPTHotelSameProperty/);
+  assert.match(api, /chatGPTHotelEffectivePriceUSD/);
+  assert.match(api, /NO_USABLE_PRICE/);
+  assert.match(api, /reviewStatus: "ready"/);
   assert.match(api, /\/api\/admin\/hotels\/operations\/chatgpt-hotels\/apply/);
 });
 

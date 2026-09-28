@@ -54,6 +54,9 @@ extension APIClient {
             throw APIError.server("CHATGPT_HOTEL_EMPTY_RESULT")
         }
 
+        // Direct JSON pricing mode: hotel_id + a usable price are enough.
+        // provider/source/property/confidence/old_nightly_usd are informational only
+        // and never block an operator-confirmed update.
         let currentByID = Dictionary(uniqueKeysWithValues: currentHotels.map { ($0.id, $0) })
         let items = document.hotels.map { update -> BusinessHotelPricePreviewItem in
             guard let hotel = currentByID[update.hotelID] else {
@@ -63,47 +66,12 @@ extension APIClient {
                 return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "PRIMARY_HOTEL_MANUAL_PRICE_ONLY", selectable: false)
             }
 
-            let expectedCity = chatGPTHotelCanonicalCity(update.city)
-            let currentCity = chatGPTHotelCanonicalCity(hotel.city)
-            let currentPrice = chatGPTHotelRoundedPrice(hotel.price?.nightlyUSD)
-            let currentSource = hotel.price?.sourceURL ?? hotel.sourceURL
-            let currentProvider = chatGPTHotelProvider(hotel.price?.provider ?? hotel.sourceProvider, sourceURL: currentSource)
-            let updateProvider = chatGPTHotelProvider(update.provider, sourceURL: update.checkedSourceURL ?? update.sourceURL)
-            let statusValue = update.status.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-
-            guard expectedCity != nil, currentCity == expectedCity else {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "CITY_MISMATCH", selectable: false)
+            guard let next = chatGPTHotelEffectivePriceUSD(update) else {
+                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "NO_USABLE_PRICE", selectable: false)
             }
 
-            if statusValue == "unchanged" {
+            if let current = chatGPTHotelRoundedPrice(hotel.price?.nightlyUSD), abs(current - next) < 0.01 {
                 return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "unchanged", issue: nil, selectable: false)
-            }
-            if statusValue == "unverified" {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "unverified", issue: update.reason ?? "PRICE_NOT_VERIFIED", selectable: false)
-            }
-            guard statusValue == "changed" else {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "INVALID_RESULT_STATUS", selectable: false)
-            }
-            guard (update.confidence ?? "").lowercased() == "high" else {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "LOW_CONFIDENCE", selectable: false)
-            }
-            guard let next = chatGPTHotelRoundedPrice(update.newNightlyUSD), next >= 15, next <= 5000 else {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "INVALID_NEW_PRICE", selectable: false)
-            }
-
-            if !chatGPTHotelPricesMatch(currentPrice, update.oldNightlyUSD) {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "PRICE_ALREADY_CHANGED", selectable: false)
-            }
-            guard let currentProvider, updateProvider == currentProvider else {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "CHECKED_SOURCE_NOT_VERIFIED", selectable: false)
-            }
-            if let copiedSource = update.sourceURL,
-               !chatGPTHotelSameProperty(currentSource, copiedSource, provider: currentProvider) {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "conflict", issue: "PROPERTY_CHANGED", selectable: false)
-            }
-            guard let checked = update.checkedSourceURL,
-                  chatGPTHotelSameProperty(currentSource, checked, provider: currentProvider) else {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "CHECKED_SOURCE_NOT_VERIFIED", selectable: false)
             }
 
             return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "ready", issue: nil, selectable: true)
@@ -113,8 +81,8 @@ extension APIClient {
             total: items.count,
             changed: items.filter { $0.reviewStatus == "ready" }.count,
             unchanged: items.filter { $0.reviewStatus == "unchanged" }.count,
-            conflicts: items.filter { $0.reviewStatus == "conflict" }.count,
-            unverified: items.filter { $0.reviewStatus == "unverified" }.count,
+            conflicts: 0,
+            unverified: 0,
             invalid: items.filter { $0.reviewStatus == "invalid" }.count,
             items: items
         )
@@ -139,6 +107,16 @@ extension APIClient {
         if raw.contains("makkah") || raw.contains("mecca") || raw.contains("مكة") { return "Makkah" }
         if raw.contains("madinah") || raw.contains("medina") || raw.contains("المدينة") { return "Madinah" }
         return nil
+    }
+
+    private func chatGPTHotelEffectivePriceUSD(_ update: BusinessHotelPriceUpdateItem) -> Double? {
+        if let direct = chatGPTHotelRoundedPrice(update.newNightlyUSD) { return direct }
+        guard let observed = chatGPTHotelRoundedPrice(update.observedNightlyAmount) else { return nil }
+        switch (update.observedCurrency ?? "USD").uppercased() {
+        case "SAR": return chatGPTHotelRoundedPrice(observed / 3.75)
+        case "USD", "": return observed
+        default: return nil
+        }
     }
 
     private func chatGPTHotelRoundedPrice(_ value: Double?) -> Double? {
@@ -209,7 +187,7 @@ extension APIClient {
         selectable: Bool
     ) -> BusinessHotelPricePreviewItem {
         let oldPrice = chatGPTHotelRoundedPrice(update.oldNightlyUSD)
-        let newPrice = chatGPTHotelRoundedPrice(update.newNightlyUSD)
+        let newPrice = chatGPTHotelEffectivePriceUSD(update)
         let current = chatGPTHotelRoundedPrice(hotel?.price?.nightlyUSD)
         let baseline = current ?? oldPrice
         let delta = (baseline != nil && newPrice != nil) ? ((newPrice! - baseline!) * 100).rounded() / 100 : nil

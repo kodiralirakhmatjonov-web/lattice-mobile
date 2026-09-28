@@ -232,7 +232,7 @@ struct HotelPriceMonitoringView: View {
                     .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 if pastedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("{\n  \"schema\": \"iumrah.hotel-price-update.v3\",\n  \"hotels\": [...]\n}")
+                    Text("{\n  \"schema\": \"iumrah.hotel-price-update.v3\",\n  \"hotels\": [\n    {\"hotel_id\": \"...\", \"new_nightly_usd\": 150}\n  ]\n}")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 16)
@@ -272,7 +272,7 @@ struct HotelPriceMonitoringView: View {
             } label: {
                 HStack {
                     if previewing { ProgressView() }
-                    Label("Проверить JSON", systemImage: "checkmark.shield")
+                    Label("Прочитать JSON", systemImage: "doc.text.magnifyingglass")
                         .font(.headline)
                     Spacer()
                 }
@@ -284,7 +284,7 @@ struct HotelPriceMonitoringView: View {
             .foregroundStyle(.primary)
             .disabled(previewing || applying || pastedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-            Text("Даты и snapshot не участвуют в применении. Для каждой изменённой цены проверяются только живой hotel_id, город, provider/property и текущая old_nightly_usd. Это защищает от записи цены другого отеля, но не ограничивает мониторинг датой.")
+            Text("Прямой режим: для записи достаточно hotel_id и цены. provider, source URL, confidence, old_nightly_usd и статус проверки больше не блокируют обновление. Если new_nightly_usd пустой, можно использовать observed_nightly_amount в USD или SAR (SAR автоматически делится на 3.75). Primary Hotels остаются ручными.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -359,7 +359,7 @@ struct HotelPriceMonitoringView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Предпросмотр").font(.title2.bold())
-                    Text("Live-проверка по текущей базе")
+                    Text("Готовность цен к прямой записи")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -367,13 +367,9 @@ struct HotelPriceMonitoringView: View {
                 Text("\(preview.total)").font(.headline.monospacedDigit())
             }
             HStack(spacing: 8) {
-                summaryPill("Изменено", preview.changed, .green)
+                summaryPill("Готово", preview.changed, .green)
                 summaryPill("Без изменений", preview.unchanged, .secondary)
-                summaryPill("Не проверено", preview.unverified, .orange)
-            }
-            HStack(spacing: 8) {
-                summaryPill("Конфликт", preview.conflicts, .red)
-                summaryPill("Ошибка", preview.invalid, .red)
+                summaryPill("Без цены", preview.invalid, .orange)
             }
         }
         .padding(16)
@@ -452,10 +448,12 @@ struct HotelPriceMonitoringView: View {
                     statusBadge(item)
                 }
 
-                if let old = item.oldNightlyUSD, let new = item.newNightlyUSD, item.status.lowercased() == "changed" {
+                if let new = item.newNightlyUSD, item.reviewStatus == "ready" {
                     HStack(spacing: 8) {
-                        Text(Self.usd(old)).foregroundStyle(.secondary)
-                        Image(systemName: "arrow.right").font(.caption.bold()).foregroundStyle(.tertiary)
+                        if let old = item.oldNightlyUSD {
+                            Text(Self.usd(old)).foregroundStyle(.secondary)
+                            Image(systemName: "arrow.right").font(.caption.bold()).foregroundStyle(.tertiary)
+                        }
                         Text(Self.usd(new)).fontWeight(.bold)
                         if let percent = item.deltaPercent {
                             Text(String(format: "%+.1f%%", percent))
@@ -492,10 +490,8 @@ struct HotelPriceMonitoringView: View {
             switch item.reviewStatus {
             case "ready": return ("Готово", .green)
             case "unchanged": return ("Без изменений", .secondary)
-            case "unverified": return ("Не подтверждено", .orange)
-            case "conflict": return ("Конфликт", .red)
             case "applied": return ("Обновлено", .green)
-            default: return ("Ошибка", .red)
+            default: return ("Нет цены", .orange)
             }
         }()
         return Text(value.0)
@@ -570,7 +566,7 @@ struct HotelPriceMonitoringView: View {
             importedDocument = document
             preview = resolved
             selectedHotelIDs = Set(resolved.items.filter(\.selectable).map(\.hotelID))
-            notice = resolved.changed == 0 ? "JSON проверен. Подтверждённых изменений нет." : "JSON проверен по живой базе. Ничего ещё не опубликовано."
+            notice = resolved.changed == 0 ? "JSON прочитан. Новых цен для записи нет." : "JSON прочитан. Готово к записи цен: \(resolved.changed)."
         } catch {
             importedDocument = nil
             preview = nil
@@ -641,6 +637,7 @@ struct HotelPriceMonitoringView: View {
 
     private func issueText(_ issue: String) -> String {
         switch issue {
+        case "NO_USABLE_PRICE": return "В JSON нет пригодной цены: укажите new_nightly_usd либо observed_nightly_amount в USD/SAR."
         case "PRICE_ALREADY_CHANGED", "CHATGPT_HOTEL_PRICE_ALREADY_CHANGED": return "Цена в базе уже изменилась после проверки. Возьмите свежую old_nightly_usd и повторите только этот отель."
         case "PROPERTY_CHANGED", "CHATGPT_HOTEL_PROPERTY_MISMATCH": return "Источник ведёт на другой hotel/property."
         case "CHECKED_SOURCE_NOT_VERIFIED", "CHATGPT_HOTEL_SOURCE_NOT_VERIFIED": return "Не подтверждён точный provider/property этого отеля."

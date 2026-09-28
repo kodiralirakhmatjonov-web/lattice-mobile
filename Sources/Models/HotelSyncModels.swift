@@ -50,6 +50,26 @@ struct BusinessHotelPriceUpdateItem: Codable, Hashable, Identifiable {
         case observedCheckOut = "observed_check_out"
         case checkedAt = "checked_at"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hotelID = try container.decode(String.self, forKey: .hotelID)
+        hotelName = try container.decodeIfPresent(String.self, forKey: .hotelName)
+        city = try container.decodeIfPresent(String.self, forKey: .city) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "changed"
+        oldNightlyUSD = try container.decodeIfPresent(Double.self, forKey: .oldNightlyUSD)
+        newNightlyUSD = try container.decodeIfPresent(Double.self, forKey: .newNightlyUSD)
+        observedNightlyAmount = try container.decodeIfPresent(Double.self, forKey: .observedNightlyAmount)
+        observedCurrency = try container.decodeIfPresent(String.self, forKey: .observedCurrency)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        sourceURL = try container.decodeIfPresent(String.self, forKey: .sourceURL)
+        checkedSourceURL = try container.decodeIfPresent(String.self, forKey: .checkedSourceURL)
+        observedCheckIn = try container.decodeIfPresent(String.self, forKey: .observedCheckIn)
+        observedCheckOut = try container.decodeIfPresent(String.self, forKey: .observedCheckOut)
+        confidence = try container.decodeIfPresent(String.self, forKey: .confidence)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        checkedAt = try container.decodeIfPresent(String.self, forKey: .checkedAt)
+    }
 }
 
 struct BusinessHotelPriceUpdateDocument: Codable, Hashable {

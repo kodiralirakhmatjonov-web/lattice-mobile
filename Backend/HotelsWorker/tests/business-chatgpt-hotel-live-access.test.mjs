@@ -230,27 +230,42 @@ test('v3 JSON applies without snapshot, dates, occupancy, or per-city feed state
   assert.equal(body.rejectedCount, 0);
   const row = f.db.prepare('SELECT nightly_price_usd, method, quote_check_in, quote_check_out FROM hotel_price_cache WHERE hotel_id=?').get('h1');
   assert.equal(row.nightly_price_usd, 160);
-  assert.equal(row.method, 'chatgpt-json-v3');
+  assert.equal(row.method, 'chatgpt-json-v3-direct');
   assert.equal(row.quote_check_in, null);
   assert.equal(row.quote_check_out, null);
 });
 
-test('v3 JSON rejects wrong property and stale old price per hotel', async () => {
+test('v3 JSON directly applies even when property metadata is mismatched, old price is stale, or confidence is low', async () => {
   const f = fixture();
-  const wrongProperty = {
+  const direct = {
     schema:'iumrah.hotel-price-update.v3', version:3,
-    hotels:[{ hotel_id:'h1', city:'Makkah', status:'changed', old_nightly_usd:172.8, new_nightly_usd:150, provider:'Expedia', source_url:f.rows[0][6], checked_source_url:'https://www.expedia.sa/en/Makkah-Hotels-Other.h111111.Hotel-Information?expediaPropertyId=111111', confidence:'high' }]
+    hotels:[{ hotel_id:'h1', city:'Madinah', status:'unverified', old_nightly_usd:1, new_nightly_usd:150, provider:'Booking', source_url:f.rows[0][6], checked_source_url:'https://www.expedia.sa/en/Makkah-Hotels-Other.h111111.Hotel-Information?expediaPropertyId=111111', confidence:'none' }]
   };
-  let body = await (await f.api.applyBusinessChatGPTHotelUpdates(postJSON('https://iumrah.app/test', { result:wrongProperty, hotel_ids:['h1'] }), f.env, user)).json();
-  assert.equal(body.appliedCount, 0);
-  assert.equal(body.rejected[0].error, 'CHATGPT_HOTEL_PROPERTY_MISMATCH');
+  let body = await (await f.api.applyBusinessChatGPTHotelUpdates(postJSON('https://iumrah.app/test', { result:direct, hotel_ids:['h1'] }), f.env, user)).json();
+  assert.equal(body.appliedCount, 1);
+  assert.equal(body.rejectedCount, 0);
+  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 150);
 
   f.db.prepare('UPDATE hotel_price_cache SET nightly_price_usd=180 WHERE hotel_id=?').run('h1');
   const stale = {
     schema:'iumrah.hotel-price-update.v3', version:3,
-    hotels:[{ hotel_id:'h1', city:'Makkah', status:'changed', old_nightly_usd:172.8, new_nightly_usd:150, provider:'Expedia', source_url:f.rows[0][6], checked_source_url:f.rows[0][6], confidence:'high' }]
+    hotels:[{ hotel_id:'h1', city:'Makkah', status:'changed', old_nightly_usd:172.8, new_nightly_usd:140, confidence:'none' }]
   };
   body = await (await f.api.applyBusinessChatGPTHotelUpdates(postJSON('https://iumrah.app/test', { result:stale, hotel_ids:['h1'] }), f.env, user)).json();
-  assert.equal(body.appliedCount, 0);
-  assert.equal(body.rejected[0].error, 'CHATGPT_HOTEL_PRICE_ALREADY_CHANGED');
+  assert.equal(body.appliedCount, 1);
+  assert.equal(body.rejectedCount, 0);
+  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 140);
 });
+
+test('v3 JSON falls back to observed SAR amount when new_nightly_usd is null', async () => {
+  const f = fixture();
+  const result = {
+    schema:'iumrah.hotel-price-update.v3', version:3,
+    hotels:[{ hotel_id:'h1', city:'Makkah', status:'unverified', new_nightly_usd:null, observed_nightly_amount:562.5, observed_currency:'SAR', confidence:'none' }]
+  };
+  const body = await (await f.api.applyBusinessChatGPTHotelUpdates(postJSON('https://iumrah.app/test', { result, hotel_ids:['h1'] }), f.env, user)).json();
+  assert.equal(body.appliedCount, 1);
+  assert.equal(body.rejectedCount, 0);
+  assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 150);
+});
+
