@@ -62,9 +62,10 @@ extension APIClient {
             guard let hotel = currentByID[update.hotelID] else {
                 return chatGPTHotelPreviewItem(update, name: update.hotelName ?? update.hotelID, reviewStatus: "invalid", issue: "HOTEL_NOT_FOUND", selectable: false)
             }
-            if primaryHotelIDs.contains(update.hotelID) {
-                return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "PRIMARY_HOTEL_MANUAL_PRICE_ONLY", selectable: false)
-            }
+            // Primary Hotels stay manual-only, but this JSON import is an explicit
+            // operator action. The server persists their selected value into
+            // hotel_price_overrides instead of the automatic provider cache.
+            _ = primaryHotelIDs.contains(update.hotelID)
 
             guard let next = chatGPTHotelEffectivePriceUSD(update) else {
                 return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "NO_USABLE_PRICE", selectable: false)

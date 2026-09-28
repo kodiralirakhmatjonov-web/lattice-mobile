@@ -101,7 +101,7 @@ struct HotelPriceMonitoringView: View {
                 Spacer()
             }
 
-            Text("Без snapshot, без дат доступа, без временных ссылок и без срока действия. ChatGPT читает только обычные отели. Primary Hotels полностью исключены из отчёта и массового обновления: их цены меняются вручную во вкладке Primary Hotels.")
+            Text("Без snapshot, без дат доступа, без временных ссылок и без срока действия. ChatGPT читает все отели. Для Primary Hotels найденная цена применяется только после Вашего подтверждения и сохраняется как ручной override — автоматический мониторинг Primary по-прежнему отключён.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -153,7 +153,7 @@ struct HotelPriceMonitoringView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(enabled ? "Доступ ChatGPT открыт" : "Доступ ChatGPT закрыт")
                         .font(.headline)
-                    Text("ChatGPT: \(total) · Makkah \(makkah) · Madinah \(madinah) · Primary вручную: \(primary)")
+                    Text("ChatGPT: \(total) · Makkah \(makkah) · Madinah \(madinah) · Primary: \(primary)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -174,7 +174,7 @@ struct HotelPriceMonitoringView: View {
             .foregroundStyle(.secondary)
 
             Text(enabled
-                 ? "ChatGPT может читать все обычные отели, nightly USD, provider и source URL. Primary Hotels сюда не входят и остаются полностью ручными."
+                 ? "ChatGPT может читать все отели, nightly USD, provider и source URL. Primary Hotels тоже входят в JSON, но их цена записывается только как подтверждённый Вами ручной override."
                  : "Откройте доступ один раз. Он останется открытым постоянно, пока Вы сами не нажмёте «Закрыть доступ»."
             )
             .font(.caption)
@@ -284,7 +284,7 @@ struct HotelPriceMonitoringView: View {
             .foregroundStyle(.primary)
             .disabled(previewing || applying || pastedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-            Text("Прямой режим: для записи достаточно hotel_id и цены. provider, source URL, confidence, old_nightly_usd и статус проверки больше не блокируют обновление. Если new_nightly_usd пустой, можно использовать observed_nightly_amount в USD или SAR (SAR автоматически делится на 3.75). Primary Hotels остаются ручными.")
+            Text("Прямой режим: для записи достаточно hotel_id и цены. provider, source URL, confidence, old_nightly_usd и статус проверки не блокируют обновление. Если new_nightly_usd пустой, можно использовать observed_nightly_amount в USD или SAR (SAR автоматически делится на 3.75). Для Primary Hotels выбранная цена сохраняется как ручной override.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -306,7 +306,7 @@ struct HotelPriceMonitoringView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("В JSON входят hotel_id, название, город, звёзды, текущая nightly USD, provider, source URL и служебные данные цены. Primary Hotels по-прежнему исключены. Текущий доступ ChatGPT эта функция не открывает, не закрывает и не меняет.")
+            Text("В JSON входят hotel_id, название, город, звёзды, текущая nightly USD, provider, source URL и служебные данные цены, включая Primary Hotels. Текущий доступ ChatGPT эта функция не открывает, не закрывает и не меняет.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -646,7 +646,7 @@ struct HotelPriceMonitoringView: View {
         case "INVALID_NEW_PRICE", "CHATGPT_HOTEL_INVALID_NEW_PRICE": return "Новая цена некорректна."
         case "HOTEL_NOT_FOUND": return "Отель больше не найден в текущей базе."
         case "CITY_MISMATCH": return "Город отеля не совпадает с живой базой."
-        case "PRIMARY_HOTEL_MANUAL_PRICE_ONLY": return "Primary Hotel исключён из массового мониторинга. Измените его цену вручную во вкладке Primary Hotels."
+        case "PRIMARY_HOTEL_MANUAL_PRICE_ONLY": return "Primary Hotel использует ручную цену. Повторите применение JSON — выбранное значение будет сохранено как manual override."
         default: return issue.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }

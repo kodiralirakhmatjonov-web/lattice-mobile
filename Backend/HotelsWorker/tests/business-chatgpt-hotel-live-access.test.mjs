@@ -269,3 +269,37 @@ test('v3 JSON falls back to observed SAR amount when new_nightly_usd is null', a
   assert.equal(f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1').nightly_price_usd, 150);
 });
 
+
+test('Primary Hotels stay in live JSON and operator-confirmed v3 prices persist as manual overrides', async () => {
+  const f = fixture();
+  f.db.prepare(`INSERT INTO primary_hotels(city,star_category,position,hotel_id,created_at,updated_at) VALUES(?,?,?,?,?,?)`)
+    .run('Makkah',5,1,'h1',f.now,f.now);
+
+  const feed = await f.api.businessChatGPTHotelFeedPayload(f.env);
+  assert.equal(feed.hotel_count, 2);
+  assert.equal(feed.primary_hotel_count, 1);
+  assert.equal(feed.excluded_primary_hotel_count, 0);
+  assert.equal(feed.price_scope, 'all_hotels_primary_manual_override');
+  const primary = feed.hotels.find(item => item.hotel_id === 'h1');
+  assert.equal(primary?.is_primary, true);
+
+  const result = {
+    schema:'iumrah.hotel-price-update.v3', version:3,
+    hotels:[{ hotel_id:'h1', city:'Makkah', status:'changed', new_nightly_usd:199.25, confidence:'high' }]
+  };
+  const body = await (await f.api.applyBusinessChatGPTHotelUpdates(
+    postJSON('https://iumrah.app/test', { result, hotel_ids:['h1'] }), f.env, user
+  )).json();
+  assert.equal(body.appliedCount, 1);
+  assert.equal(body.rejectedCount, 0);
+
+  const override = f.db.prepare('SELECT nightly_price_usd FROM hotel_price_overrides WHERE hotel_id=?').get('h1');
+  assert.equal(override.nightly_price_usd, 199.25);
+  const cached = f.db.prepare('SELECT nightly_price_usd FROM hotel_price_cache WHERE hotel_id=?').get('h1');
+  assert.equal(cached.nightly_price_usd, 172.8, 'Primary JSON apply must not turn automatic provider cache into the manual source');
+
+  const after = await f.api.businessChatGPTHotelFeedPayload(f.env);
+  const refreshed = after.hotels.find(item => item.hotel_id === 'h1');
+  assert.equal(refreshed.current_nightly_usd, 199.25);
+  assert.equal(refreshed.manual_override_nightly_usd, 199.25);
+});

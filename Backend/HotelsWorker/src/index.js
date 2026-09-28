@@ -1747,11 +1747,6 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
     const nextPrice = Number(update.new_nightly_usd);
     const oldPrice = Number(update.old_nightly_usd);
     if (!Number.isFinite(nextPrice) || nextPrice < 15 || nextPrice > 5000) { rejected.push({ hotelID, error: 'HOTEL_SYNC_INVALID_NEW_PRICE' }); continue; }
-    if (await isPrimaryHotel(env, hotelID)) { rejected.push({ hotelID, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' }); continue; }
-    if (!Number.isFinite(oldPrice)) { rejected.push({ hotelID, error: 'HOTEL_SYNC_BASELINE_MISMATCH' }); continue; }
-    if (update.check_in !== checkIn || update.check_out !== checkOut || update.rooms !== 1 || update.adults !== 2 || update.currency !== 'USD') {
-      rejected.push({ hotelID, error: 'HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH' }); continue;
-    }
 
     const hotel = await env.HOTELS_DB.prepare(`
       SELECT id, city, status
@@ -1761,6 +1756,25 @@ async function applyBusinessHotelSyncUpdates(request, env, user) {
     `).bind(hotelID).first().catch(() => null);
     if (!hotel || hotel.status !== 'published') { rejected.push({ hotelID, error: 'HOTEL_NOT_FOUND' }); continue; }
     if (normalizedHotelSyncCity(hotel.city) !== city) { rejected.push({ hotelID, error: 'CITY_MISMATCH' }); continue; }
+
+    if (await isPrimaryHotel(env, hotelID)) {
+      const rounded = Math.round(nextPrice * 100) / 100;
+      await env.HOTELS_DB.prepare(`
+        INSERT INTO hotel_price_overrides (hotel_id, nightly_price_usd, updated_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(hotel_id) DO UPDATE SET
+          nightly_price_usd=excluded.nightly_price_usd,
+          updated_by=excluded.updated_by,
+          updated_at=excluded.updated_at
+      `).bind(hotelID, rounded, owner, now, now).run();
+      applied.push(hotelID);
+      continue;
+    }
+
+    if (!Number.isFinite(oldPrice)) { rejected.push({ hotelID, error: 'HOTEL_SYNC_BASELINE_MISMATCH' }); continue; }
+    if (update.check_in !== checkIn || update.check_out !== checkOut || update.rooms !== 1 || update.adults !== 2 || update.currency !== 'USD') {
+      rejected.push({ hotelID, error: 'HOTEL_SYNC_DATES_OR_OCCUPANCY_MISMATCH' }); continue;
+    }
 
     // Compare-and-set against the live price, not against the latest snapshot. This makes
     // daily/48-hour updates resilient to a new sync run while still preventing stale writes.
@@ -2124,6 +2138,7 @@ async function businessChatGPTHotelRows(env) {
   const result = await env.HOTELS_DB.prepare(`
     SELECT
       h.id, h.slug, h.name, h.city, h.stars, h.status, h.created_at, h.updated_at,
+      EXISTS (SELECT 1 FROM primary_hotels p WHERE p.hotel_id=h.id) AS is_primary,
       hps.source_id AS locked_source_id,
       hps.provider AS locked_source_provider,
       hps.source_url AS locked_source_url,
@@ -2132,7 +2147,6 @@ async function businessChatGPTHotelRows(env) {
     LEFT JOIN hotel_price_cache hp ON hp.hotel_id=h.id
     LEFT JOIN hotel_price_overrides hpo ON hpo.hotel_id=h.id
     LEFT JOIN hotel_price_sources hps ON hps.hotel_id=h.id
-    WHERE NOT EXISTS (SELECT 1 FROM primary_hotels p WHERE p.hotel_id=h.id)
     ORDER BY h.city COLLATE NOCASE ASC, h.name COLLATE NOCASE ASC
   `).all();
 
@@ -2148,6 +2162,7 @@ async function businessChatGPTHotelRows(env) {
     return {
       hotel_id: row.id,
       hotel_name: row.name,
+      is_primary: Number(row.is_primary || 0) === 1,
       slug: row.slug || null,
       city,
       stars: Number.isFinite(Number(row.stars)) ? Number(row.stars) : null,
@@ -2177,11 +2192,11 @@ async function businessChatGPTHotelRows(env) {
 function businessChatGPTHotelMonitoringContract() {
   return {
     access_policy: 'This is a live internal feed. There is no snapshot id, bearer link, TTL, read limit, or date gate. Access exists only while the operator keeps ChatGPT access enabled in iumrah Business.',
-    source_of_truth: 'Read non-Primary hotels and current prices directly from live HOTELS_DB every time. Primary Hotels remain a separate manual-pricing layer and are not exported.',
+    source_of_truth: 'Read all published hotel rows and current prices directly from live HOTELS_DB every time. Primary Hotels are included for operator-driven manual price refresh; they are never placed into automatic provider monitoring.',
     direct_json_apply: true,
     update_key: 'hotel_id',
     price_rule: 'Return the best usable nightly price in new_nightly_usd. If the observed price is in SAR, new_nightly_usd may be observed_nightly_amount / 3.75. provider/source/confidence/old price are audit metadata only and do not block an operator-confirmed update.',
-    apply_rule: 'After the operator selects hotels, the server writes the supplied usable price by hotel_id. It does not reject because provider, property identity, confidence, city, source URL, checked URL, or old_nightly_usd changed. Primary Hotels remain manual-only.',
+    apply_rule: 'After the operator selects hotels, the server writes the supplied usable price by hotel_id. Non-Primary hotels update hotel_price_cache. Primary Hotels write the same operator-confirmed value to hotel_price_overrides, preserving the manual-only Primary pricing contract.',
     result_schema: BUSINESS_CHATGPT_PRICE_UPDATE_SCHEMA
   };
 }
@@ -2234,9 +2249,10 @@ async function businessChatGPTHotelFeedPayload(env) {
     expires_at: null,
     snapshot_id: null,
     date_gate: false,
-    price_scope: 'non_primary_only',
+    price_scope: 'all_hotels_primary_manual_override',
     hotel_count: hotels.length,
-    excluded_primary_hotel_count: primaryHotelCount,
+    primary_hotel_count: primaryHotelCount,
+    excluded_primary_hotel_count: 0,
     city_counts: { Makkah: makkahCount, Madinah: madinahCount },
     monitoring_rules: businessChatGPTHotelMonitoringContract(),
     result_template: businessChatGPTHotelResultTemplate(),
@@ -2263,7 +2279,7 @@ async function businessChatGPTHotelAccessStatus(env) {
     disabledAt: row?.disabled_at || null,
     updatedAt: row?.updated_at || null,
     note: enabled
-      ? 'ChatGPT live access is open for non-Primary hotels. Primary Hotels remain manual-only until an operator changes their price in Primary Hotels.'
+      ? 'ChatGPT live access is open for all hotels. Primary Hotels are included for operator-confirmed price collection and are saved as manual overrides; automatic monitoring remains disabled for them.'
       : 'ChatGPT live access is closed.'
   });
 }
@@ -2568,13 +2584,22 @@ async function applyBusinessChatGPTHotelUpdates(request, env, user) {
       rejected.push({ hotelID, error: 'CHATGPT_HOTEL_INVALID_NEW_PRICE' });
       continue;
     }
-    if (await isPrimaryHotel(env, hotelID)) {
-      rejected.push({ hotelID, error: 'PRIMARY_HOTEL_MANUAL_PRICE_ONLY' });
-      continue;
-    }
-
     const hotel = await env.HOTELS_DB.prepare('SELECT id FROM hotels WHERE id=? LIMIT 1').bind(hotelID).first().catch(() => null);
     if (!hotel) { rejected.push({ hotelID, error: 'HOTEL_NOT_FOUND' }); continue; }
+
+    if (await isPrimaryHotel(env, hotelID)) {
+      const roundedPrice = Math.round(nextPrice * 100) / 100;
+      await env.HOTELS_DB.prepare(`
+        INSERT INTO hotel_price_overrides (hotel_id, nightly_price_usd, updated_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(hotel_id) DO UPDATE SET
+          nightly_price_usd=excluded.nightly_price_usd,
+          updated_by=excluded.updated_by,
+          updated_at=excluded.updated_at
+      `).bind(hotelID, roundedPrice, businessStaffLogin(user) || null, now, now).run();
+      applied.push(hotelID);
+      continue;
+    }
 
     // Metadata is preserved when available, but it is never an authorization gate.
     const source = await ensureHotelPriceSourceLock(env, hotelID).catch(() => null);
