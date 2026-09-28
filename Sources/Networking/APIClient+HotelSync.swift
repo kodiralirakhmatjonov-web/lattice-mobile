@@ -63,15 +63,21 @@ extension APIClient {
                 return chatGPTHotelPreviewItem(update, name: update.hotelName ?? update.hotelID, reviewStatus: "invalid", issue: "HOTEL_NOT_FOUND", selectable: false)
             }
             // Primary Hotels stay manual-only, but this JSON import is an explicit
-            // operator action. The server persists their selected value into
-            // hotel_price_overrides instead of the automatic provider cache.
-            _ = primaryHotelIDs.contains(update.hotelID)
+            // operator action. A Primary Hotel may currently display the same effective
+            // nightly price from hotel_price_cache while still having no manual override.
+            // In that case the value MUST remain selectable so the server can persist it
+            // into hotel_price_overrides. Treating it as a normal "unchanged" row would
+            // make the Primary bridge impossible to complete.
+            let isPrimary = primaryHotelIDs.contains(update.hotelID)
 
             guard let next = chatGPTHotelEffectivePriceUSD(update) else {
                 return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "invalid", issue: "NO_USABLE_PRICE", selectable: false)
             }
 
             if let current = chatGPTHotelRoundedPrice(hotel.price?.nightlyUSD), abs(current - next) < 0.01 {
+                if isPrimary {
+                    return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "ready", issue: nil, selectable: true)
+                }
                 return chatGPTHotelPreviewItem(update, hotel: hotel, reviewStatus: "unchanged", issue: nil, selectable: false)
             }
 

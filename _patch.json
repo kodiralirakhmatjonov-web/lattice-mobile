@@ -1,0 +1,5 @@
+{
+  "name": "iumrah Business Primary Hotel same-price manual override bridge v2",
+  "purpose": "Allow operator-confirmed Primary Hotel prices to be selected and written to hotel_price_overrides even when the supplied price equals the currently displayed effective price.",
+  "files": ["Sources/Networking/APIClient+HotelSync.swift"]
+}
