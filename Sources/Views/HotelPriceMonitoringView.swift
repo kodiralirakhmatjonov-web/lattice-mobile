@@ -1,10 +1,12 @@
 import SwiftUI
+import UIKit
 
 struct HotelPriceMonitoringView: View {
     @Binding var hotels: [HotelListItem]
 
     @State private var accessStatus: BusinessChatGPTHotelAccessStatusResponse?
     @State private var changingAccess = false
+    @State private var copyingJSONCity: String?
 
     @State private var pastedJSON = ""
     @State private var importedDocument: BusinessHotelPriceUpdateDocument?
@@ -24,6 +26,7 @@ struct HotelPriceMonitoringView: View {
                     Color.clear.frame(height: 0).id("hotel-sync-top")
                     introCard
                     accessCard
+                    cityJSONExportCard
                     resultImportCard
 
                     if let preview {
@@ -290,6 +293,67 @@ struct HotelPriceMonitoringView: View {
         .businessCard(radius: 28)
     }
 
+    private var cityJSONExportCard: some View {
+        let makkah = accessStatus?.makkahCount ?? hotels.filter { canonicalCity($0.city) == "Makkah" }.count
+        let madinah = accessStatus?.madinahCount ?? hotels.filter { canonicalCity($0.city) == "Madinah" }.count
+
+        return VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("JSON отелей по городам")
+                    .font(.title2.bold())
+                Text("Отдельная живая выгрузка из HOTELS_DB для мониторинга цен и новых отелей.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("В JSON входят hotel_id, название, город, звёзды, текущая nightly USD, provider, source URL и служебные данные цены. Primary Hotels по-прежнему исключены. Текущий доступ ChatGPT эта функция не открывает, не закрывает и не меняет.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                cityJSONButton(city: "Makkah", title: "Makkah", count: makkah)
+                cityJSONButton(city: "Madinah", title: "Madinah", count: madinah)
+            }
+
+            Label("Каждое копирование перечитывает живую базу — новые обычные отели автоматически попадут в следующий JSON.", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .businessCard(radius: 28)
+    }
+
+    private func cityJSONButton(city: String, title: String, count: Int) -> some View {
+        let isCopying = copyingJSONCity == city
+        return Button {
+            Task { await copyLiveJSON(city: city) }
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 7) {
+                    if isCopying {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "doc.on.doc.fill")
+                    }
+                    Text("Скопировать \(title)")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 0)
+                }
+                Text("\(count) отелей · JSON")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 13)
+            .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
+            .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .disabled(copyingJSONCity != nil || changingAccess || applying || previewing)
+    }
+
     private func previewSummary(_ preview: BusinessHotelPricePreview) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -465,6 +529,24 @@ struct HotelPriceMonitoringView: View {
                 : "Доступ ChatGPT закрыт."
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func copyLiveJSON(city: String) async {
+        copyingJSONCity = city
+        notice = nil
+        errorMessage = nil
+        defer { copyingJSONCity = nil }
+        do {
+            let json = try await APIClient.shared.chatGPTHotelLiveJSON(city: city)
+            UIPasteboard.general.string = json
+            let count = city == "Makkah"
+                ? (accessStatus?.makkahCount ?? hotels.filter { canonicalCity($0.city) == "Makkah" }.count)
+                : (accessStatus?.madinahCount ?? hotels.filter { canonicalCity($0.city) == "Madinah" }.count)
+            notice = "\(city) JSON скопирован: \(count) отелей, текущие цены и источники."
+        } catch {
+            errorMessage = "Не удалось скопировать \(city) JSON: \(error.localizedDescription)"
         }
     }
 

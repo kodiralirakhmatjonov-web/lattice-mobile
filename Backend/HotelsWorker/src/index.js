@@ -977,7 +977,7 @@ async function handleBusinessOperations(request, env, url, parts, user, business
     if (parts.length === 1 && request.method === 'GET') return businessChatGPTHotelAccessStatus(env);
     if (parts.length === 2 && parts[1] === 'access' && request.method === 'POST') return setBusinessChatGPTHotelAccess(env, user, true);
     if (parts.length === 2 && parts[1] === 'access' && request.method === 'DELETE') return setBusinessChatGPTHotelAccess(env, user, false);
-    if (parts.length === 2 && parts[1] === 'body' && request.method === 'GET') return businessChatGPTHotelFeedResponse(env);
+    if (parts.length === 2 && parts[1] === 'body' && request.method === 'GET') return businessChatGPTHotelFeedResponse(env, url);
     if (parts.length === 2 && parts[1] === 'apply' && request.method === 'POST') return applyBusinessChatGPTHotelUpdates(request, env, user);
     return methodNotAllowed();
   }
@@ -2286,8 +2286,20 @@ async function setBusinessChatGPTHotelAccess(env, user, enabled) {
   return businessChatGPTHotelAccessStatus(env);
 }
 
-async function businessChatGPTHotelFeedResponse(env) {
+async function businessChatGPTHotelFeedResponse(env, url = null) {
   const payload = await businessChatGPTHotelFeedPayload(env);
+  const rawCity = url?.searchParams?.get('city');
+  const requestedCity = normalizedHotelSyncCity(rawCity);
+  if (rawCity && !requestedCity) return json({ ok: false, error: 'CHATGPT_HOTEL_INVALID_CITY' }, 400);
+  if (requestedCity) {
+    payload.hotels = payload.hotels.filter(item => normalizedHotelSyncCity(item.city) === requestedCity);
+    payload.hotel_count = payload.hotels.length;
+    payload.city_filter = requestedCity;
+    payload.city_counts = {
+      Makkah: requestedCity === 'Makkah' ? payload.hotel_count : 0,
+      Madinah: requestedCity === 'Madinah' ? payload.hotel_count : 0
+    };
+  }
   return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
     status: 200,
     headers: {

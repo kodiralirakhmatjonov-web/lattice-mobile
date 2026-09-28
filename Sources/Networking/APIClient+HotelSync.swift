@@ -16,8 +16,21 @@ extension APIClient {
         return try decoder.decode(BusinessChatGPTHotelAccessStatusResponse.self, from: data)
     }
 
-    func chatGPTHotelLiveJSON() async throws -> String {
-        let url = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/chatgpt-hotels/body")
+    func chatGPTHotelLiveJSON(city: String? = nil) async throws -> String {
+        let baseURL = AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/operations/chatgpt-hotels/body")
+        let url: URL
+        if let city, !city.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+                throw APIError.server("CHATGPT_HOTEL_INVALID_EXPORT_URL")
+            }
+            components.queryItems = [URLQueryItem(name: "city", value: city)]
+            guard let filteredURL = components.url else {
+                throw APIError.server("CHATGPT_HOTEL_INVALID_EXPORT_URL")
+            }
+            url = filteredURL
+        } else {
+            url = baseURL
+        }
         let (data, response) = try await perform(from: url)
         try validate(response, data: data)
         guard !data.isEmpty,

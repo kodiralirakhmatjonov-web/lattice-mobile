@@ -72,3 +72,19 @@ test('Business UI accepts ChatGPT v3 JSON and keeps hotel importer plus Flight S
   assert.match(flightAPI, /flightSyncStatus/);
   assert.doesNotMatch(flightAPI, /chatGPTHotel/i);
 });
+
+test('Business UI can copy independent live Makkah and Madinah JSON without changing ChatGPT access state', () => {
+  assert.match(api, /func chatGPTHotelLiveJSON\(city: String\? = nil\)/);
+  assert.match(api, /URLQueryItem\(name: "city", value: city\)/);
+  assert.match(worker, /businessChatGPTHotelFeedResponse\(env, url\)/);
+  assert.match(worker, /payload\.city_filter = requestedCity/);
+  assert.match(syncView, /JSON отелей по городам/);
+  assert.match(syncView, /cityJSONButton\(city: "Makkah"/);
+  assert.match(syncView, /cityJSONButton\(city: "Madinah"/);
+  assert.match(syncView, /UIPasteboard\.general\.string = json/);
+
+  const exportStart = syncView.indexOf('private func copyLiveJSON');
+  const exportEnd = syncView.indexOf('private func parseAndPreview', exportStart);
+  const exportBody = syncView.slice(exportStart, exportEnd);
+  assert.doesNotMatch(exportBody, /setChatGPTHotelAccess/);
+});
