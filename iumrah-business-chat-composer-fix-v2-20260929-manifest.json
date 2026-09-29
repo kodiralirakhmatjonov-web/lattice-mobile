@@ -1,0 +1,5 @@
+{
+  "name": "iumrah-business-chat-composer-fix-v2-20260929",
+  "files": ["Sources/Views/ChatsView.swift", "IUMRAH_BUSINESS_CHAT_COMPOSER_FIX_V2_20260929_APPLIED.txt"],
+  "purpose": "Deterministic compact chat composer sizing on iOS 26."
+}

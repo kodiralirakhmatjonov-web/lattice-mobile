@@ -441,6 +441,9 @@ struct ChatConversationView: View {
                         .font(.system(size: 16.5))
                         .textFieldStyle(.plain)
                         .lineLimit(1...3)
+                        // Keep an empty vertical TextField at its true single-line
+                        // height on iOS 26; grow only when actual extra lines exist.
+                        .fixedSize(horizontal: false, vertical: true)
                         .submitLabel(.send)
                         .tint(outgoingAccent)
                         .onSubmit {
@@ -475,7 +478,7 @@ struct ChatConversationView: View {
                         .transition(.scale(scale: 0.82).combined(with: .opacity))
                     }
                 }
-                .frame(minHeight: 48, maxHeight: 66, alignment: .center)
+                .frame(minHeight: 48, maxHeight: 72, alignment: .center)
                 .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
                 .onTapGesture { composerFocused = true }
                 .businessChatGlassSurface(
