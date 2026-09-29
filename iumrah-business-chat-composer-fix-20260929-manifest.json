@@ -1,0 +1,17 @@
+{
+  "name": "iumrah-business-chat-composer-fix",
+  "date": "2026-09-29",
+  "scope": "business-chat-ui-only",
+  "files": [
+    "Sources/Views/ChatsView.swift",
+    "IUMRAH_BUSINESS_CHAT_COMPOSER_FIX_20260929_APPLIED.txt"
+  ],
+  "changes": {
+    "composerAlignment": "center",
+    "composerHeight": "48...66pt",
+    "textLines": "1...3",
+    "plusControl": "42pt",
+    "sendControl": "34pt"
+  },
+  "logicChanged": false
+}
