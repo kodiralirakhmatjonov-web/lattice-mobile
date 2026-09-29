@@ -7,7 +7,7 @@ CREATE TABLE client_push_subscriptions_v2 (
   device_token TEXT NOT NULL,
   booking_id TEXT NOT NULL,
   environment TEXT NOT NULL DEFAULT 'production' CHECK (environment IN ('production','development')),
-  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.beta',
+  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.app',
   locale TEXT NOT NULL DEFAULT 'ru',
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

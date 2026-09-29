@@ -12,6 +12,9 @@ const PUBLIC_CACHE_HEADERS = {
   'cache-control': 'public, max-age=60, s-maxage=300'
 };
 
+const BUSINESS_APP_BUNDLE_ID = 'com.iumrah.business';
+const CLIENT_APP_BUNDLE_ID = 'com.iumrah.app';
+
 export default {
   async fetch(request, env) {
     try {
@@ -708,9 +711,9 @@ async function sendClientPush(env, bookingID, title, body, data = {}) {
   const devices = await env.HOTELS_DB.prepare(`
     SELECT device_token, environment, app_bundle_id, locale
     FROM client_push_subscriptions
-    WHERE booking_id=? AND enabled=1
+    WHERE booking_id=? AND enabled=1 AND app_bundle_id=?
     ORDER BY updated_at DESC LIMIT 50
-  `).bind(bookingID).all().catch(() => ({ results: [] }));
+  `).bind(bookingID, CLIENT_APP_BUNDLE_ID).all().catch(() => ({ results: [] }));
   return sendAPNsToRows(env, devices.results || [], title, body, { ...data, bookingID }, async (device, result) => {
     const now = new Date().toISOString();
     if (result.ok) {
@@ -720,16 +723,16 @@ async function sendClientPush(env, bookingID, title, body, data = {}) {
       await env.HOTELS_DB.prepare('UPDATE client_push_subscriptions SET enabled=?, last_error=?, updated_at=? WHERE device_token=? AND booking_id=?')
         .bind(result.disable ? 0 : 1, result.error.slice(0, 900), now, device.device_token, bookingID).run().catch(() => {});
     }
-  });
+  }, CLIENT_APP_BUNDLE_ID);
 }
 
-async function sendAPNsToRows(env, rows, title, body, data, persistResult) {
+async function sendAPNsToRows(env, rows, title, body, data, persistResult, fallbackTopic = BUSINESS_APP_BUNDLE_ID) {
   if (!rows.length) return { ok: false, skipped: 'NO_DEVICES' };
   const jwt = await apnsJWT(env);
   let sent = 0;
   for (const device of rows) {
     const base = device.environment === 'development' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com';
-    const topic = cleanText(device.app_bundle_id, 220) || 'com.iumrah.business';
+    const topic = cleanText(device.app_bundle_id, 220) || fallbackTopic;
     const response = await fetch(`${base}/3/device/${device.device_token}`, {
       method: 'POST',
       headers: {
@@ -781,9 +784,9 @@ async function sendClientStatusPush(env, bookingID, status) {
   if (!apnsConfigured(env)) return { ok: false, skipped: 'APNS_NOT_CONFIGURED' };
   const devices = await env.HOTELS_DB.prepare(`
     SELECT device_token, environment, app_bundle_id, locale
-    FROM client_push_subscriptions WHERE booking_id=? AND enabled=1
+    FROM client_push_subscriptions WHERE booking_id=? AND enabled=1 AND app_bundle_id=?
     ORDER BY updated_at DESC LIMIT 50
-  `).bind(bookingID).all().catch(() => ({ results: [] }));
+  `).bind(bookingID, CLIENT_APP_BUNDLE_ID).all().catch(() => ({ results: [] }));
   const groups = new Map();
   for (const device of devices.results || []) {
     const copy = clientNotificationCopy(device.locale, 'status', status);
@@ -803,7 +806,7 @@ async function sendClientStatusPush(env, bookingID, status) {
         await env.HOTELS_DB.prepare('UPDATE client_push_subscriptions SET enabled=?, last_error=?, updated_at=? WHERE device_token=? AND booking_id=?')
           .bind(delivery.disable ? 0 : 1, delivery.error.slice(0, 900), now, device.device_token, bookingID).run().catch(() => {});
       }
-    });
+    }, CLIENT_APP_BUNDLE_ID);
     sent += Number(result.sent || 0);
     total += Number(result.total || 0);
   }
@@ -5953,8 +5956,8 @@ async function handleClientOperations(request, env, parts) {
 
 async function registerClientPushDevice(request,env){
  const payload=await request.json().catch(()=>null);const bookingID=cleanText(payload?.bookingID||payload?.bookingId,180);const token=cleanText(payload?.deviceToken,256)?.toLowerCase();if(!bookingID)return json({ok:false,error:'BOOKING_ID_REQUIRED'},400);if(!token||!/^[0-9a-f]{32,256}$/.test(token))return json({ok:false,error:'INVALID_DEVICE_TOKEN'},400);
- const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false});if(!auth.ok)return auth.response;const environment=payload?.environment==='development'?'development':'production';const appBundleID=cleanText(payload?.appBundleID||payload?.appBundleId,220)||'com.iumrah.beta';if(appBundleID!=='com.iumrah.beta')return json({ok:false,error:'INVALID_APP_BUNDLE_ID'},400);const locale=cleanText(payload?.locale,32)||'ru';const now=new Date().toISOString();
- await env.HOTELS_DB.prepare(`INSERT INTO client_push_subscriptions(device_token,booking_id,environment,app_bundle_id,locale,enabled,created_at,updated_at,last_error) VALUES(?,?,?,?,?,1,?,?,NULL) ON CONFLICT(device_token,booking_id) DO UPDATE SET environment=excluded.environment,app_bundle_id=excluded.app_bundle_id,locale=excluded.locale,enabled=1,updated_at=excluded.updated_at,last_error=NULL`).bind(token,bookingID,environment,appBundleID,locale,now,now).run();return json({ok:true,ready:apnsConfigured(env),bookingID});
+ const auth=await requireClientBooking(request,env,bookingID,{syncTrip:false});if(!auth.ok)return auth.response;const environment=payload?.environment==='development'?'development':'production';const appBundleID=cleanText(payload?.appBundleID||payload?.appBundleId,220)||CLIENT_APP_BUNDLE_ID;if(appBundleID!==CLIENT_APP_BUNDLE_ID)return json({ok:false,error:'INVALID_APP_BUNDLE_ID'},400);const locale=cleanText(payload?.locale,32)||'ru';const now=new Date().toISOString();
+ await env.HOTELS_DB.prepare(`INSERT INTO client_push_subscriptions(device_token,booking_id,environment,app_bundle_id,locale,enabled,created_at,updated_at,last_error) VALUES(?,?,?,?,?,1,?,?,NULL) ON CONFLICT(device_token,booking_id) DO UPDATE SET environment=excluded.environment,app_bundle_id=excluded.app_bundle_id,locale=excluded.locale,enabled=1,updated_at=excluded.updated_at,last_error=NULL`).bind(token,bookingID,environment,appBundleID,locale,now,now).run();return json({ok:true,ready:apnsConfigured(env),bookingID,appBundleID:CLIENT_APP_BUNDLE_ID});
 }
 
 
@@ -6008,8 +6011,8 @@ async function registerClientNotificationDevice(request, env) {
   let deviceToken = cleanText(payload?.deviceToken, 256)?.toLowerCase() || null;
   if (deviceToken && !/^[0-9a-f]{32,256}$/.test(deviceToken)) return json({ ok: false, error: 'INVALID_DEVICE_TOKEN' }, 400);
   const environment = payload?.environment === 'development' ? 'development' : 'production';
-  const appBundleID = cleanText(payload?.appBundleID || payload?.appBundleId, 220) || 'com.iumrah.beta';
-  if (appBundleID !== 'com.iumrah.beta') return json({ ok: false, error: 'INVALID_APP_BUNDLE_ID' }, 400);
+  const appBundleID = cleanText(payload?.appBundleID || payload?.appBundleId, 220) || CLIENT_APP_BUNDLE_ID;
+  if (appBundleID !== CLIENT_APP_BUNDLE_ID) return json({ ok: false, error: 'INVALID_APP_BUNDLE_ID' }, 400);
   const locale = cleanText(payload?.locale, 32) || 'ru';
   const hasTrip = payload?.hasTrip === true ? 1 : 0;
   const account = await optionalIumrahAccount(request, env);
@@ -6046,7 +6049,7 @@ async function registerClientNotificationDevice(request, env) {
     now, now, now
   ).run();
 
-  return json({ ok: true, ready: apnsConfigured(env), installationID, authenticated: !!authenticated, hasTrip: !!hasTrip });
+  return json({ ok: true, ready: apnsConfigured(env), installationID, appBundleID: CLIENT_APP_BUNDLE_ID, authenticated: !!authenticated, hasTrip: !!hasTrip });
 }
 
 async function clientSystemNotificationFeed(request, env) {
@@ -6160,10 +6163,10 @@ async function sendClientSystemNotificationPush(env, scope, notification) {
       SELECT installation_id,device_token,environment,app_bundle_id,locale
       FROM client_notification_devices d
       WHERE d.enabled=1 AND d.device_token IS NOT NULL AND d.device_token<>''
-        AND d.installation_id>? AND ${where}
+        AND d.app_bundle_id=? AND d.installation_id>? AND ${where}
       ORDER BY d.installation_id ASC
       LIMIT 200
-    `).bind(lastInstallationID).all();
+    `).bind(CLIENT_APP_BUNDLE_ID, lastInstallationID).all();
     const devices = rows.results || [];
     if (!devices.length) break;
     lastInstallationID = devices[devices.length - 1].installation_id;
@@ -6185,7 +6188,7 @@ async function sendClientSystemNotificationPush(env, scope, notification) {
           UPDATE client_notification_devices SET enabled=?,last_error=?,updated_at=? WHERE installation_id=?
         `).bind(delivery.disable ? 0 : 1, delivery.error.slice(0, 900), now, device.installation_id).run().catch(() => {});
       }
-    });
+    }, CLIENT_APP_BUNDLE_ID);
     sent += Number(result.sent || 0);
     total += Number(result.total || 0);
     if (devices.length < 200) break;

@@ -1,14 +1,14 @@
 PRAGMA foreign_keys = ON;
 
 -- Consumer iOS push subscriptions are scoped to a booking because the current
--- Beta client authenticates each trip with its booking access token rather than
+-- production client authenticates each trip with its booking access token rather than
 -- a global account session. One APNs device may therefore subscribe to several
 -- bookings owned by the same pilgrim.
 CREATE TABLE IF NOT EXISTS client_push_subscriptions (
   device_token TEXT NOT NULL,
   booking_id TEXT NOT NULL,
   environment TEXT NOT NULL DEFAULT 'production' CHECK (environment IN ('production','development')),
-  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.beta',
+  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.app',
   locale TEXT NOT NULL DEFAULT 'ru',
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS client_notification_devices (
   installation_id TEXT PRIMARY KEY,
   device_token TEXT,
   environment TEXT NOT NULL DEFAULT 'production' CHECK (environment IN ('production','development')),
-  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.beta',
+  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.app',
   locale TEXT NOT NULL DEFAULT 'ru',
   pilgrim_id INTEGER,
   is_authenticated INTEGER NOT NULL DEFAULT 0 CHECK (is_authenticated IN (0,1)),
@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_client_notification_audience
 CREATE INDEX IF NOT EXISTS idx_client_notification_pilgrim
   ON client_notification_devices(pilgrim_id, updated_at DESC);
 
--- Preserve reachability for existing Beta devices before they open the build that
+-- Preserve reachability for existing client devices before they open the build that
 -- registers a stable installation id. New client registration replaces these legacy rows.
 INSERT OR IGNORE INTO client_notification_devices (
   installation_id, device_token, environment, app_bundle_id, locale, pilgrim_id,

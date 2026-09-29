@@ -1,0 +1,56 @@
+{
+  "name": "iumrah Business client push production bundle fix",
+  "date": "2026-09-29",
+  "target": "lattice-mobile / Backend/HotelsWorker",
+  "productionClientBundleID": "com.iumrah.app",
+  "businessBundleID": "com.iumrah.business",
+  "legacyClientBundleID": "com.iumrah.beta",
+  "files": [
+    {
+      "path": "Backend/HotelsWorker/src/index.js",
+      "sha256": "cf4c991c3399f1d9787b68db0864b7cf253ffc693fb0227fe9e9a6084a7756ff",
+      "bytes": 531578
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0010_client_push_notifications.sql",
+      "sha256": "aa25930709715d15e589feeef1083f62173692077fca2d3c34dc5224de5fa4db",
+      "bytes": 1229
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0010_unified_chat_identity_push.sql",
+      "sha256": "33843f3ab6542c57d15acffe8007af794fe5a02e5ae1fbdc668931adb6811b02",
+      "bytes": 1530
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0011_client_push_decouple.sql",
+      "sha256": "b2cd715f2963054b1e042203ffa092048a86e9d967112a407c5e7b36b7a2a464",
+      "bytes": 1557
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0018_client_system_notifications.sql",
+      "sha256": "d1740e1fd7d987bf6e833961001ad05be5505c0cc0adbf82a27693955bfa4b95",
+      "bytes": 3724
+    },
+    {
+      "path": "Backend/HotelsWorker/migrations/0042_client_push_production_bundle.sql",
+      "sha256": "e1f195b6de0ad899b3ee96b3766092be27ae6b860562cc562368f8dcec03af75",
+      "bytes": 751
+    },
+    {
+      "path": "Backend/HotelsWorker/tests/client-push-production-bundle-contract.test.mjs",
+      "sha256": "07be416faff6eceaf5b2e29a76499d3c7ff6a095ba0804f256f17bb6e063a543",
+      "bytes": 1292
+    },
+    {
+      "path": "IUMRAH_CLIENT_PUSH_PRODUCTION_BUNDLE_FIX_20260929_APPLIED.txt",
+      "sha256": "0e5b780b48b85e3f25f5ad8cc60221b20fd00264a04054fc4dea5dd3fd683cf8",
+      "bytes": 1333
+    }
+  ],
+  "verification": {
+    "nodeCheck": "passed",
+    "newPushContractTests": "3/3 passed",
+    "baselineFullSuite": "149/154 passed (5 pre-existing failures)",
+    "patchedFullSuite": "152/157 passed (same 5 pre-existing failures + 3 new tests passed)"
+  }
+}

@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS client_push_devices (
   client_user_id TEXT NOT NULL,
   platform TEXT NOT NULL DEFAULT 'ios',
   environment TEXT NOT NULL DEFAULT 'production',
-  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.beta',
+  app_bundle_id TEXT NOT NULL DEFAULT 'com.iumrah.app',
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
