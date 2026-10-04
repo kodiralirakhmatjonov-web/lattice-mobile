@@ -364,15 +364,24 @@ private struct SessionCard: View {
     }
 
     private var deviceIcon: some View {
-        ZStack {
+        let platform = session.platform.lowercased()
+        let isAndroid = platform == "android"
+        let symbol: String = {
+            if platform.contains("mac") { return "laptopcomputer" }
+            if platform.contains("ipad") { return "ipad" }
+            if isAndroid { return "apps.iphone" }
+            return "iphone.gen3"
+        }()
+
+        return ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(session.platform.lowercased() == "android" ? Color.green.gradient : Color.blue.gradient)
-            Image(systemName: session.platform.lowercased() == "android" ? "apps.iphone" : "iphone.gen3")
+                .fill(isAndroid ? Color.green.gradient : Color.blue.gradient)
+            Image(systemName: symbol)
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white)
         }
         .frame(width: 48, height: 48)
-        .shadow(color: (session.platform.lowercased() == "android" ? Color.green : Color.blue).opacity(0.20), radius: 8, y: 4)
+        .shadow(color: (isAndroid ? Color.green : Color.blue).opacity(0.20), radius: 8, y: 4)
     }
 
     @ViewBuilder private var trustBadge: some View {
@@ -413,7 +422,11 @@ private extension BusinessAccountSession {
         if !deviceModel.isEmpty, deviceModel != "iPhone" { return deviceModel }
         if !deviceName.isEmpty { return deviceName }
         if !deviceModel.isEmpty { return deviceModel }
-        return platform.lowercased() == "android" ? "Android" : "iPhone"
+        let value = platform.lowercased()
+        if value.contains("mac") { return "Mac" }
+        if value.contains("ipad") { return "iPad" }
+        if value == "android" { return "Android" }
+        return "iPhone"
     }
 
     var softwareLine: String {

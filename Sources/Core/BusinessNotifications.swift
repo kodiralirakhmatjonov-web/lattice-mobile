@@ -30,7 +30,22 @@ final class BusinessAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        handleSecurityNotification(notification.request.content.userInfo)
         completionHandler([.banner, .sound, .badge, .list])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        handleSecurityNotification(response.notification.request.content.userInfo)
+        completionHandler()
+    }
+
+    private func handleSecurityNotification(_ userInfo: [AnyHashable: Any]) {
+        guard (userInfo["type"] as? String) == "security_new_session" else { return }
+        NotificationCenter.default.post(name: .iumrahBusinessSecurityNewSession, object: nil)
     }
 }
 

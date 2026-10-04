@@ -377,6 +377,53 @@ function mapBusinessSession(row, currentSessionID = '') {
   };
 }
 
+function mapBusinessSecurityLoginEvent(row, currentSessionID = '') {
+  return {
+    id: row.id,
+    sessionID: row.session_id,
+    deviceID: row.device_id,
+    deviceName: row.device_name || '',
+    deviceModel: row.device_model || '',
+    platform: row.platform || 'ios',
+    osName: row.os_name || '',
+    osVersion: row.os_version || '',
+    city: row.city || '',
+    countryCode: row.country_code || '',
+    createdAt: row.created_at,
+    isCurrent: row.session_id === currentSessionID
+  };
+}
+
+async function recordBusinessSecurityLoginEvent(env, staffLogin, sessionID, device, value, createdAt) {
+  const id = crypto.randomUUID();
+  await env.HOTELS_DB.prepare(`
+    INSERT INTO business_security_login_events (
+      id, staff_login, session_id, device_id, device_name, device_model, platform, os_name, os_version, city, country_code, created_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id, staffLogin, sessionID, device.id, value.deviceName, value.deviceModel, value.platform,
+    value.osName, value.osVersion, value.city, value.countryCode, createdAt
+  ).run();
+  return id;
+}
+
+async function listBusinessSecurityEvents(env, url, user, currentSession) {
+  const requested = Number(url.searchParams.get('limit') || 8);
+  const limit = Number.isFinite(requested) ? Math.max(1, Math.min(20, Math.trunc(requested))) : 8;
+  const rows = await env.HOTELS_DB.prepare(`
+    SELECT id, session_id, device_id, device_name, device_model, platform, os_name, os_version, city, country_code, created_at
+    FROM business_security_login_events
+    WHERE staff_login=?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).bind(businessStaffLogin(user), limit).all();
+  return json({
+    ok: true,
+    currentSessionID: currentSession.session_id,
+    events: (rows.results || []).map(row => mapBusinessSecurityLoginEvent(row, currentSession.session_id))
+  });
+}
+
 const BUSINESS_SESSION_SELECT = `
   SELECT
     s.id AS session_id,
@@ -463,6 +510,7 @@ async function registerBusinessSession(request, env, user) {
 
   const staffLogin = businessStaffLogin(user);
   if (!staffLogin) return json({ ok: false, error: 'INVALID_STAFF_SESSION' }, 401);
+  const reauthenticated = request.headers.get('x-iumrah-business-reauthenticated') === '1';
   const now = new Date();
   const nowISO = now.toISOString();
   const secretHash = await sha256Hex(value.installationSecret);
@@ -475,17 +523,24 @@ async function registerBusinessSession(request, env, user) {
     if (!constantTimeEqual(device.installation_secret_hash, secretHash)) {
       return json({ ok: false, error: 'DEVICE_PROOF_INVALID' }, 403);
     }
-    if (device.revoked_at) return json({ ok: false, error: 'DEVICE_BLOCKED' }, 403);
+    // Older builds permanently revoked the device row when the primary device
+    // ended a session. A verified password login is now allowed to reactivate
+    // that same installation; passive cookie restore is not.
+    if (device.revoked_at && !reauthenticated) {
+      return json({ ok: false, error: 'SESSION_REAUTH_REQUIRED' }, 401);
+    }
     await env.HOTELS_DB.prepare(`
       UPDATE business_security_devices SET
         device_name=?, device_model=?, hardware_identifier=?, platform=?, os_name=?, os_version=?,
-        app_version=?, app_build=?, locale=?, time_zone=?, city=?, country_code=?, last_seen_at=?
+        app_version=?, app_build=?, locale=?, time_zone=?, city=?, country_code=?, last_seen_at=?,
+        revoked_at=NULL, revoked_by_device_id=NULL
       WHERE id=?
     `).bind(
       value.deviceName, value.deviceModel, value.hardwareIdentifier, value.platform, value.osName,
       value.osVersion, value.appVersion, value.appBuild, value.locale, value.timeZone,
       value.city, value.countryCode, nowISO, device.id
     ).run();
+    device = await env.HOTELS_DB.prepare('SELECT * FROM business_security_devices WHERE id=?').bind(device.id).first();
   } else {
     const primary = await env.HOTELS_DB.prepare(`
       SELECT id FROM business_security_devices WHERE staff_login=? AND is_primary=1 AND revoked_at IS NULL LIMIT 1
@@ -522,6 +577,14 @@ async function registerBusinessSession(request, env, user) {
     return json({ ok: true, sessionToken: null, currentSession: current });
   }
 
+  const previousSession = await env.HOTELS_DB.prepare(`
+    SELECT revoked_at, revocation_reason FROM business_staff_sessions
+    WHERE device_id=? ORDER BY created_at DESC LIMIT 1
+  `).bind(device.id).first();
+  if (previousSession?.revoked_at && previousSession.revocation_reason === 'revoked_by_primary' && !reauthenticated) {
+    return json({ ok: false, error: 'SESSION_REAUTH_REQUIRED' }, 401);
+  }
+
   await env.HOTELS_DB.prepare(`
     UPDATE business_staff_sessions SET revoked_at=?, revocation_reason='replaced'
     WHERE device_id=? AND revoked_at IS NULL
@@ -537,18 +600,29 @@ async function registerBusinessSession(request, env, user) {
   `).bind(sessionID, staffLogin, device.id, tokenHash, nowISO, nowISO, expiresAt).run();
 
   const row = await env.HOTELS_DB.prepare(`${BUSINESS_SESSION_SELECT} WHERE s.id=? LIMIT 1`).bind(sessionID).first();
-  if (createdDevice && Number(device.is_primary || 0) !== 1) {
-    const location = [value.city, value.countryCode].filter(Boolean).join(', ');
-    const label = value.deviceModel || value.deviceName || 'Новое устройство';
-    await sendBusinessSecurityPush(
-      env,
-      staffLogin,
-      value.installationID,
-      'Новый вход в iumrah Business',
-      location ? `${label} · ${location}` : label,
-      { type: 'security_new_session', sessionID }
-    ).catch(error => console.error('SECURITY_PUSH_FAILED', error));
-  }
+  const eventID = await recordBusinessSecurityLoginEvent(env, staffLogin, sessionID, device, value, nowISO)
+    .catch(error => { console.error('SECURITY_EVENT_WRITE_FAILED', error); return ''; });
+  const location = [value.city, value.countryCode].filter(Boolean).join(', ');
+  const label = value.deviceModel || value.deviceName || 'Новое устройство';
+  await sendBusinessSecurityPush(
+    env,
+    staffLogin,
+    value.installationID,
+    'Новый вход в iumrah Business',
+    location ? `${label} · ${location}` : label,
+    {
+      type: 'security_new_session',
+      eventID,
+      sessionID,
+      deviceName: label,
+      platform: value.platform,
+      osName: value.osName,
+      osVersion: value.osVersion,
+      city: value.city,
+      countryCode: value.countryCode,
+      occurredAt: nowISO
+    }
+  ).catch(error => console.error('SECURITY_PUSH_FAILED', error));
   return json({ ok: true, sessionToken: token, currentSession: mapBusinessSession(row, sessionID) }, 201);
 }
 
@@ -576,10 +650,16 @@ async function revokeBusinessSession(env, user, currentSession, targetSessionID)
   const now = new Date().toISOString();
 
   if (target.session_id === currentSession.session_id) {
-    await env.HOTELS_DB.prepare(`
-      UPDATE business_staff_sessions SET revoked_at=?, revoked_by_session_id=?, revocation_reason='self_logout'
-      WHERE id=? AND revoked_at IS NULL
-    `).bind(now, currentSession.session_id, target.session_id).run();
+    await env.HOTELS_DB.batch([
+      env.HOTELS_DB.prepare(`
+        UPDATE business_staff_sessions SET revoked_at=?, revoked_by_session_id=?, revocation_reason='self_logout'
+        WHERE id=? AND revoked_at IS NULL
+      `).bind(now, currentSession.session_id, target.session_id),
+      env.HOTELS_DB.prepare(`
+        UPDATE business_push_devices SET enabled=0, updated_at=?
+        WHERE LOWER(COALESCE(staff_login,''))=? AND installation_id=?
+      `).bind(now, staffLogin, target.installation_id || '')
+    ]);
     return json({ ok: true, signedOut: true });
   }
 
@@ -596,9 +676,9 @@ async function revokeBusinessSession(env, user, currentSession, targetSessionID)
       WHERE id=? AND revoked_at IS NULL
     `).bind(now, currentSession.session_id, target.session_id),
     env.HOTELS_DB.prepare(`
-      UPDATE business_security_devices SET revoked_at=?, revoked_by_device_id=?
-      WHERE id=? AND is_primary=0 AND revoked_at IS NULL
-    `).bind(now, currentSession.device_id, target.device_id)
+      UPDATE business_push_devices SET enabled=0, updated_at=?
+      WHERE LOWER(COALESCE(staff_login,''))=? AND installation_id=?
+    `).bind(now, staffLogin, target.installation_id || '')
   ]);
   return json({ ok: true, signedOut: false });
 }
@@ -615,9 +695,9 @@ async function revokeOtherBusinessSessions(env, user, currentSession) {
       WHERE staff_login=? AND id<>? AND revoked_at IS NULL
     `).bind(now, currentSession.session_id, staffLogin, currentSession.session_id),
     env.HOTELS_DB.prepare(`
-      UPDATE business_security_devices SET revoked_at=?, revoked_by_device_id=?
-      WHERE staff_login=? AND id<>? AND is_primary=0 AND revoked_at IS NULL
-    `).bind(now, currentSession.device_id, staffLogin, currentSession.device_id)
+      UPDATE business_push_devices SET enabled=0, updated_at=?
+      WHERE LOWER(COALESCE(staff_login,''))=? AND (installation_id IS NULL OR installation_id<>?)
+    `).bind(now, staffLogin, currentSession.installation_id || '')
   ]);
   return json({ ok: true });
 }
@@ -640,6 +720,11 @@ async function approveBusinessDevice(env, user, currentSession, targetSessionID)
 }
 
 async function handleBusinessSecurity(request, env, parts, user, currentSession) {
+  if (parts[0] === 'events') {
+    if (!currentSession) return json({ ok: false, error: 'BUSINESS_SESSION_REQUIRED' }, 401);
+    if (parts.length === 1 && request.method === 'GET') return listBusinessSecurityEvents(env, new URL(request.url), user, currentSession);
+    return methodNotAllowed();
+  }
   if (parts[0] !== 'sessions') return json({ ok: false, error: 'NOT_FOUND' }, 404);
   if (parts.length === 2 && parts[1] === 'register' && request.method === 'POST') {
     return registerBusinessSession(request, env, user);

@@ -7,6 +7,7 @@ final class OverviewStore: ObservableObject {
     @Published var bookings: [BookingSummary] = []
     @Published var unreadChats = 0
     @Published var ignavUsage: IgnavUsageSnapshot?
+    @Published var securityEvent: BusinessSecurityLoginEvent?
     @Published var loading = false
 
     func reload() async {
@@ -14,16 +15,34 @@ final class OverviewStore: ObservableObject {
         async let bookingsTask = APIClient.shared.bookings()
         async let chatsTask = APIClient.shared.businessChatThreads()
         async let usageTask = APIClient.shared.ignavUsage()
+        async let securityTask = APIClient.shared.businessSecurityEvents(limit: 8)
         bookings = (try? await bookingsTask) ?? []
         unreadChats = ((try? await chatsTask) ?? []).filter(\.unreadForStaff).count
         ignavUsage = try? await usageTask
+        securityEvent = Self.recentSecurityEvent((try? await securityTask)?.events ?? [])
         loading = false
+    }
+
+    func reloadSecurityEvent() async {
+        let events = (try? await APIClient.shared.businessSecurityEvents(limit: 8))?.events ?? []
+        securityEvent = Self.recentSecurityEvent(events)
+    }
+
+    private static func recentSecurityEvent(_ events: [BusinessSecurityLoginEvent]) -> BusinessSecurityLoginEvent? {
+        let cutoff = Date().addingTimeInterval(-48 * 60 * 60)
+        return events.first { event in
+            guard let date = event.parsedDate else { return false }
+            return date >= cutoff
+        }
     }
 }
 
 struct OverviewView: View {
     @EnvironmentObject private var auth: AuthStore
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store = OverviewStore()
+    @AppStorage("iumrah.security.dismissedLoginEventID.v1") private var dismissedLoginEventID = ""
+    @State private var showSecuritySessions = false
 
     var checking: Int { store.bookings.filter { operationalStatus($0) == .availabilityCheck }.count }
     var payment: Int { store.bookings.filter { operationalStatus($0) == .paymentPending }.count }
@@ -48,6 +67,14 @@ struct OverviewView: View {
                 BusinessBrandLogo(width: 150)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 4)
+
+                if let event = store.securityEvent, event.id != dismissedLoginEventID {
+                    SecurityNewLoginBanner(
+                        event: event,
+                        onOpen: { showSecuritySessions = true },
+                        onDismiss: { dismissedLoginEventID = event.id }
+                    )
+                }
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text("BOOKING OPERATIONS").font(.caption2.bold()).tracking(2.2).foregroundStyle(.white.opacity(0.52))
@@ -107,7 +134,80 @@ struct OverviewView: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("iumrah.business.bookingOperationsChanged"))) { _ in
             Task { await store.reload() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .iumrahBusinessSecurityNewSession)) { _ in
+            Task { await store.reloadSecurityEvent() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await store.reloadSecurityEvent() } }
+        }
+        .sheet(isPresented: $showSecuritySessions) {
+            NavigationStack { BusinessSessionsView() }
+        }
         .refreshable { await store.reload() }
+    }
+}
+
+private struct SecurityNewLoginBanner: View {
+    let event: BusinessSecurityLoginEvent
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: event.platform.lowercased().contains("mac") ? "laptopcomputer" : "person.badge.key.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.orange)
+                .frame(width: 44, height: 44)
+                .background(Color.orange.opacity(0.12), in: Circle())
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Новый вход")
+                    .font(.headline)
+                Text(event.detailLine)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Проверить устройства", action: onOpen)
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(BusinessDesign.accent)
+                    .padding(.top, 3)
+            }
+
+            Spacer(minLength: 4)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, height: 30)
+                    .background(BusinessDesign.secondarySurface, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Скрыть уведомление о входе")
+        }
+        .padding(17)
+        .businessCard(radius: 26)
+    }
+}
+
+fileprivate extension BusinessSecurityLoginEvent {
+    var parsedDate: Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let regular = ISO8601DateFormatter()
+        regular.formatOptions = [.withInternetDateTime]
+        return fractional.date(from: createdAt) ?? regular.date(from: createdAt)
+    }
+
+    var detailLine: String {
+        let device = !deviceModel.isEmpty ? deviceModel : (!deviceName.isEmpty ? deviceName : "Новое устройство")
+        let software = [osName, osVersion].filter { !$0.isEmpty }.joined(separator: " ")
+        let country = countryCode.isEmpty
+            ? ""
+            : (Locale(identifier: "ru_RU").localizedString(forRegionCode: countryCode) ?? countryCode)
+        let location = [city, country].filter { !$0.isEmpty }.joined(separator: ", ")
+        let parts = [device, software, location].filter { !$0.isEmpty }
+        return parts.joined(separator: " · ")
     }
 }
 

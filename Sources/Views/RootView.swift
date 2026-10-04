@@ -12,6 +12,9 @@ struct RootView: View {
             case .signedIn: BusinessTabView()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .iumrahBusinessSessionInvalidated)) { _ in
+            auth.handleSessionInvalidated()
+        }
     }
 }
 

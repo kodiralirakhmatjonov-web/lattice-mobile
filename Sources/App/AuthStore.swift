@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 @MainActor
@@ -37,6 +38,16 @@ final class AuthStore: ObservableObject {
     func logout() async {
         await APIClient.shared.logout()
         user = nil
+        state = .signedOut
+    }
+
+    func handleSessionInvalidated() {
+        BusinessSessionVault.clearSessionToken()
+        HTTPCookieStorage.shared.cookies?.forEach { cookie in
+            if cookie.domain.contains("iumrah.app") { HTTPCookieStorage.shared.deleteCookie(cookie) }
+        }
+        user = nil
+        errorMessage = nil
         state = .signedOut
     }
 }

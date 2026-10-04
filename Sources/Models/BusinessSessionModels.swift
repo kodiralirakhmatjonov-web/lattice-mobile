@@ -57,3 +57,24 @@ struct BusinessSessionActionResponse: Decodable {
     let ok: Bool
     let signedOut: Bool?
 }
+
+struct BusinessSecurityLoginEvent: Decodable, Identifiable, Hashable {
+    let id: String
+    let sessionID: String
+    let deviceID: String
+    let deviceName: String
+    let deviceModel: String
+    let platform: String
+    let osName: String
+    let osVersion: String
+    let city: String
+    let countryCode: String
+    let createdAt: String
+    let isCurrent: Bool
+}
+
+struct BusinessSecurityEventsResponse: Decodable {
+    let ok: Bool
+    let currentSessionID: String
+    let events: [BusinessSecurityLoginEvent]
+}

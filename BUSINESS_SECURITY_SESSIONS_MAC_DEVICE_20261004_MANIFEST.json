@@ -1,0 +1,78 @@
+{
+  "update": "iumrah-business-security-sessions-mac-device-20261004",
+  "description": "Telegram-style session termination/re-login, new-login security alerts/banner, and correct iPhone/iPad/Mac Catalyst device identification.",
+  "deployment_order": [
+    "apply_patch_to_repository_root",
+    "deploy_hotels_cloud_migrations_and_worker",
+    "build_and_deploy_testflight"
+  ],
+  "notes": {
+    "d1_migration_required": true,
+    "remote_termination_behavior": "revokes only the active session; device identity is not permanently blocked",
+    "legacy_blocked_devices": "a verified login reactivates devices blocked by the previous policy",
+    "passive_restore_after_remote_termination": "denied until the user logs in again",
+    "new_login_alerts": "APNs to other active devices plus a 48-hour in-app Overview banner backed by security login events",
+    "mac_catalyst_detection": "reports macOS + Mac family/model instead of arm64/iPhone Simulator",
+    "validation": [
+      "npm run check",
+      "node --test tests/business-security-relogin.test.mjs"
+    ]
+  },
+  "files": [
+    {
+      "path": "Backend/HotelsWorker/migrations/0043_business_security_login_events.sql",
+      "sha256": "fa3b958f4fe8b5c8c2903c2a41acad68183dd2e60f724f286994a3d47b35f876",
+      "bytes": 969
+    },
+    {
+      "path": "Backend/HotelsWorker/src/index.js",
+      "sha256": "5dc2f28f06c1d580ec918d53284c4e56d3d2928a36a7a1226c6b57f0341d57b9",
+      "bytes": 535266
+    },
+    {
+      "path": "Backend/HotelsWorker/tests/business-security-relogin.test.mjs",
+      "sha256": "394a10f1cb3db0a20b35af922c5e7695ffba468e14108a9d5102cdd47c17bb64",
+      "bytes": 6982
+    },
+    {
+      "path": "Sources/App/AuthStore.swift",
+      "sha256": "69c4e9666089df6e655cee7135bc9e94d3414fdc51a9b8d66a86a986604f42c8",
+      "bytes": 1456
+    },
+    {
+      "path": "Sources/Core/BusinessNotifications.swift",
+      "sha256": "7dcf2c5c632bc519efc0cd84e7df421bb6e68c99d38374111be141d5ba0a07a1",
+      "bytes": 5733
+    },
+    {
+      "path": "Sources/Core/BusinessSessionSecurity.swift",
+      "sha256": "e5e2b40b9a5b05f477ca3109709014ab54b51cdab9618ccdb6051db59a128a3d",
+      "bytes": 14453
+    },
+    {
+      "path": "Sources/Models/BusinessSessionModels.swift",
+      "sha256": "8ea6f816ee7b8af24c4c73ba0ef4ff3a55da6aa5c9ca973ae6666fbfb11cc991",
+      "bytes": 1972
+    },
+    {
+      "path": "Sources/Networking/APIClient.swift",
+      "sha256": "2863e5dd22cb27866b5d85322ad8279cc51dadf72dc4b8fc92f8eb4232d96bab",
+      "bytes": 55863
+    },
+    {
+      "path": "Sources/Views/BusinessSessionsView.swift",
+      "sha256": "6c3a8000590661edb444a6aad9712876c324f1396f12ac8bc2f58278f74ac9c1",
+      "bytes": 19125
+    },
+    {
+      "path": "Sources/Views/OverviewView.swift",
+      "sha256": "af5316dc94974a58b5b65b52743737e5d3a20187863f5f653b77939729dd7672",
+      "bytes": 18316
+    },
+    {
+      "path": "Sources/Views/RootView.swift",
+      "sha256": "1a98d0d2a487a86279c95a60475e833354d69160085c1fe85997f678a7f16198",
+      "bytes": 1040
+    }
+  ]
+}

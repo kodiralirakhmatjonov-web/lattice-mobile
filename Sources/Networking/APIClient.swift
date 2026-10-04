@@ -27,7 +27,7 @@ actor APIClient {
         let result = try decoder.decode(LoginResponse.self, from: data)
         guard result.ok == true, let resolvedLogin = result.login else { throw APIError.server(result.error ?? "LOGIN_FAILED") }
         BusinessSessionVault.clearSessionToken()
-        _ = try await ensureBusinessSession()
+        _ = try await ensureBusinessSession(reauthenticated: true)
         return SessionUser(login: resolvedLogin, role: result.role ?? "superadmin", displayName: "Super Administrator")
     }
 
@@ -36,7 +36,7 @@ actor APIClient {
         try validate(response, data: data)
         let value = try decoder.decode(SessionResponse.self, from: data)
         guard let user = value.user else { throw APIError.unauthorized }
-        _ = try await ensureBusinessSession()
+        _ = try await ensureBusinessSession(reauthenticated: false)
         return user
     }
 
@@ -66,6 +66,15 @@ actor APIClient {
         return try decoder.decode(BusinessSessionsResponse.self, from: data)
     }
 
+    func businessSecurityEvents(limit: Int = 8) async throws -> BusinessSecurityEventsResponse {
+        var components = URLComponents(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/events"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(max(1, min(limit, 20))))]
+        guard let url = components.url else { throw APIError.invalidURL }
+        let (data, response) = try await perform(from: url)
+        try validate(response, data: data)
+        return try decoder.decode(BusinessSecurityEventsResponse.self, from: data)
+    }
+
     func approveBusinessSession(id: String) async throws {
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/\(id)/approve"))
         request.httpMethod = "POST"
@@ -92,12 +101,15 @@ actor APIClient {
         _ = try decoder.decode(BusinessSessionActionResponse.self, from: data)
     }
 
-    private func ensureBusinessSession() async throws -> BusinessAccountSession {
+    private func ensureBusinessSession(reauthenticated: Bool) async throws -> BusinessAccountSession {
         let identity = try BusinessSessionVault.installationIdentity()
         let payload = BusinessDeviceDescriptor.registrationPayload(identity: identity)
         var request = URLRequest(url: AppConfig.apiBaseURL.appending(path: "/api/admin/hotels/security/sessions/register"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if reauthenticated {
+            request.setValue("1", forHTTPHeaderField: "X-Iumrah-Business-Reauthenticated")
+        }
         request.httpBody = try encoder.encode(payload)
         let (data, response) = try await perform(request)
         try validate(response, data: data)
@@ -828,10 +840,18 @@ actor APIClient {
 
     func validate(_ response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        if http.statusCode == 401 { throw APIError.unauthorized }
+        let serverError = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+        if http.statusCode == 401 {
+            if serverError == "BUSINESS_SESSION_REQUIRED" || serverError == "SESSION_REAUTH_REQUIRED" {
+                BusinessSessionVault.clearSessionToken()
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .iumrahBusinessSessionInvalidated, object: nil)
+                }
+            }
+            throw APIError.unauthorized
+        }
         guard (200..<300).contains(http.statusCode) else {
-            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw APIError.server(message ?? "HTTP_\(http.statusCode)")
+            throw APIError.server(serverError ?? "HTTP_\(http.statusCode)")
         }
     }
 }
@@ -853,6 +873,7 @@ enum APIError: LocalizedError {
         case .hotelAlreadyExists(let hotel): return "Этот отель уже есть в базе: \(hotel.name)."
         case .server(let value):
             switch value {
+            case "SESSION_REAUTH_REQUIRED": return "Этот сеанс был завершён на другом устройстве. Войдите снова."
             case "PAYMENT_INSTRUCTIONS_REQUIRED": return "Сначала сохраните хотя бы один способ оплаты: Visa, PayMe или Humo."
             case "PAYMENT_TEMPLATE_NOT_FOUND": return "Шаблон реквизитов больше не существует. Обновите список Payments."
             case "PAYMENT_TEMPLATE_QR_NOT_FOUND": return "QR шаблона не найден в хранилище. Откройте Payments и загрузите QR заново."
