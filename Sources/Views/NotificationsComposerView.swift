@@ -3,6 +3,8 @@ import SwiftUI
 
 struct NotificationsComposerView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.businessAdaptiveLayout) private var layout
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
 
     @State private var title = ""
     @State private var message = ""
@@ -32,13 +34,33 @@ struct NotificationsComposerView: View {
         ScrollView {
             VStack(spacing: 18) {
                 header
-                signalPreview
-                copyEditor
-                audiencePicker
-                destinationPicker
-                sendPanel
-                historySection
+
+                if layout.supportsDenseDashboard {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(spacing: 18) {
+                            copyEditor
+                            audiencePicker
+                            destinationPicker
+                            sendPanel
+                        }
+                        .frame(maxWidth: .infinity, alignment: .top)
+
+                        VStack(spacing: 18) {
+                            signalPreview
+                            historySection
+                        }
+                        .frame(maxWidth: .infinity, alignment: .top)
+                    }
+                } else {
+                    signalPreview
+                    copyEditor
+                    audiencePicker
+                    destinationPicker
+                    sendPanel
+                    historySection
+                }
             }
+            .businessAdaptiveReadableWidth()
             .padding(.horizontal, 18)
             .padding(.top, 14)
             .padding(.bottom, 44)
@@ -87,13 +109,15 @@ struct NotificationsComposerView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button { dismiss() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .bold))
-                    .frame(width: 42, height: 42)
-                    .businessGlass(in: Circle())
+            if !usesPersistentSidebar {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 42, height: 42)
+                        .businessGlass(in: Circle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
     }
 

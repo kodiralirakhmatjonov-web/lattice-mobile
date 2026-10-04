@@ -50,6 +50,7 @@ struct PrimaryHotelsView: View {
                         .foregroundStyle(.green)
                 }
             }
+            .businessAdaptiveDetailWidth()
             .padding(18)
         }
         .background(BusinessDesign.background)

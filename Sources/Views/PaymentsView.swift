@@ -5,6 +5,8 @@ import UIKit
 
 struct PaymentsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
+    @Environment(\.businessAdaptiveLayout) private var layout
     @State private var templates: [BusinessPaymentTemplate] = []
     @State private var loading = true
     @State private var errorMessage: String?
@@ -43,26 +45,19 @@ struct PaymentsView: View {
                         description: Text("Добавьте первый шаблон. После этого его можно будет вставлять в любую новую бронь одним нажатием.")
                     )
                     .padding(.vertical, 34)
+                } else if layout.supportsDenseDashboard {
+                    LazyVGrid(columns: layout.cardGridColumns, spacing: 14) {
+                        ForEach(templates) { template in
+                            templateLink(template)
+                        }
+                    }
                 } else {
                     ForEach(templates) { template in
-                        NavigationLink {
-                            PaymentTemplateEditorView(template: template) { updated in
-                                if let index = templates.firstIndex(where: { $0.id == updated.id }) {
-                                    templates[index] = updated
-                                }
-                            }
-                        } label: {
-                            templateCard(template)
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button("Удалить", role: .destructive) {
-                                Task { await delete(template) }
-                            }
-                        }
+                        templateLink(template)
                     }
                 }
             }
+            .businessAdaptiveReadableWidth()
             .padding(.horizontal, 18)
             .padding(.vertical, 18)
         }
@@ -71,8 +66,10 @@ struct PaymentsView: View {
         .navigationTitle("Payments")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Закрыть") { dismiss() }
+            if !usesPersistentSidebar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Закрыть") { dismiss() }
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showAdd = true } label: { Image(systemName: "plus") }
@@ -88,6 +85,25 @@ struct PaymentsView: View {
         }
         .task { await load() }
         .refreshable { await load() }
+    }
+
+
+    private func templateLink(_ template: BusinessPaymentTemplate) -> some View {
+        NavigationLink {
+            PaymentTemplateEditorView(template: template) { updated in
+                if let index = templates.firstIndex(where: { $0.id == updated.id }) {
+                    templates[index] = updated
+                }
+            }
+        } label: {
+            templateCard(template)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Удалить", role: .destructive) {
+                Task { await delete(template) }
+            }
+        }
     }
 
     private func templateCard(_ template: BusinessPaymentTemplate) -> some View {
@@ -246,6 +262,7 @@ struct PaymentTemplateEditorView: View {
                 .background(BusinessDesign.primaryControl, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .disabled(saving)
             }
+            .businessAdaptiveFormWidth()
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
         }

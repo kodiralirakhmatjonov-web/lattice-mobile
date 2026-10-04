@@ -160,17 +160,32 @@ enum BusinessSessionSecurityError: LocalizedError {
 
 enum BusinessDeviceDescriptor {
     static func registrationPayload(identity: BusinessInstallationIdentity) -> BusinessSessionRegistrationPayload {
+        let hardware = hardwareIdentifier
+        let model = friendlyModelName(for: hardware)
         let info = Bundle.main.infoDictionary
         let version = ProcessInfo.processInfo.operatingSystemVersion
-        let descriptor = currentDevice
+
+        #if targetEnvironment(macCatalyst)
+        let platform = "macos"
+        let osName = "macOS"
+        let systemDeviceName = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let deviceName = systemDeviceName.isEmpty || systemDeviceName == "iPhone" || systemDeviceName == "iPad"
+            ? model
+            : systemDeviceName
+        #else
+        let platform = "ios"
+        let osName = UIDevice.current.userInterfaceIdiom == .pad ? "iPadOS" : "iOS"
+        let deviceName = model
+        #endif
+
         return BusinessSessionRegistrationPayload(
             installationID: identity.id,
             installationSecret: identity.secret,
-            deviceName: descriptor.name,
-            deviceModel: descriptor.model,
-            hardwareIdentifier: descriptor.hardwareIdentifier,
-            platform: descriptor.platform,
-            osName: descriptor.osName,
+            deviceName: deviceName,
+            deviceModel: model,
+            hardwareIdentifier: hardware,
+            platform: platform,
+            osName: osName,
             osVersion: "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)",
             appVersion: info?["CFBundleShortVersionString"] as? String ?? "",
             appBuild: info?["CFBundleVersion"] as? String ?? "",
@@ -179,113 +194,44 @@ enum BusinessDeviceDescriptor {
         )
     }
 
-    private struct Descriptor {
-        let name: String
-        let model: String
-        let hardwareIdentifier: String
-        let platform: String
-        let osName: String
-    }
-
-    private static var currentDevice: Descriptor {
-#if targetEnvironment(macCatalyst)
-        let hardware = macHardwareIdentifier
-        let model = friendlyMacModelName(identifier: hardware, hostName: ProcessInfo.processInfo.hostName)
-        return Descriptor(
-            name: model,
-            model: model,
-            hardwareIdentifier: hardware,
-            platform: "macos",
-            osName: "macOS"
-        )
-#else
-        let rawHardware = hardwareIdentifier
-#if targetEnvironment(simulator)
-        let simulatedHardware = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] ?? rawHardware
-        let simulatedModel = friendlyAppleMobileModelName(for: simulatedHardware)
-        let model = simulatedModel == "Apple device" ? "iOS Simulator" : "\(simulatedModel) Simulator"
-        return Descriptor(
-            name: model,
-            model: model,
-            hardwareIdentifier: simulatedHardware,
-            platform: "ios-simulator",
-            osName: UIDevice.current.userInterfaceIdiom == .pad ? "iPadOS" : "iOS"
-        )
-#else
-        let model = friendlyAppleMobileModelName(for: rawHardware)
-        let isPad = UIDevice.current.userInterfaceIdiom == .pad
-        return Descriptor(
-            name: model,
-            model: model,
-            hardwareIdentifier: rawHardware,
-            platform: isPad ? "ipados" : "ios",
-            osName: isPad ? "iPadOS" : "iOS"
-        )
-#endif
-#endif
-    }
-
     private static var hardwareIdentifier: String {
+        #if targetEnvironment(macCatalyst)
+        if let model = sysctlString("hw.model"), !model.isEmpty {
+            return model
+        }
+        #endif
+
         var system = utsname()
         uname(&system)
         return withUnsafeBytes(of: &system.machine) { buffer in
             let bytes = buffer.prefix { $0 != 0 }
-            return String(bytes: bytes, encoding: .utf8) ?? "Apple"
+            return String(bytes: bytes, encoding: .utf8) ?? "AppleDevice"
         }
     }
 
-    private static var macHardwareIdentifier: String {
+    private static func sysctlString(_ name: String) -> String? {
         var size: size_t = 0
-        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 1 else {
-            return hardwareIdentifier
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        let status = buffer.withUnsafeMutableBytes { rawBuffer in
+            sysctlbyname(name, rawBuffer.baseAddress, &size, nil, 0)
         }
-        var bytes = [CChar](repeating: 0, count: size)
-        guard sysctlbyname("hw.model", &bytes, &size, nil, 0) == 0 else {
-            return hardwareIdentifier
-        }
-        return String(cString: bytes)
+        guard status == 0 else { return nil }
+        return String(cString: buffer)
     }
 
-    private static func friendlyMacModelName(identifier: String, hostName: String) -> String {
-        let host = hostName.lowercased().replacingOccurrences(of: "-", with: " ")
-        if host.contains("macbook pro") { return "MacBook Pro" }
-        if host.contains("macbook air") { return "MacBook Air" }
-        if host.contains("mac mini") { return "Mac mini" }
-        if host.contains("mac studio") { return "Mac Studio" }
-        if host.contains("mac pro") { return "Mac Pro" }
-        if host.contains("imac") { return "iMac" }
-
+    private static func friendlyModelName(for identifier: String) -> String {
+        #if targetEnvironment(macCatalyst)
         if identifier.hasPrefix("MacBookPro") { return "MacBook Pro" }
         if identifier.hasPrefix("MacBookAir") { return "MacBook Air" }
         if identifier.hasPrefix("MacBook") { return "MacBook" }
         if identifier.hasPrefix("Macmini") { return "Mac mini" }
         if identifier.hasPrefix("MacPro") { return "Mac Pro" }
-        if identifier.hasPrefix("iMacPro") { return "iMac Pro" }
+        if identifier.hasPrefix("MacStudio") { return "Mac Studio" }
         if identifier.hasPrefix("iMac") { return "iMac" }
-
-        // Apple silicon generations that use the generic MacXX,Y identifiers.
-        // These mappings intentionally resolve the product family only; the raw
-        // identifier is still sent to the server for future exact model mapping.
-        let macStudio: Set<String> = ["Mac13,1", "Mac13,2", "Mac14,13", "Mac14,14"]
-        let macMini: Set<String> = ["Mac14,3", "Mac14,12", "Mac16,10", "Mac16,11"]
-        let macPro: Set<String> = ["Mac14,8"]
-        let iMac: Set<String> = ["Mac15,4", "Mac15,5"]
-        let macBookAir: Set<String> = ["Mac14,2", "Mac14,15", "Mac15,12", "Mac15,13", "Mac16,12", "Mac16,13"]
-        let macBookPro: Set<String> = [
-            "Mac14,5", "Mac14,6", "Mac14,7", "Mac14,9", "Mac14,10",
-            "Mac15,3", "Mac15,6", "Mac15,7", "Mac15,8", "Mac15,9", "Mac15,10", "Mac15,11",
-            "Mac16,1", "Mac16,5", "Mac16,6", "Mac16,7", "Mac16,8"
-        ]
-        if macStudio.contains(identifier) { return "Mac Studio" }
-        if macMini.contains(identifier) { return "Mac mini" }
-        if macPro.contains(identifier) { return "Mac Pro" }
-        if iMac.contains(identifier) { return "iMac" }
-        if macBookAir.contains(identifier) { return "MacBook Air" }
-        if macBookPro.contains(identifier) { return "MacBook Pro" }
+        if identifier.hasPrefix("Mac") { return "Mac" }
         return "Mac"
-    }
-
-    private static func friendlyAppleMobileModelName(for identifier: String) -> String {
+        #else
         let models: [String: String] = [
             "iPhone10,1": "iPhone 8", "iPhone10,4": "iPhone 8",
             "iPhone10,2": "iPhone 8 Plus", "iPhone10,5": "iPhone 8 Plus",
@@ -301,24 +247,13 @@ enum BusinessDeviceDescriptor {
             "iPhone15,4": "iPhone 15", "iPhone15,5": "iPhone 15 Plus", "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
             "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus", "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
             "iPhone17,5": "iPhone 16e",
-            "iPad13,18": "iPad (10th generation)", "iPad13,19": "iPad (10th generation)",
-            "iPad14,3": "iPad Pro 11-inch", "iPad14,4": "iPad Pro 11-inch",
-            "iPad14,5": "iPad Pro 12.9-inch", "iPad14,6": "iPad Pro 12.9-inch",
-            "iPad14,8": "iPad Air 11-inch", "iPad14,9": "iPad Air 11-inch",
-            "iPad14,10": "iPad Air 13-inch", "iPad14,11": "iPad Air 13-inch",
-            "iPad16,3": "iPad Pro 11-inch", "iPad16,4": "iPad Pro 11-inch",
-            "iPad16,5": "iPad Pro 13-inch", "iPad16,6": "iPad Pro 13-inch"
+            "i386": "iPhone Simulator", "x86_64": "iPhone Simulator", "arm64": "iPhone Simulator"
         ]
-        if let known = models[identifier] { return known }
-        if identifier.hasPrefix("iPhone") { return "iPhone (\(identifier))" }
-        if identifier.hasPrefix("iPad") { return "iPad (\(identifier))" }
+        if let exact = models[identifier] { return exact }
+        if identifier.hasPrefix("iPhone") { return "iPhone" }
+        if identifier.hasPrefix("iPad") { return "iPad" }
         if identifier.hasPrefix("iPod") { return "iPod touch" }
         return "Apple device"
+        #endif
     }
-}
-
-
-extension Notification.Name {
-    static let iumrahBusinessSessionInvalidated = Notification.Name("iumrah.business.security.sessionInvalidated")
-    static let iumrahBusinessSecurityNewSession = Notification.Name("iumrah.business.security.newSession")
 }

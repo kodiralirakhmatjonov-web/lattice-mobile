@@ -1,50 +1,15 @@
 import SwiftUI
 
-/// Adaptive application shell.
-/// - Compact width: keeps the existing iPhone bottom-tab + drawer experience.
-/// - Regular width / iPad: uses a persistent split-view sidebar.
-/// - Mac Catalyst: always uses the desktop split-view sidebar.
-struct BusinessTabView: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+@MainActor
+final class BusinessNavigationStore: ObservableObject {
+    @Published var selection: BusinessWorkspaceSection = .overview
 
-    private var usesWorkspaceLayout: Bool {
-#if targetEnvironment(macCatalyst)
-        true
-#else
-        horizontalSizeClass == .regular
-#endif
-    }
-
-    var body: some View {
-        if usesWorkspaceLayout {
-            BusinessWorkspaceView()
-        } else {
-            BusinessCompactTabView()
-        }
+    func navigate(to section: BusinessWorkspaceSection) {
+        selection = section
     }
 }
 
-private struct BusinessCompactTabView: View {
-    var body: some View {
-        BusinessSidebarHost {
-            TabView {
-                NavigationStack { OverviewView() }
-                    .tabItem { Label("Обзор", systemImage: "square.grid.2x2.fill") }
-                NavigationStack { BookingsView() }
-                    .tabItem { Label("Брони", systemImage: "suitcase.rolling.fill") }
-                NavigationStack { ChatsView() }
-                    .tabItem { Label("Чаты", systemImage: "message.fill") }
-                NavigationStack { HotelsView() }
-                    .tabItem { Label("Отели", systemImage: "building.2.fill") }
-                NavigationStack { FlightCurationView(tabMode: true) }
-                    .tabItem { Label("Авиабилеты", systemImage: "airplane") }
-            }
-            .tint(BusinessDesign.ink)
-        }
-    }
-}
-
-private enum BusinessWorkspaceSection: String, Identifiable, CaseIterable {
+enum BusinessWorkspaceSection: String, Identifiable, CaseIterable, Hashable {
     case overview
     case bookings
     case chats
@@ -109,13 +74,63 @@ private enum BusinessWorkspaceSection: String, Identifiable, CaseIterable {
     ]
 }
 
-private struct BusinessWorkspaceView: View {
-    @EnvironmentObject private var auth: AuthStore
-    @State private var selection: BusinessWorkspaceSection = .overview
-    @StateObject private var compatibilitySidebarStore = BusinessSidebarStore()
+/// Adaptive application shell.
+/// - Compact width: preserves the established iPhone bottom-tab + drawer UI.
+/// - iPad regular/wide: persistent product sidebar.
+/// - Mac Catalyst: desktop sidebar at every supported window size.
+struct BusinessTabView: View {
+    @Environment(\.businessAdaptiveLayout) private var layout
 
     var body: some View {
-        NavigationSplitView {
+        if layout.usesWorkspaceNavigation {
+            BusinessWorkspaceView()
+        } else {
+            BusinessCompactTabView()
+        }
+    }
+}
+
+private struct BusinessCompactTabView: View {
+    @EnvironmentObject private var navigation: BusinessNavigationStore
+
+    var body: some View {
+        BusinessSidebarHost {
+            TabView(selection: $navigation.selection) {
+                NavigationStack { OverviewView() }
+                    .tag(BusinessWorkspaceSection.overview)
+                    .tabItem { Label("Обзор", systemImage: "square.grid.2x2.fill") }
+                NavigationStack { BookingsView() }
+                    .tag(BusinessWorkspaceSection.bookings)
+                    .tabItem { Label("Брони", systemImage: "suitcase.rolling.fill") }
+                NavigationStack { ChatsView() }
+                    .tag(BusinessWorkspaceSection.chats)
+                    .tabItem { Label("Чаты", systemImage: "message.fill") }
+                NavigationStack { HotelsView() }
+                    .tag(BusinessWorkspaceSection.hotels)
+                    .tabItem { Label("Отели", systemImage: "building.2.fill") }
+                NavigationStack { FlightCurationView(tabMode: true) }
+                    .tag(BusinessWorkspaceSection.flights)
+                    .tabItem { Label("Авиабилеты", systemImage: "airplane") }
+            }
+            .tint(BusinessDesign.ink)
+            .onChange(of: navigation.selection) { _, value in
+                // Admin destinations live in the compact drawer rather than tabs.
+                if !BusinessWorkspaceSection.primary.contains(value) {
+                    navigation.selection = .overview
+                }
+            }
+        }
+    }
+}
+
+private struct BusinessWorkspaceView: View {
+    @EnvironmentObject private var auth: AuthStore
+    @EnvironmentObject private var navigation: BusinessNavigationStore
+    @StateObject private var compatibilitySidebarStore = BusinessSidebarStore()
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List {
                 Section {
                     ForEach(BusinessWorkspaceSection.primary) { section in
@@ -140,18 +155,18 @@ private struct BusinessWorkspaceView: View {
                     }
                 }
             }
+            .listStyle(.sidebar)
             .navigationTitle("iumrah Business")
-            .navigationSplitViewColumnWidth(min: 220, ideal: 264, max: 320)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 300)
         } detail: {
-            NavigationStack {
-                workspaceDestination(selection)
+            BusinessAdaptivePaneHost {
+                NavigationStack {
+                    workspaceDestination(navigation.selection)
+                }
+                .id(navigation.selection)
             }
-            .id(selection)
         }
         .navigationSplitViewStyle(.balanced)
-        // Existing destination views contain BusinessSidebarButton in toolbars.
-        // Keep the environment object available, while the button itself hides in
-        // the persistent-sidebar layout.
         .environmentObject(compatibilitySidebarStore)
         .environment(\.businessUsesPersistentSidebar, true)
         .tint(BusinessDesign.ink)
@@ -161,48 +176,66 @@ private struct BusinessWorkspaceView: View {
     @ViewBuilder
     private func workspaceRow(_ section: BusinessWorkspaceSection) -> some View {
         Button {
-            selection = section
+            navigation.navigate(to: section)
         } label: {
             Label(section.title, systemImage: section.systemImage)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(selection == section ? BusinessDesign.ink : .primary)
-        .fontWeight(selection == section ? .semibold : .regular)
+        .fontWeight(navigation.selection == section ? .semibold : .regular)
+        .foregroundStyle(navigation.selection == section ? BusinessDesign.ink : .primary)
+        .listRowBackground(
+            navigation.selection == section
+                ? BusinessDesign.secondarySurface
+                : Color.clear
+        )
+        .accessibilityAddTraits(navigation.selection == section ? .isSelected : [])
     }
 
     @ViewBuilder
     private func workspaceDestination(_ section: BusinessWorkspaceSection) -> some View {
         switch section {
-        case .overview:
-            OverviewView()
-        case .bookings:
-            BookingsView()
-        case .chats:
-            ChatsView()
-        case .hotels:
-            HotelsView()
-        case .flights:
-            FlightCurationView(tabMode: true)
-        case .profile:
-            ProfileView()
-        case .sessions:
-            BusinessSessionsView()
-        case .employees:
-            EmployeesView()
-        case .archive:
-            ClientArchiveView()
-        case .primaryHotels:
-            PrimaryHotelsView(tabMode: true)
-        case .payments:
-            PaymentsView()
-        case .ziyarats:
-            ZiyaratsView()
-        case .notifications:
-            NotificationsComposerView()
-        case .esimCenter:
-            ESIMCenterView()
+        case .overview: OverviewView()
+        case .bookings: BookingsView()
+        case .chats: ChatsView()
+        case .hotels: HotelsView()
+        case .flights: FlightCurationView(tabMode: true)
+        case .profile: ProfileView()
+        case .sessions: BusinessSessionsView()
+        case .employees: EmployeesView()
+        case .archive: ClientArchiveView()
+        case .primaryHotels: PrimaryHotelsView(tabMode: true)
+        case .payments: PaymentsView()
+        case .ziyarats: ZiyaratsView()
+        case .notifications: NotificationsComposerView()
+        case .esimCenter: ESIMCenterView()
+        }
+    }
+}
+
+struct BusinessNavigationCommands: Commands {
+    @ObservedObject var navigation: BusinessNavigationStore
+
+    var body: some Commands {
+        CommandMenu("Navigate") {
+            Button("Overview") { navigation.navigate(to: .overview) }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("Bookings") { navigation.navigate(to: .bookings) }
+                .keyboardShortcut("2", modifiers: .command)
+            Button("Chats") { navigation.navigate(to: .chats) }
+                .keyboardShortcut("3", modifiers: .command)
+            Button("Hotels") { navigation.navigate(to: .hotels) }
+                .keyboardShortcut("4", modifiers: .command)
+            Button("Flights") { navigation.navigate(to: .flights) }
+                .keyboardShortcut("5", modifiers: .command)
+
+            Divider()
+
+            Button("Search clients") { navigation.navigate(to: .archive) }
+                .keyboardShortcut("f", modifiers: .command)
+            Button("New notification") { navigation.navigate(to: .notifications) }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
         }
     }
 }

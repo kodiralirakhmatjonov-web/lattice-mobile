@@ -3,7 +3,9 @@ import UIKit
 
 struct BusinessSessionsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
     @EnvironmentObject private var auth: AuthStore
+    @Environment(\.businessAdaptiveLayout) private var layout
 
     @State private var response: BusinessSessionsResponse?
     @State private var loading = true
@@ -38,8 +40,10 @@ struct BusinessSessionsView: View {
         .navigationTitle("Устройства и сеансы")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Закрыть") { dismiss() }
+            if !usesPersistentSidebar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Закрыть") { dismiss() }
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -88,62 +92,84 @@ struct BusinessSessionsView: View {
 
     private var content: some View {
         ScrollView {
-            VStack(spacing: 22) {
-                hero
-
-                if let currentSession {
-                    sectionLabel("ЭТО УСТРОЙСТВО")
-                    SessionCard(
-                        session: currentSession,
-                        currentIsPrimary: currentSession.isPrimary,
-                        working: workingSessionID == currentSession.id,
-                        onApprove: nil,
-                        onTerminate: { confirmation = .terminate(currentSession) }
-                    )
-                }
-
-                if !otherSessions.isEmpty {
-                    sectionLabel("АКТИВНЫЕ СЕАНСЫ")
-                    VStack(spacing: 12) {
-                        ForEach(otherSessions) { session in
-                            SessionCard(
-                                session: session,
-                                currentIsPrimary: currentSession?.isPrimary == true,
-                                working: workingSessionID == session.id,
-                                onApprove: currentSession?.isPrimary == true && !session.trusted
-                                    ? { Task { await approve(session) } }
-                                    : nil,
-                                onTerminate: currentSession?.isPrimary == true
-                                    ? { confirmation = .terminate(session) }
-                                    : nil
-                            )
+            Group {
+                if layout.supportsDenseDashboard {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(spacing: 22) {
+                            hero
+                            sessionsColumn
                         }
+                        .frame(maxWidth: .infinity, alignment: .top)
+
+                        VStack(spacing: 16) {
+                            policyCard
+                            expirationCard
+                        }
+                        .frame(width: 330, alignment: .top)
                     }
-
-                    if currentSession?.isPrimary == true {
-                        Button(role: .destructive) {
-                            confirmation = .terminateOthers
-                        } label: {
-                            Label("Завершить все другие сеансы", systemImage: "hand.raised.fill")
-                                .font(.body.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 56)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.red)
-                        .businessGlass(in: Capsule())
-                        .disabled(workingSessionID != nil)
+                } else {
+                    VStack(spacing: 22) {
+                        hero
+                        sessionsColumn
+                        policyCard
+                        expirationCard
                     }
                 }
-
-                policyCard
-                expirationCard
             }
+            .businessAdaptiveDetailWidth()
             .padding(.horizontal, 18)
             .padding(.top, 18)
             .padding(.bottom, 42)
         }
         .refreshable { await load() }
+    }
+
+    @ViewBuilder
+    private var sessionsColumn: some View {
+        if let currentSession {
+            sectionLabel("ЭТО УСТРОЙСТВО")
+            SessionCard(
+                session: currentSession,
+                currentIsPrimary: currentSession.isPrimary,
+                working: workingSessionID == currentSession.id,
+                onApprove: nil,
+                onTerminate: { confirmation = .terminate(currentSession) }
+            )
+        }
+
+        if !otherSessions.isEmpty {
+            sectionLabel("АКТИВНЫЕ СЕАНСЫ")
+            VStack(spacing: 12) {
+                ForEach(otherSessions) { session in
+                    SessionCard(
+                        session: session,
+                        currentIsPrimary: currentSession?.isPrimary == true,
+                        working: workingSessionID == session.id,
+                        onApprove: currentSession?.isPrimary == true && !session.trusted
+                            ? { Task { await approve(session) } }
+                            : nil,
+                        onTerminate: currentSession?.isPrimary == true
+                            ? { confirmation = .terminate(session) }
+                            : nil
+                    )
+                }
+            }
+
+            if currentSession?.isPrimary == true {
+                Button(role: .destructive) {
+                    confirmation = .terminateOthers
+                } label: {
+                    Label("Завершить все другие сеансы", systemImage: "hand.raised.fill")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 56)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red)
+                .businessGlass(in: Capsule())
+                .disabled(workingSessionID != nil)
+            }
+        }
     }
 
     private var hero: some View {
@@ -365,23 +391,21 @@ private struct SessionCard: View {
 
     private var deviceIcon: some View {
         let platform = session.platform.lowercased()
+        let isMac = platform == "macos" || platform == "mac" || session.deviceModel.lowercased().contains("mac")
         let isAndroid = platform == "android"
-        let symbol: String = {
-            if platform.contains("mac") { return "laptopcomputer" }
-            if platform.contains("ipad") { return "ipad" }
-            if isAndroid { return "apps.iphone" }
-            return "iphone.gen3"
-        }()
+        let isIPad = !isMac && session.deviceModel.lowercased().contains("ipad")
+        let tint: Color = isAndroid ? .green : (isMac ? .indigo : .blue)
+        let symbol = isAndroid ? "apps.iphone" : (isMac ? "macbook" : (isIPad ? "ipad" : "iphone.gen3"))
 
         return ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isAndroid ? Color.green.gradient : Color.blue.gradient)
+                .fill(tint.gradient)
             Image(systemName: symbol)
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white)
         }
         .frame(width: 48, height: 48)
-        .shadow(color: (isAndroid ? Color.green : Color.blue).opacity(0.20), radius: 8, y: 4)
+        .shadow(color: tint.opacity(0.20), radius: 8, y: 4)
     }
 
     @ViewBuilder private var trustBadge: some View {
@@ -419,14 +443,16 @@ private enum Confirmation: Identifiable {
 
 private extension BusinessAccountSession {
     var displayName: String {
+        let platformValue = platform.lowercased()
+        if platformValue == "macos" || platformValue == "mac" {
+            if !deviceName.isEmpty, deviceName != "Mac" { return deviceName }
+            if !deviceModel.isEmpty { return deviceModel }
+            return "Mac"
+        }
         if !deviceModel.isEmpty, deviceModel != "iPhone" { return deviceModel }
         if !deviceName.isEmpty { return deviceName }
         if !deviceModel.isEmpty { return deviceModel }
-        let value = platform.lowercased()
-        if value.contains("mac") { return "Mac" }
-        if value.contains("ipad") { return "iPad" }
-        if value == "android" { return "Android" }
-        return "iPhone"
+        return platformValue == "android" ? "Android" : "iPhone"
     }
 
     var softwareLine: String {

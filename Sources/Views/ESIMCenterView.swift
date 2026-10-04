@@ -42,6 +42,8 @@ private struct ESIMCountry: Identifiable, Hashable {
 struct ESIMCenterView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
+    @Environment(\.businessAdaptiveLayout) private var layout
 
     @State private var segment: ESIMCenterSegment = .plans
     @State private var country = ESIMCountry.supported[0]
@@ -87,6 +89,7 @@ struct ESIMCenterView: View {
                     inventorySection
                 }
             }
+            .businessAdaptiveReadableWidth()
             .padding(.horizontal, 18)
             .padding(.top, 10)
             .padding(.bottom, 36)
@@ -95,7 +98,9 @@ struct ESIMCenterView: View {
         .navigationTitle("eSIM")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }
+            if !usesPersistentSidebar {
+                ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }
+            }
             ToolbarItem(placement: .principal) {
                 BusinessBrandLogo(width: 116)
             }
@@ -254,6 +259,14 @@ struct ESIMCenterView: View {
         } else if sortedPackages.isEmpty {
             ContentUnavailableView("Тарифов нет", systemImage: "simcard", description: Text("Для выбранной страны eSIM Access не вернул доступных пакетов."))
                 .padding(.vertical, 20)
+        } else if layout.supportsDenseDashboard {
+            LazyVGrid(columns: layout.cardGridColumns, spacing: 14) {
+                ForEach(sortedPackages) { plan in
+                    ESIMPlanCard(plan: plan, balance: balance) {
+                        purchaseTarget = plan
+                    }
+                }
+            }
         } else {
             ForEach(sortedPackages) { plan in
                 ESIMPlanCard(plan: plan, balance: balance) {
@@ -282,6 +295,16 @@ struct ESIMCenterView: View {
         } else if sortedInventory.isEmpty {
             ContentUnavailableView("Покупок пока нет", systemImage: "simcard.2", description: Text("Купите тариф во вкладке «Тарифы». Профиль сохранится здесь до назначения поездке."))
                 .padding(.vertical, 20)
+        } else if layout.supportsDenseDashboard {
+            LazyVGrid(columns: layout.cardGridColumns, spacing: 14) {
+                ForEach(sortedInventory) { profile in
+                    ESIMInventoryCard(profile: profile) {
+                        assignmentTarget = profile
+                    } onRefresh: {
+                        Task { await refresh(profile) }
+                    }
+                }
+            }
         } else {
             ForEach(sortedInventory) { profile in
                 ESIMInventoryCard(profile: profile) {

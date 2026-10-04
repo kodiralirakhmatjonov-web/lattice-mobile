@@ -3,7 +3,6 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-
 private func businessPilgrimName(_ booking: BookingSummary) -> String {
     let value = booking.clientName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     return value.isEmpty || value == "Паломник" ? "Имя не синхронизировано" : value
@@ -17,56 +16,33 @@ private enum ChatFilter: String, CaseIterable, Identifiable {
 }
 
 struct ChatsView: View {
+    @Environment(\.businessAdaptiveLayout) private var layout
+
     @State private var threads: [ChatThread] = []
     @State private var bookings: [BookingSummary] = []
     @State private var filter: ChatFilter = .new
     @State private var loading = true
     @State private var errorMessage: String?
+    @State private var selectedThread: ChatThread?
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Чаты")
-                        .font(.system(size: 38, weight: .bold, design: .rounded))
-                        .tracking(-1.4)
-                    Text("Один чат = одна поездка")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                filterBar
-
-                if let errorMessage {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle")
-                        .font(.footnote).foregroundStyle(.secondary)
-                        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                }
-
-                if filteredThreads.isEmpty && !loading {
-                    ContentUnavailableView(emptyTitle, systemImage: "message", description: Text(emptySubtitle))
-                        .frame(maxWidth: .infinity).padding(.vertical, 42)
-                } else {
-                    ForEach(filteredThreads) { thread in
-                        NavigationLink { ChatConversationView(booking: thread.booking) } label: { ThreadCard(thread: thread) }
-                            .buttonStyle(.plain)
-                    }
-                }
+        Group {
+            if layout.supportsTwoPaneWorkspace {
+                desktopWorkspace
+            } else {
+                compactWorkspace
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 14)
         }
-        .contentMargins(.horizontal, 18, for: .scrollContent)
-        .scrollIndicators(.hidden)
         .background(BusinessDesign.background)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
             ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink { NewChatBookingPicker(bookings: bookings) } label: { Image(systemName: "square.and.pencil") }
-                    .disabled(bookings.isEmpty)
+                NavigationLink { NewChatBookingPicker(bookings: bookings) } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .disabled(bookings.isEmpty)
             }
         }
         .overlay { if loading { ProgressView() } }
@@ -74,31 +50,141 @@ struct ChatsView: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("iumrah.business.bookingOperationsChanged"))) { _ in
             Task { await load() }
         }
+        .onChange(of: filter) { _, _ in
+            guard layout.supportsTwoPaneWorkspace else { return }
+            if let selectedThread,
+               !filteredThreads.contains(where: { $0.booking.id == selectedThread.booking.id }) {
+                self.selectedThread = filteredThreads.first
+            }
+        }
         .refreshable { await load() }
     }
 
-    private var filterBar: some View {
-        HStack(spacing: 7) {
-            ForEach(ChatFilter.allCases) { item in
-                Button { withAnimation(.snappy(duration: 0.25)) { filter = item } } label: {
-                    HStack(spacing: 6) {
-                        Text(item.rawValue)
-                        if item == .new {
-                            let count = threads.filter(\.unreadForStaff).count
-                            if count > 0 { Text("\(count)").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2).background(item == filter ? BusinessDesign.onPrimaryControl.opacity(0.18) : BusinessDesign.secondarySurface, in: Capsule()) }
+    private var compactWorkspace: some View {
+        ScrollView {
+            threadListContent(navigates: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 14)
+        }
+        .contentMargins(.horizontal, 18, for: .scrollContent)
+        .scrollIndicators(.hidden)
+    }
+
+    private var desktopWorkspace: some View {
+        HStack(spacing: 0) {
+            ScrollView {
+                threadListContent(navigates: false)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+            }
+            .scrollIndicators(.hidden)
+            .frame(width: layout.listPaneWidth)
+            .background(BusinessDesign.background)
+
+            Divider()
+
+            Group {
+                if let selectedThread {
+                    ChatConversationView(booking: selectedThread.booking)
+                        .id(selectedThread.booking.id)
+                } else {
+                    ContentUnavailableView(
+                        "Выберите чат",
+                        systemImage: "message",
+                        description: Text("Диалог откроется здесь, а список поездок останется доступен слева.")
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(BusinessDesign.background)
+        }
+    }
+
+    @ViewBuilder
+    private func threadListContent(navigates: Bool) -> some View {
+        LazyVStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Чаты")
+                    .font(.system(size: 38, weight: .bold, design: .rounded))
+                    .tracking(-1.4)
+                Text("Один чат = одна поездка")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            filterBar
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+
+            if filteredThreads.isEmpty && !loading {
+                ContentUnavailableView(emptyTitle, systemImage: "message", description: Text(emptySubtitle))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 42)
+            } else {
+                ForEach(filteredThreads) { thread in
+                    if navigates {
+                        NavigationLink { ChatConversationView(booking: thread.booking) } label: {
+                            ThreadCard(thread: thread)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Button {
+                            selectedThread = thread
+                        } label: {
+                            ThreadCard(thread: thread, showsChevron: false)
+                        }
+                        .buttonStyle(.plain)
+                        .background(
+                            selectedThread?.booking.id == thread.booking.id
+                                ? BusinessDesign.secondarySurface.opacity(0.55)
+                                : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        )
+                        .contextMenu {
+                            Button("Открыть") { selectedThread = thread }
                         }
                     }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(item == filter ? BusinessDesign.onPrimaryControl : Color.primary)
-                    .padding(.horizontal, 12)
-                    .frame(height: 38)
-                    .background(item == filter ? BusinessDesign.primaryControl : BusinessDesign.secondarySurface, in: Capsule())
                 }
-                .buttonStyle(.plain)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+    }
+
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                ForEach(ChatFilter.allCases) { item in
+                    Button { withAnimation(.snappy(duration: 0.25)) { filter = item } } label: {
+                        HStack(spacing: 6) {
+                            Text(item.rawValue)
+                            if item == .new {
+                                let count = threads.filter(\.unreadForStaff).count
+                                if count > 0 {
+                                    Text("\(count)")
+                                        .font(.caption2.bold())
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(item == filter ? BusinessDesign.onPrimaryControl.opacity(0.18) : BusinessDesign.secondarySurface, in: Capsule())
+                                }
+                            }
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(item == filter ? BusinessDesign.onPrimaryControl : Color.primary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 38)
+                        .background(item == filter ? BusinessDesign.primaryControl : BusinessDesign.secondarySurface, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 2)
+        }
     }
 
     private var filteredThreads: [ChatThread] {
@@ -114,11 +200,17 @@ struct ChatsView: View {
         return booking.status == .completed
     }
 
-    private var emptyTitle: String { filter == .new ? "Новых сообщений нет" : filter == .active ? "Активных чатов нет" : "Завершённых чатов нет" }
-    private var emptySubtitle: String { filter == .new ? "Непрочитанные сообщения появятся здесь." : "Чаты автоматически группируются по статусу поездки." }
+    private var emptyTitle: String {
+        filter == .new ? "Новых сообщений нет" : filter == .active ? "Активных чатов нет" : "Завершённых чатов нет"
+    }
+
+    private var emptySubtitle: String {
+        filter == .new ? "Непрочитанные сообщения появятся здесь." : "Чаты автоматически группируются по статусу поездки."
+    }
 
     @MainActor private func load() async {
-        loading = true; errorMessage = nil
+        loading = true
+        errorMessage = nil
         do {
             async let chatThreadsRequest = APIClient.shared.businessChatThreads()
             async let bookingsRequest = APIClient.shared.bookings()
@@ -129,17 +221,36 @@ struct ChatsView: View {
             let bookingsByID = Dictionary(resolvedBookings.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             threads = cloudThreads.compactMap { cloud in
                 guard let booking = bookingsByID[cloud.bookingID] else { return nil }
-                return ChatThread(booking: booking, lastMessageAt: cloud.lastMessageAt, lastMessagePreview: cloud.lastMessagePreview, lastSenderType: cloud.lastSenderType, unreadForStaff: cloud.unreadForStaff)
+                return ChatThread(
+                    booking: booking,
+                    lastMessageAt: cloud.lastMessageAt,
+                    lastMessagePreview: cloud.lastMessagePreview,
+                    lastSenderType: cloud.lastSenderType,
+                    unreadForStaff: cloud.unreadForStaff
+                )
             }
             if threads.filter(\.unreadForStaff).isEmpty, filter == .new { filter = .active }
-        } catch is CancellationError { return }
-        catch { errorMessage = error.localizedDescription }
+            if layout.supportsTwoPaneWorkspace {
+                if let selectedThread,
+                   let refreshed = threads.first(where: { $0.booking.id == selectedThread.booking.id }) {
+                    self.selectedThread = refreshed
+                } else {
+                    selectedThread = filteredThreads.first
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
         loading = false
     }
 }
 
 private struct ThreadCard: View {
     let thread: ChatThread
+    var showsChevron = true
+
     var body: some View {
         HStack(spacing: 13) {
             ZStack {
@@ -169,7 +280,9 @@ private struct ThreadCard: View {
                 .font(.caption2).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            if showsChevron {
+                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
+            }
         }
         .padding(14)
         .background(BusinessDesign.tertiarySurface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -228,6 +341,7 @@ struct ChatConversationView: View {
                     }
                     composer(proxy: proxy)
                 }
+                .businessAdaptiveDetailWidth()
                 .padding(.bottom, composerFocused ? 8 : 12)
                 .background {
                     GeometryReader { geometry in
@@ -363,6 +477,7 @@ struct ChatConversationView: View {
                     .frame(height: 2)
                     .id(bottomAnchorID)
             }
+            .businessAdaptiveDetailWidth()
             .padding(.horizontal, 14)
             .padding(.top, 12)
             .padding(.bottom, 16)

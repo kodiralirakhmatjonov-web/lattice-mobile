@@ -5,6 +5,8 @@ import UIKit
 
 struct ZiyaratsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
+    @Environment(\.businessAdaptiveLayout) private var layout
     @State private var routes: [BusinessZiyaratRoute] = []
     @State private var selectedCity = "Madinah"
     @State private var search = ""
@@ -35,6 +37,7 @@ struct ZiyaratsView: View {
                 else if places.isEmpty { emptyState }
                 else { placeList }
             }
+            .businessAdaptiveReadableWidth()
             .padding(.horizontal, 18)
             .padding(.top, 12)
             .padding(.bottom, 36)
@@ -43,8 +46,10 @@ struct ZiyaratsView: View {
         .navigationTitle("Ziyarats")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button { dismiss() } label: { Image(systemName: "xmark") }
+            if !usesPersistentSidebar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: { Image(systemName: "xmark") }
+                }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { isCreating = true } label: { Image(systemName: "plus") }
@@ -102,11 +107,20 @@ struct ZiyaratsView: View {
         .pickerStyle(.segmented)
     }
 
-    private var placeList: some View {
-        LazyVStack(spacing: 12) {
-            ForEach(places) { place in
-                Button { editingPlace = place } label: { placeRow(place) }
-                    .buttonStyle(.plain)
+    @ViewBuilder private var placeList: some View {
+        if layout.supportsDenseDashboard {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 420, maximum: 600), spacing: 12)], spacing: 12) {
+                ForEach(places) { place in
+                    Button { editingPlace = place } label: { placeRow(place) }
+                        .buttonStyle(.plain)
+                }
+            }
+        } else {
+            LazyVStack(spacing: 12) {
+                ForEach(places) { place in
+                    Button { editingPlace = place } label: { placeRow(place) }
+                        .buttonStyle(.plain)
+                }
             }
         }
     }

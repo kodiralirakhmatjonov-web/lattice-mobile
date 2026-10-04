@@ -32,8 +32,9 @@ private enum BookingListFilter: String, CaseIterable, Identifiable {
     }
 }
 
-
 struct BookingsView: View {
+    @Environment(\.businessAdaptiveLayout) private var layout
+
     @State private var bookings: [BookingSummary] = []
     @State private var loading = true
     @State private var deleting = false
@@ -47,6 +48,106 @@ struct BookingsView: View {
     }
 
     var body: some View {
+        Group {
+            if layout.supportsTwoPaneWorkspace {
+                desktopWorkspace
+            } else {
+                compactList
+            }
+        }
+        .background(BusinessDesign.background)
+        .navigationTitle("Бронирования")
+        .navigationDestination(item: $selectedBooking) { booking in
+            if !layout.supportsTwoPaneWorkspace {
+                BookingDetailView(bookingID: booking.id)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
+            ToolbarItem(placement: .principal) {
+                Image("Logo")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(BusinessDesign.ink)
+                    .frame(width: 116, height: 28)
+            }
+        }
+        .overlay {
+            if loading || deleting {
+                ZStack {
+                    BusinessDesign.background.opacity(deleting ? 0.88 : 0.72).ignoresSafeArea()
+                    ProgressView(deleting ? "Удаляю…" : "")
+                }
+            }
+        }
+        .task { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: bookingOperationsChangedNotification)) { _ in
+            Task { await load() }
+        }
+        .refreshable { await load() }
+        .onChange(of: filter) { _, _ in
+            guard layout.supportsTwoPaneWorkspace else { return }
+            if let selectedBooking,
+               !filteredBookings.contains(where: { $0.id == selectedBooking.id }) {
+                self.selectedBooking = filteredBookings.first
+            }
+        }
+        .alert("Удалить бронирование?", isPresented: Binding(
+            get: { bookingPendingDelete != nil },
+            set: { if !$0 { bookingPendingDelete = nil } }
+        )) {
+            Button("Отмена", role: .cancel) { bookingPendingDelete = nil }
+            Button("Удалить полностью", role: .destructive) {
+                guard let booking = bookingPendingDelete else { return }
+                bookingPendingDelete = nil
+                Task { await delete(booking) }
+            }
+        } message: {
+            Text("Бронирование будет полностью удалено из основной базы, iumrah Business, чата и связанных операционных данных. Действие нельзя отменить.")
+        }
+    }
+
+    private var compactList: some View {
+        bookingsList(showsChevron: true)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+    }
+
+    private var desktopWorkspace: some View {
+        HStack(spacing: 0) {
+            bookingsList(showsChevron: false)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .frame(width: layout.listPaneWidth)
+                .background(BusinessDesign.background)
+
+            Divider()
+
+            Group {
+                if let selectedBooking {
+                    BookingDetailView(bookingID: selectedBooking.id)
+                        .id(selectedBooking.id)
+                } else if !filteredBookings.isEmpty {
+                    ContentUnavailableView(
+                        "Выберите бронирование",
+                        systemImage: "suitcase.rolling",
+                        description: Text("Детали поездки откроются здесь, не закрывая список.")
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "Бронирований нет",
+                        systemImage: "suitcase.rolling",
+                        description: Text("В этой категории сейчас нет поездок.")
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(BusinessDesign.background)
+        }
+    }
+
+    private func bookingsList(showsChevron: Bool) -> some View {
         List {
             Section {
                 filterBar
@@ -71,12 +172,21 @@ struct BookingsView: View {
             }
 
             ForEach(filteredBookings) { booking in
-                BookingRow(booking: booking, showsChevron: true)
+                BookingRow(booking: booking, showsChevron: showsChevron)
                     .contentShape(Rectangle())
                     .onTapGesture { selectedBooking = booking }
                     .listRowInsets(EdgeInsets(top: 7, leading: 18, bottom: 7, trailing: 18))
-                    .listRowBackground(Color.clear)
+                    .listRowBackground(
+                        layout.supportsTwoPaneWorkspace && selectedBooking?.id == booking.id
+                            ? BusinessDesign.secondarySurface.opacity(0.72)
+                            : Color.clear
+                    )
                     .listRowSeparator(.hidden)
+                    .contextMenu {
+                        Button("Открыть") { selectedBooking = booking }
+                        Divider()
+                        Button("Удалить", role: .destructive) { bookingPendingDelete = booking }
+                    }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
                             bookingPendingDelete = booking
@@ -85,45 +195,6 @@ struct BookingsView: View {
                         }
                     }
             }
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .background(BusinessDesign.background)
-        .navigationTitle("Бронирования")
-        .navigationDestination(item: $selectedBooking) { booking in
-            BookingDetailView(bookingID: booking.id)
-        }
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
-            ToolbarItem(placement: .principal) {
-                Image("Logo").renderingMode(.template).resizable().scaledToFit().foregroundStyle(BusinessDesign.ink).frame(width: 116, height: 28)
-            }
-        }
-        .overlay {
-            if loading || deleting {
-                ZStack {
-                    BusinessDesign.background.opacity(deleting ? 0.88 : 0.72).ignoresSafeArea()
-                    ProgressView(deleting ? "Удаляю…" : "")
-                }
-            }
-        }
-        .task { await load() }
-        .onReceive(NotificationCenter.default.publisher(for: bookingOperationsChangedNotification)) { _ in
-            Task { await load() }
-        }
-        .refreshable { await load() }
-        .alert("Удалить бронирование?", isPresented: Binding(
-            get: { bookingPendingDelete != nil },
-            set: { if !$0 { bookingPendingDelete = nil } }
-        )) {
-            Button("Отмена", role: .cancel) { bookingPendingDelete = nil }
-            Button("Удалить полностью", role: .destructive) {
-                guard let booking = bookingPendingDelete else { return }
-                bookingPendingDelete = nil
-                Task { await delete(booking) }
-            }
-        } message: {
-            Text("Бронирование будет полностью удалено из основной базы, iumrah Business, чата и связанных операционных данных. Действие нельзя отменить.")
         }
     }
 
@@ -174,8 +245,19 @@ struct BookingsView: View {
     @MainActor private func load() async {
         if bookings.isEmpty { loading = true }
         error = nil
-        do { bookings = try await APIClient.shared.bookings() }
-        catch { self.error = error.localizedDescription }
+        do {
+            bookings = try await APIClient.shared.bookings()
+            if layout.supportsTwoPaneWorkspace {
+                if let selectedBooking,
+                   bookings.contains(where: { $0.id == selectedBooking.id }) {
+                    self.selectedBooking = bookings.first(where: { $0.id == selectedBooking.id })
+                } else {
+                    selectedBooking = filteredBookings.first
+                }
+            }
+        } catch {
+            self.error = error.localizedDescription
+        }
         loading = false
     }
 
@@ -185,6 +267,7 @@ struct BookingsView: View {
         do {
             try await APIClient.shared.deleteBooking(id: booking.id)
             withAnimation(.snappy) { bookings.removeAll { $0.id == booking.id } }
+            if selectedBooking?.id == booking.id { selectedBooking = filteredBookings.first }
             NotificationCenter.default.post(name: bookingOperationsChangedNotification, object: booking.id)
         } catch {
             self.error = error.localizedDescription

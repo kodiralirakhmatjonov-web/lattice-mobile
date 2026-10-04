@@ -55,6 +55,7 @@ struct BookingDetailView: View {
                     tripCard(detail.booking)
                     pricingCard(detail)
                 }
+                .businessAdaptiveDetailWidth()
                 .padding(.horizontal, 18)
                 .padding(.bottom, 34)
             } else if loading {

@@ -55,6 +55,7 @@ struct HotelPriceMonitoringView: View {
                             .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
                 }
+                .businessAdaptiveDetailWidth()
                 .padding(.vertical, 14)
             }
             .contentMargins(.horizontal, 18, for: .scrollContent)

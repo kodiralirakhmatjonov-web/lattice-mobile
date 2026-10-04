@@ -4,6 +4,7 @@ import PhotosUI
 
 struct ProfileView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.businessUsesPersistentSidebar) private var usesPersistentSidebar
     @State private var member: BusinessTeamMember?
     @State private var pendingPhotoData: Data?
     @State private var loading = true
@@ -24,7 +25,9 @@ struct ProfileView: View {
         .navigationTitle("Мой профиль")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }
+            if !usesPersistentSidebar {
+                ToolbarItem(placement: .topBarLeading) { Button("Закрыть") { dismiss() } }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(saving ? "Сохраняю…" : "Сохранить") { Task { await save() } }
                     .fontWeight(.semibold)
@@ -61,6 +64,7 @@ struct ProfileView: View {
 }
 
 struct TeamMemberForm: View {
+    @Environment(\.businessAdaptiveLayout) private var layout
     @Binding var member: BusinessTeamMember
     @Binding var pendingPhotoData: Data?
     var ownerMode = false
@@ -68,11 +72,26 @@ struct TeamMemberForm: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                identityCard
-                contactsCard
-                publicCard
+            Group {
+                if layout.supportsDenseDashboard {
+                    HStack(alignment: .top, spacing: 16) {
+                        identityCard
+                            .frame(maxWidth: .infinity, alignment: .top)
+                        VStack(spacing: 16) {
+                            contactsCard
+                            publicCard
+                        }
+                        .frame(maxWidth: .infinity, alignment: .top)
+                    }
+                } else {
+                    VStack(spacing: 16) {
+                        identityCard
+                        contactsCard
+                        publicCard
+                    }
+                }
             }
+            .businessAdaptiveFormWidth()
             .padding(18)
         }
         .scrollDismissesKeyboard(.interactively)

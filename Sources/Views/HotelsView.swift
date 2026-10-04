@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 
 struct HotelsView: View {
+    @Environment(\.businessAdaptiveLayout) private var layout
     @State private var hotels: [HotelListItem] = []
     @State private var loading = false
     @State private var showAdd = false
@@ -28,6 +29,7 @@ struct HotelsView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .businessAdaptiveReadableWidth()
             .padding(.vertical, 14)
         }
         .contentMargins(.horizontal, 18, for: .scrollContent)
@@ -245,8 +247,16 @@ struct HotelsView: View {
                 )
             }
 
-            ForEach(filteredHotels) { hotel in
-                hotelRow(hotel)
+            if layout.supportsDenseDashboard {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 420, maximum: 620), spacing: 12)], spacing: 12) {
+                    ForEach(filteredHotels) { hotel in
+                        hotelRow(hotel)
+                    }
+                }
+            } else {
+                ForEach(filteredHotels) { hotel in
+                    hotelRow(hotel)
+                }
             }
         }
         .padding(16)
@@ -270,8 +280,16 @@ struct HotelsView: View {
                     .foregroundStyle(.orange)
             }
 
-            ForEach(unclassifiedHotels) { hotel in
-                hotelRow(hotel)
+            if layout.supportsDenseDashboard {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 420, maximum: 620), spacing: 12)], spacing: 12) {
+                    ForEach(unclassifiedHotels) { hotel in
+                        hotelRow(hotel)
+                    }
+                }
+            } else {
+                ForEach(unclassifiedHotels) { hotel in
+                    hotelRow(hotel)
+                }
             }
         }
         .padding(16)

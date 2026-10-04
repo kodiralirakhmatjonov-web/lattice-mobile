@@ -6,6 +6,7 @@ struct FlightCurationView: View {
     var tabMode = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.businessAdaptiveLayout) private var layout
 
     private enum SearchMode: String, CaseIterable, Identifiable {
         case outbound
@@ -283,38 +284,9 @@ struct FlightCurationView: View {
             LazyVStack(alignment: .leading, spacing: 22) {
                 intro
                 workspacePicker
-
-                if workspace == .manual {
-                    routeCard
-                    airlineFilters
-                    searchButton
-
-                    if isSearching {
-                        ProgressView(searchProgressText)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 28)
-                    } else if !results.isEmpty {
-                        searchResults
-                    } else if hasSearched {
-                        emptySearchState
-                    }
-                } else if workspace == .bulk {
-                    bulkSearchCard
-                    airlineFilters
-
-                    if !batchSearches.isEmpty {
-                        batchProgressSection
-                        batchResultsSection
-                    }
-                } else if workspace == .charter {
-                    charterImportCard
-                    if !charterResults.isEmpty {
-                        charterResultsSection
-                    }
-                } else {
-                    publishedSection
-                }
+                workspaceContent
             }
+            .businessAdaptiveReadableWidth()
             .padding(.horizontal, 18)
             .padding(.bottom, 36)
         }
@@ -354,6 +326,99 @@ struct FlightCurationView: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "Неизвестная ошибка")
+        }
+    }
+
+
+    @ViewBuilder
+    private var workspaceContent: some View {
+        if layout.supportsTwoPaneWorkspace && workspace != .published {
+            HStack(alignment: .top, spacing: 18) {
+                VStack(alignment: .leading, spacing: 18) {
+                    workspaceControls
+                }
+                .frame(width: min(440, max(380, layout.availableSize.width * 0.38)), alignment: .topLeading)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 18) {
+                    workspaceResults
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 22) {
+                workspaceControls
+                workspaceResults
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceControls: some View {
+        switch workspace {
+        case .manual:
+            routeCard
+            airlineFilters
+            searchButton
+        case .bulk:
+            bulkSearchCard
+            airlineFilters
+        case .charter:
+            charterImportCard
+        case .published:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceResults: some View {
+        switch workspace {
+        case .manual:
+            if isSearching {
+                ProgressView(searchProgressText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 28)
+            } else if !results.isEmpty {
+                searchResults
+            } else if hasSearched {
+                emptySearchState
+            } else if layout.supportsTwoPaneWorkspace {
+                ContentUnavailableView(
+                    "Настройте поиск",
+                    systemImage: "airplane.departure",
+                    description: Text("Маршрут, даты и авиакомпании остаются слева; найденные варианты появятся здесь.")
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.top, 80)
+            }
+        case .bulk:
+            if !batchSearches.isEmpty {
+                batchProgressSection
+                batchResultsSection
+            } else if layout.supportsTwoPaneWorkspace {
+                ContentUnavailableView(
+                    "Массовый поиск",
+                    systemImage: "square.stack.3d.up",
+                    description: Text("Вставьте JSON слева. Прогресс и результаты появятся в этой колонке.")
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.top, 80)
+            }
+        case .charter:
+            if !charterResults.isEmpty {
+                charterResultsSection
+            } else if layout.supportsTwoPaneWorkspace {
+                ContentUnavailableView(
+                    "Чартеры",
+                    systemImage: "airplane.circle",
+                    description: Text("Импортируйте JSON слева — карточки для проверки появятся здесь.")
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.top, 80)
+            }
+        case .published:
+            publishedSection
         }
     }
 
