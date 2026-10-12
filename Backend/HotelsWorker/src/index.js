@@ -53,6 +53,13 @@ export default {
         return withCors(await handleCatalog(request, env, url), request);
       }
 
+      // Human-readable, persistent, public read-only mirror for monitoring agents.
+      // This non-API HTML route avoids machine readers that suppress API JSON.
+      if (url.pathname.startsWith('/flights-feed/')) {
+        if (request.method !== 'GET' && request.method !== 'HEAD') return methodNotAllowed();
+        return withCors(await publicBusinessFlightSyncStableFeed(env, url, request.method), request);
+      }
+
       return json({ ok: false, error: 'NOT_FOUND' }, 404);
     } catch (error) {
       console.error('HOTELS_API_UNHANDLED', error);
@@ -2774,7 +2781,18 @@ function businessFlightSyncOwner(user) {
 }
 
 function businessFlightSyncPublicURL(token) {
+  // Backward-compatible legacy bearer URL. Never break already shared links.
   return `https://iumrah.app/api/catalog/hotels/flight-sync/${encodeURIComponent(token)}`;
+}
+
+async function businessFlightSyncStableID(owner) {
+  // No expiry, public read-only link independent of access-token rotations.
+  // Hash avoids putting the staff login itself in the public URL.
+  return sha256Hex(`iumrah:public-flight-feed:v1:${owner}`);
+}
+
+async function businessFlightSyncStableURL(owner) {
+  return `https://iumrah.app/flights-feed/${await businessFlightSyncStableID(owner)}`;
 }
 
 function normalizedIATA(value) {
@@ -2861,6 +2879,9 @@ async function businessFlightSyncStatus(env, user) {
     ok: true,
     configured: Boolean(row),
     enabled: Boolean(row && Number(row.enabled) === 1),
+    // A fixed public URL is returned whenever the feed is enabled.
+    // Fetching the URL never needs a session, API key or cookie.
+    accessURL: row && Number(row.enabled) === 1 ? await businessFlightSyncStableURL(owner) : null,
     flightCount: Number(row?.flight_count || 0),
     snapshotUpdatedAt: row?.snapshot_updated_at || null,
     createdAt: row?.created_at || null,
@@ -2872,25 +2893,31 @@ async function businessFlightSyncStatus(env, user) {
 async function rotateBusinessFlightSyncAccess(env, user) {
   const owner = businessFlightSyncOwner(user);
   if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
-  const token = randomToken(32);
-  const tokenHash = await sha256Hex(token);
+  // Creating access twice must not revoke links previously given to a monitor.
+  const existing = await env.HOTELS_DB.prepare(`
+    SELECT enabled FROM business_flight_sync_feeds WHERE owner_login=? LIMIT 1
+  `).bind(owner).first();
   const now = new Date().toISOString();
-  await env.HOTELS_DB.prepare(`
-    INSERT INTO business_flight_sync_feeds (
-      owner_login, token_hash, enabled, snapshot_json, flight_count,
-      snapshot_updated_at, created_at, updated_at
-    ) VALUES (?, ?, 1, '{"version":1,"flights":[]}', 0, NULL, ?, ?)
-    ON CONFLICT(owner_login) DO UPDATE SET
-      token_hash=excluded.token_hash,
-      enabled=1,
-      updated_at=excluded.updated_at
-  `).bind(owner, tokenHash, now, now).run();
+  if (!existing || Number(existing.enabled) !== 1) {
+    const token = randomToken(32);
+    const tokenHash = await sha256Hex(token);
+    await env.HOTELS_DB.prepare(`
+      INSERT INTO business_flight_sync_feeds (
+        owner_login, token_hash, enabled, snapshot_json, flight_count,
+        snapshot_updated_at, created_at, updated_at
+      ) VALUES (?, ?, 1, '{"version":1,"flights":[]}', 0, NULL, ?, ?)
+      ON CONFLICT(owner_login) DO UPDATE SET
+        token_hash=excluded.token_hash,
+        enabled=1,
+        updated_at=excluded.updated_at
+    `).bind(owner, tokenHash, now, now).run();
+  }
   return json({
     ok: true,
     readOnly: true,
-    accessURL: businessFlightSyncPublicURL(token),
-    rotatedAt: now,
-    note: 'This URL can only read the published-flight snapshot. It cannot publish, edit, or delete flights.'
+    accessURL: await businessFlightSyncStableURL(owner),
+    rotatedAt: null,
+    note: 'Permanent read-only URL. Repeated access requests never rotate or expire it.'
   });
 }
 
@@ -2963,18 +2990,91 @@ async function publicBusinessFlightSyncFeed(env, token) {
     flights: Array.isArray(snapshot.flights) ? snapshot.flights : []
   };
 
-  // Keep the secret URL human/agent-readable. Some external readers intentionally
-  // do not expose application/json API bodies, while they do expose plain UTF-8
-  // text. The body itself remains valid JSON, only pretty-printed as text/plain.
-  // This endpoint is still strictly read-only and non-cacheable.
+  // Legacy URL remains fully compatible and non-cacheable.
+  return businessFlightSyncJSONResponse(payload);
+}
+
+function businessFlightSyncJSONResponse(payload) {
   return new Response(`${JSON.stringify(payload, null, 2)}\n`, {
     status: 200,
     headers: {
       'content-type': 'text/plain; charset=utf-8',
       'x-content-type-options': 'nosniff',
-      'cache-control': 'no-store, max-age=0'
+      'cache-control': 'no-store, max-age=0',
+      'pragma': 'no-cache'
     }
   });
+}
+
+function businessFlightSyncHTMLEscape(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function publicBusinessFlightSyncStableFeed(env, url, method = 'GET') {
+  const parts = pathParts(url.pathname, '/flights-feed');
+  if (parts.length !== 1) return json({ ok: false, error: 'NOT_FOUND' }, 404);
+  const isJSON = parts[0].endsWith('.json');
+  const publicID = isJSON ? parts[0].slice(0, -5) : parts[0];
+  const isStableID = /^[a-f0-9]{64}$/.test(publicID);
+  // Existing shared token can also be opened through the HTML route without
+  // reissuing access. New links always use the rotation-proof stable ID.
+  const isLegacyToken = !isStableID && /^[A-Za-z0-9_-]{24,128}$/.test(publicID);
+  if (!isStableID && !isLegacyToken) return json({ ok: false, error: 'FLIGHT_SYNC_NOT_FOUND' }, 404);
+
+  let owner = '';
+  let row = null;
+  if (isStableID) {
+    // Do not expose other staff accounts if there are multiple operators.
+    const owners = await env.HOTELS_DB.prepare(`
+      SELECT owner_login FROM business_flight_sync_feeds WHERE enabled=1
+    `).all();
+    for (const entry of owners.results || []) {
+      if (await businessFlightSyncStableID(entry.owner_login) === publicID) {
+        owner = entry.owner_login;
+        break;
+      }
+    }
+    if (owner) row = await env.HOTELS_DB.prepare(`
+      SELECT snapshot_json, flight_count, snapshot_updated_at
+      FROM business_flight_sync_feeds WHERE owner_login=? AND enabled=1 LIMIT 1
+    `).bind(owner).first();
+  } else {
+    row = await env.HOTELS_DB.prepare(`
+      SELECT owner_login, snapshot_json, flight_count, snapshot_updated_at
+      FROM business_flight_sync_feeds WHERE token_hash=? AND enabled=1 LIMIT 1
+    `).bind(await sha256Hex(publicID)).first();
+    owner = row?.owner_login || '';
+  }
+  if (!row) return json({ ok: false, error: 'FLIGHT_SYNC_NOT_FOUND' }, 404);
+  let snapshot = { version: BUSINESS_FLIGHT_SYNC_VERSION, flights: [] };
+  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
+  const flights = Array.isArray(snapshot.flights) ? snapshot.flights : [];
+  const payload = {
+    ok: true,
+    type: 'iumrah_business_published_flights',
+    read_only: true,
+    version: Number(snapshot.version || BUSINESS_FLIGHT_SYNC_VERSION),
+    updated_at: row.snapshot_updated_at || null,
+    flight_count: flights.length,
+    comparison_key: 'comparison_key identifies the same physical flight; compare price.amount for fare changes.',
+    flights
+  };
+  const headers = {
+    'cache-control': 'no-store, max-age=0',
+    'pragma': 'no-cache',
+    'x-content-type-options': 'nosniff'
+  };
+  if (isJSON) {
+    headers['content-type'] = 'application/json; charset=utf-8';
+    return new Response(method === 'HEAD' ? null : `${JSON.stringify(payload, null, 2)}\n`, { status: 200, headers });
+  }
+  headers['content-type'] = 'text/html; charset=utf-8';
+  const rendered = businessFlightSyncHTMLEscape(JSON.stringify(payload, null, 2));
+  const timestamp = businessFlightSyncHTMLEscape(payload.updated_at || 'not yet synchronized');
+  const permanentURL = await businessFlightSyncStableURL(owner);
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>iumrah — Published Flights Feed</title><link rel="canonical" href="${permanentURL}"></head><body><main><h1>iumrah — Published Flights (read-only)</h1><p>Flight records: ${flights.length}. Last synchronized: ${timestamp}. This feed reflects the latest saved snapshot, not live ticket availability.</p><p>Permanent feed link: <a href="${permanentURL}">${permanentURL}</a></p><pre id="flight-sync-json">${rendered}</pre></main></body></html>`;
+  return new Response(method === 'HEAD' ? null : html, { status: 200, headers });
 }
 
 const FLIGHT_DIRECTIONS = new Set(['outbound','return']);

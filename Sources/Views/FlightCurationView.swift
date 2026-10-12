@@ -304,6 +304,7 @@ struct FlightCurationView: View {
         }
         .task {
             flightSyncURL = BusinessSessionVault.flightSyncAccessURL
+            await restoreFlightSyncAccess()
             await loadPublished()
         }
         .onChange(of: published) { _, _ in
@@ -1259,8 +1260,8 @@ struct FlightCurationView: View {
 
                 if flightSyncURL != nil {
                     Menu {
-                        Button("Создать новую ссылку", systemImage: "arrow.clockwise") {
-                            Task { await createFlightSyncAccess() }
+                        Button("Синхронизировать", systemImage: "arrow.triangle.2.circlepath") {
+                            Task { await syncFlightSnapshot(silent: false) }
                         }
                         Button("Отключить доступ", systemImage: "link.badge.minus", role: .destructive) {
                             Task { await revokeFlightSyncAccess() }
@@ -2236,6 +2237,27 @@ struct FlightCurationView: View {
             published.removeAll { $0.id == offer.id }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func restoreFlightSyncAccess() async {
+        // The server URL is derived from the same owner and survives app installs
+        // and token rotations. Prefer it over legacy token links stored on device.
+        do {
+            let status = try await api.flightSyncStatus()
+            guard status.enabled, let rawURL = status.accessURL,
+                  let url = URL(string: rawURL) else {
+                if !status.enabled {
+                    BusinessSessionVault.clearFlightSyncAccessURL()
+                    flightSyncURL = nil
+                }
+                return
+            }
+            try BusinessSessionVault.setFlightSyncAccessURL(url)
+            flightSyncURL = url
+        } catch {
+            // Do not clear a previously working link after a transient outage.
         }
     }
 

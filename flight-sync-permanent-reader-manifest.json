@@ -1,0 +1,20 @@
+{
+  "name": "iumrah Business - Permanent Public Flight Sync Reader",
+  "release": "2026-10-12",
+  "kind": "root ZIP patch",
+  "files": [
+    "Backend/HotelsWorker/src/index.js",
+    "Backend/HotelsWorker/wrangler.template.jsonc",
+    "Backend/HotelsWorker/package.json",
+    "Backend/HotelsWorker/tests/flight-sync-permanent-public-runtime.test.mjs",
+    "Sources/Models/FlightSyncModels.swift",
+    "Sources/Views/FlightCurationView.swift",
+    "FLIGHT_SYNC_PERMANENT_PUBLIC_READER_20261012.md",
+    "flight-sync-permanent-reader-manifest.json"
+  ],
+  "backendDeploymentRequired": true,
+  "iosRebuildRequiredForNewURLInUI": true,
+  "iosRebuildRequiredForLegacyTokenHTMLAlias": false,
+  "d1MigrationRequired": false,
+  "promisedExternalCrawlerAccessibility": false
+}

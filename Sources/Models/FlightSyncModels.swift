@@ -136,6 +136,7 @@ struct BusinessFlightSyncStatusResponse: Decodable {
     let ok: Bool
     let configured: Bool
     let enabled: Bool
+    let accessURL: String?
     let flightCount: Int
     let snapshotUpdatedAt: String?
     let readOnly: Bool
