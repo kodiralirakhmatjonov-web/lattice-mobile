@@ -2872,9 +2872,10 @@ async function businessFlightSyncStatus(env, user) {
   const owner = businessFlightSyncOwner(user);
   if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
   const row = await env.HOTELS_DB.prepare(`
-    SELECT enabled, flight_count, snapshot_updated_at, created_at, updated_at
+    SELECT enabled, flight_count, snapshot_json, snapshot_updated_at, created_at, updated_at
     FROM business_flight_sync_feeds WHERE owner_login=? LIMIT 1
-  `).bind(owner).first().catch(() => null);
+  `).bind(owner).first();
+  const actualSnapshot = row ? parseBusinessFlightSnapshot(row) : null;
   return json({
     ok: true,
     configured: Boolean(row),
@@ -2882,7 +2883,7 @@ async function businessFlightSyncStatus(env, user) {
     // A fixed public URL is returned whenever the feed is enabled.
     // Fetching the URL never needs a session, API key or cookie.
     accessURL: row && Number(row.enabled) === 1 ? await businessFlightSyncStableURL(owner) : null,
-    flightCount: Number(row?.flight_count || 0),
+    flightCount: actualSnapshot ? actualSnapshot.flights.length : 0,
     snapshotUpdatedAt: row?.snapshot_updated_at || null,
     createdAt: row?.created_at || null,
     updatedAt: row?.updated_at || null,
@@ -2935,8 +2936,9 @@ async function saveBusinessFlightSyncSnapshot(request, env, user) {
   const owner = businessFlightSyncOwner(user);
   if (!owner) return json({ ok: false, error: 'FLIGHT_SYNC_OWNER_REQUIRED' }, 403);
   const existing = await env.HOTELS_DB.prepare(`
-    SELECT enabled FROM business_flight_sync_feeds WHERE owner_login=? LIMIT 1
-  `).bind(owner).first().catch(() => null);
+    SELECT enabled, flight_count, snapshot_json, snapshot_updated_at
+    FROM business_flight_sync_feeds WHERE owner_login=? LIMIT 1
+  `).bind(owner).first();
   if (!existing || Number(existing.enabled) !== 1) {
     return json({ ok: false, error: 'FLIGHT_SYNC_ACCESS_NOT_ENABLED' }, 409);
   }
@@ -2955,6 +2957,20 @@ async function saveBusinessFlightSyncSnapshot(request, env, user) {
     return json({ ok: false, error: 'FLIGHT_SYNC_INVALID_FLIGHT', accepted: flights.length, received: payload.flights.length }, 400);
   }
 
+  // A transient empty/unloaded SwiftUI array must NEVER erase a previous
+  // non-empty public snapshot. A drastic reduction is equally suspicious and
+  // requires explicit operator confirmation via a separate future workflow.
+  // This endpoint does not offer a force/clear flag, intentionally.
+  const previous = parseBusinessFlightSnapshot(existing);
+  if (!previous) return json({ ok: false, error: 'FLIGHT_SYNC_STORED_SNAPSHOT_CORRUPT' }, 503);
+  const previousCount = previous.flights.length;
+  if (previousCount > 0 && flights.length === 0) {
+    return json({ ok: false, error: 'FLIGHT_SYNC_EMPTY_SNAPSHOT_REJECTED', previousCount }, 409);
+  }
+  if (previousCount >= 10 && flights.length < previousCount / 2) {
+    return json({ ok: false, error: 'FLIGHT_SYNC_SUSPICIOUS_COUNT_DROP', previousCount, receivedCount: flights.length }, 409);
+  }
+
   const now = new Date().toISOString();
   const snapshot = JSON.stringify({ version: BUSINESS_FLIGHT_SYNC_VERSION, generated_at: now, flights });
   await env.HOTELS_DB.prepare(`
@@ -2963,6 +2979,34 @@ async function saveBusinessFlightSyncSnapshot(request, env, user) {
     WHERE owner_login=? AND enabled=1
   `).bind(snapshot, flights.length, now, now, owner).run();
   return json({ ok: true, flightCount: flights.length, snapshotUpdatedAt: now });
+}
+
+function parseBusinessFlightSnapshot(row) {
+  try {
+    const parsed = JSON.parse(row?.snapshot_json || '{}');
+    if (!parsed || !Array.isArray(parsed.flights)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function businessFlightSyncPayload(row) {
+  const snapshot = parseBusinessFlightSnapshot(row);
+  // Corrupt snapshots are never reported as successfully synchronized EMPTY.
+  if (!snapshot) return null;
+  const flights = snapshot.flights;
+  return {
+    ok: true,
+    type: 'iumrah_business_published_flights',
+    read_only: true,
+    version: Number(snapshot.version || BUSINESS_FLIGHT_SYNC_VERSION),
+    updated_at: row.snapshot_updated_at || null,
+    flight_count: flights.length,
+    sync_state: row.snapshot_updated_at ? (flights.length ? 'ready' : 'empty') : 'not_synchronized',
+    comparison_key: 'Use flight_number, origin, destination and local departure date; check legs for UTC times.',
+    flights
+  };
 }
 
 async function publicBusinessFlightSyncFeed(env, token) {
@@ -2974,21 +3018,11 @@ async function publicBusinessFlightSyncFeed(env, token) {
     FROM business_flight_sync_feeds
     WHERE token_hash=? AND enabled=1
     LIMIT 1
-  `).bind(tokenHash).first().catch(() => null);
+  `).bind(tokenHash).first();
   if (!row) return json({ ok: false, error: 'FLIGHT_SYNC_NOT_FOUND' }, 404);
 
-  let snapshot = { version: BUSINESS_FLIGHT_SYNC_VERSION, flights: [] };
-  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
-  const payload = {
-    ok: true,
-    type: 'iumrah_business_published_flights',
-    read_only: true,
-    version: Number(snapshot.version || BUSINESS_FLIGHT_SYNC_VERSION),
-    updated_at: row.snapshot_updated_at || null,
-    flight_count: Number(row.flight_count || 0),
-    comparison_key: 'comparison_key identifies the same published physical flight; compare price.amount for fare changes.',
-    flights: Array.isArray(snapshot.flights) ? snapshot.flights : []
-  };
+  const payload = businessFlightSyncPayload(row);
+  if (!payload) return json({ ok: false, error: 'FLIGHT_SYNC_SNAPSHOT_CORRUPT' }, 503);
 
   // Legacy URL remains fully compatible and non-cacheable.
   return businessFlightSyncJSONResponse(payload);
@@ -3047,33 +3081,24 @@ async function publicBusinessFlightSyncStableFeed(env, url, method = 'GET') {
     owner = row?.owner_login || '';
   }
   if (!row) return json({ ok: false, error: 'FLIGHT_SYNC_NOT_FOUND' }, 404);
-  let snapshot = { version: BUSINESS_FLIGHT_SYNC_VERSION, flights: [] };
-  try { snapshot = JSON.parse(row.snapshot_json || '{}'); } catch {}
-  const flights = Array.isArray(snapshot.flights) ? snapshot.flights : [];
-  const payload = {
-    ok: true,
-    type: 'iumrah_business_published_flights',
-    read_only: true,
-    version: Number(snapshot.version || BUSINESS_FLIGHT_SYNC_VERSION),
-    updated_at: row.snapshot_updated_at || null,
-    flight_count: flights.length,
-    comparison_key: 'comparison_key identifies the same physical flight; compare price.amount for fare changes.',
-    flights
-  };
+  const payload = businessFlightSyncPayload(row);
+  if (!payload) return json({ ok: false, error: 'FLIGHT_SYNC_SNAPSHOT_CORRUPT' }, 503);
+  const flights = payload.flights;
   const headers = {
     'cache-control': 'no-store, max-age=0',
     'pragma': 'no-cache',
     'x-content-type-options': 'nosniff'
   };
-  if (isJSON) {
+  if (isJSON || url.searchParams.get('format') === 'json') {
     headers['content-type'] = 'application/json; charset=utf-8';
     return new Response(method === 'HEAD' ? null : `${JSON.stringify(payload, null, 2)}\n`, { status: 200, headers });
   }
   headers['content-type'] = 'text/html; charset=utf-8';
   const rendered = businessFlightSyncHTMLEscape(JSON.stringify(payload, null, 2));
+  const machineURL = `${await businessFlightSyncStableURL(owner)}.json`;
   const timestamp = businessFlightSyncHTMLEscape(payload.updated_at || 'not yet synchronized');
   const permanentURL = await businessFlightSyncStableURL(owner);
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>iumrah — Published Flights Feed</title><link rel="canonical" href="${permanentURL}"></head><body><main><h1>iumrah — Published Flights (read-only)</h1><p>Flight records: ${flights.length}. Last synchronized: ${timestamp}. This feed reflects the latest saved snapshot, not live ticket availability.</p><p>Permanent feed link: <a href="${permanentURL}">${permanentURL}</a></p><pre id="flight-sync-json">${rendered}</pre></main></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>iumrah — Published Flights Feed</title><link rel="canonical" href="${permanentURL}"></head><body><main><h1>iumrah — Published Flights (read-only)</h1><p>Flight records: ${flights.length}. Last synchronized: ${timestamp}. This feed reflects the latest saved snapshot, not live ticket availability.</p><p>Permanent feed link: <a href="${permanentURL}">${permanentURL}</a></p><p>Direct machine-readable JSON: <a href="${machineURL}">${machineURL}</a></p><pre id="flight-sync-json">${rendered}</pre></main></body></html>`;
   return new Response(method === 'HEAD' ? null : html, { status: 200, headers });
 }
 

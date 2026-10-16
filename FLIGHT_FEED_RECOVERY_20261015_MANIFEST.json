@@ -1,0 +1,15 @@
+{
+  "name": "Iumrah Flight Feed Recovery 2026-10-15",
+  "format": "root-relative patch for apply-zip.yml",
+  "files": {
+    "Backend/HotelsWorker/src/index.js": "a67055278945ef2f7e333a466995294cfa9f484ebaab0ccae4d5ba107a97b0cd",
+    "Backend/HotelsWorker/tests/flight-sync-permanent-public-runtime.test.mjs": "e3dd58f91aea82a49352b4f6ef4030d66900d423c9f646ec6886209c196496b5",
+    "Sources/Views/FlightCurationView.swift": "b92f07efa4c00be4950811e1ff1169a073a114c6f3ab5029bcf47dcb104e702c",
+    "FLIGHT_FEED_RECOVERY_20261015.md": "49c6abb08462e3ea46757d87cb7053d9ad5fd9645a35333c33744d0ab736b5e1"
+  },
+  "validation": {
+    "worker_check": "6/6 pass",
+    "full_tests_after": "158/165 pass (7 pre-existing failures)",
+    "swift_parse": "pass"
+  }
+}

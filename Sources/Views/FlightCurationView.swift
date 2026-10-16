@@ -258,6 +258,18 @@ struct FlightCurationView: View {
     @State private var flightSyncURL: URL?
     @State private var isFlightSyncing = false
     @State private var flightSyncMessage: String?
+    @State private var flightSyncSavedCount: Int?
+
+    private enum FlightSyncProtectionError: LocalizedError {
+        case emptyPublished
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyPublished:
+                return "Синхронизация остановлена: сервер вернул 0 опубликованных рейсов. Предыдущий снимок сохранён. Проверьте список и повторите после восстановления данных."
+            }
+        }
+    }
 
     private let api = APIClient.shared
 
@@ -1281,13 +1293,18 @@ struct FlightCurationView: View {
                     Text("Доступ включён")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text("\(published.count) рейсов")
+                    Text("В Business: \(published.count) · Feed: \(flightSyncSavedCount.map(String.init) ?? "—")")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
 
                 Text(url.absoluteString)
                     .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                Text("Прямой JSON: \(url.appendingPathExtension("json").absoluteString)")
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .textSelection(.enabled)
@@ -1314,8 +1331,8 @@ struct FlightCurationView: View {
                     .disabled(isFlightSyncing)
 
                     Button {
-                        UIPasteboard.general.string = url.absoluteString
-                        flightSyncMessage = "Ссылка скопирована. Отправьте её в ваш чат ChatGPT один раз."
+                        UIPasteboard.general.string = url.appendingPathExtension("json").absoluteString
+                        flightSyncMessage = "JSON-ссылка скопирована. Отправьте её в ваш чат ChatGPT."
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .frame(width: 44, height: 44)
@@ -1323,7 +1340,7 @@ struct FlightCurationView: View {
                     }
                     .buttonStyle(.plain)
 
-                    ShareLink(item: url) {
+                    ShareLink(item: url.appendingPathExtension("json")) {
                         Image(systemName: "square.and.arrow.up")
                             .frame(width: 44, height: 44)
                             .background(BusinessDesign.secondarySurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -2207,6 +2224,11 @@ struct FlightCurationView: View {
                 offers = try await api.curatedFlights()
             }
             published = offers.filter { !isExpiredPublishedOffer($0) }
+            // A foreground refresh must also heal a stale/empty public feed
+            // when the in-memory array is unchanged (onChange won't fire).
+            if flightSyncURL != nil && !published.isEmpty {
+                await syncFlightSnapshot(silent: true)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -2246,6 +2268,7 @@ struct FlightCurationView: View {
         // and token rotations. Prefer it over legacy token links stored on device.
         do {
             let status = try await api.flightSyncStatus()
+            flightSyncSavedCount = status.enabled ? status.flightCount : nil
             guard status.enabled, let rawURL = status.accessURL,
                   let url = URL(string: rawURL) else {
                 if !status.enabled {
@@ -2262,6 +2285,17 @@ struct FlightCurationView: View {
     }
 
     @MainActor
+    private func freshFlightSyncOffers() async throws -> [BusinessCuratedFlightOffer] {
+        // Never publish a transient @State snapshot: fetch the authoritative list
+        // again immediately before every write. An API failure throws and leaves
+        // the previous feed untouched.
+        let offers = try await api.curatedFlights()
+        let current = offers.filter { !isExpiredPublishedOffer($0) }
+        guard !current.isEmpty else { throw FlightSyncProtectionError.emptyPublished }
+        return current
+    }
+
+    @MainActor
     private func createFlightSyncAccess() async {
         guard !isFlightSyncing else { return }
         isFlightSyncing = true
@@ -2275,9 +2309,11 @@ struct FlightCurationView: View {
             }
             try BusinessSessionVault.setFlightSyncAccessURL(url)
             flightSyncURL = url
-            let snapshot = try await api.saveFlightSyncSnapshot(offers: published)
-            UIPasteboard.general.string = url.absoluteString
-            flightSyncMessage = "Готово: \(snapshot.flightCount) рейсов синхронизировано. Ссылка скопирована — отправьте её в этот чат ChatGPT один раз."
+            let actualOffers = try await freshFlightSyncOffers()
+            let snapshot = try await api.saveFlightSyncSnapshot(offers: actualOffers)
+            flightSyncSavedCount = snapshot.flightCount
+            UIPasteboard.general.string = url.appendingPathExtension("json").absoluteString
+            flightSyncMessage = "Готово: \(snapshot.flightCount) рейсов синхронизировано. Прямая JSON-ссылка скопирована для ChatGPT."
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -2289,14 +2325,19 @@ struct FlightCurationView: View {
         isFlightSyncing = true
         defer { isFlightSyncing = false }
         do {
-            let snapshot = try await api.saveFlightSyncSnapshot(offers: published)
+            let actualOffers = try await freshFlightSyncOffers()
+            let snapshot = try await api.saveFlightSyncSnapshot(offers: actualOffers)
+            flightSyncSavedCount = snapshot.flightCount
             if !silent {
                 flightSyncMessage = "Синхронизировано: \(snapshot.flightCount) опубликованных рейсов."
+            } else {
+                flightSyncMessage = nil
             }
         } catch {
-            if !silent {
-                errorMessage = error.localizedDescription
-            }
+            // Automatic failures must be visible too. Silently swallowing them
+            // previously made the card claim success while the feed stayed empty.
+            flightSyncMessage = "Flight Sync: \(error.localizedDescription)"
+            if !silent { errorMessage = error.localizedDescription }
         }
     }
 
@@ -2309,6 +2350,7 @@ struct FlightCurationView: View {
             _ = try await api.revokeFlightSyncAccess()
             BusinessSessionVault.clearFlightSyncAccessURL()
             flightSyncURL = nil
+            flightSyncSavedCount = nil
             flightSyncMessage = "Read-only ссылка отключена. Старый адрес больше не даёт доступ к списку рейсов."
         } catch {
             errorMessage = error.localizedDescription

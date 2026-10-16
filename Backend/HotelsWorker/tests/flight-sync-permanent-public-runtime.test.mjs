@@ -141,3 +141,60 @@ test('worker deployment exposes a dedicated non-API route and keeps legacy token
  assert.match(source,/return publicBusinessFlightSyncFeed\(env, parts\[1\]\)/);
  assert.match(source,/publicBusinessFlightSyncStableFeed\(env, url, request\.method\)/);
 });
+
+test('an empty or suspiciously truncated client upload cannot destroy a saved published feed', async () => {
+  const s = createSubject(), env = mockEnv(), user = {owner:'keeper'};
+  const access = await (await s.rotateBusinessFlightSyncAccess(env,user)).json();
+  const makeOffer = (n) => ({
+    id:`t${n}`, from:'MED',to:'TAS',date:`2026-11-${String(n).padStart(2,'0')}`,
+    price:{amount:250,currency:'USD'}, flight_numbers:['C6332'],
+    legs:[{origin:'MED',destination:'TAS',flight_number:'C6332',departure_at:`2026-11-${String(n).padStart(2,'0')}T17:55:00Z`}]
+  });
+  const originals = Array.from({length:12},(_,i) => makeOffer(i+1));
+  const post = async (flights) => s.saveBusinessFlightSyncSnapshot(
+    new Request('https://iumrah.app/api/admin/hotels/operations/flight-sync/snapshot',
+      {method:'POST',body:JSON.stringify({flights})}),env,user);
+  const save = await post(originals);
+  assert.equal(save.status,200);
+  const before = env.rows.get(user.owner).snapshot_json;
+  const emptied = await post([]);
+  assert.equal(emptied.status,409);
+  assert.equal((await emptied.json()).error,'FLIGHT_SYNC_EMPTY_SNAPSHOT_REJECTED');
+  assert.equal(env.rows.get(user.owner).snapshot_json,before);
+  const truncated = await post(originals.slice(0,1));
+  assert.equal(truncated.status,409);
+  assert.equal((await truncated.json()).error,'FLIGHT_SYNC_SUSPICIOUS_COUNT_DROP');
+  assert.equal(env.rows.get(user.owner).snapshot_json,before);
+  const json = await (await s.publicBusinessFlightSyncStableFeed(env,new URL(access.accessURL+'.json'))).json();
+  assert.equal(json.flights.length,12);
+  assert.equal(json.flight_count,12);
+  assert.equal(json.sync_state,'ready');
+});
+
+test('feed JSON count always reflects flights[] and a corrupted snapshot never masquerades as zero', async () => {
+  const s=createSubject(),env=mockEnv(),user={owner:'snapshot-guard'};
+  const access=await (await s.rotateBusinessFlightSyncAccess(env,user)).json();
+  const row=env.rows.get(user.owner);
+  row.snapshot_json='{"version":1,"flights":[{"id":"flight-1"}]}';
+  row.flight_count=0;
+  row.snapshot_updated_at='2026-10-15T00:00:00Z';
+  const feed=await s.publicBusinessFlightSyncStableFeed(env,new URL(access.accessURL+'?format=json'));
+  assert.match(feed.headers.get('content-type'),/application\/json/);
+  const payload=await feed.json();
+  assert.equal(payload.flight_count,1);
+  assert.equal(payload.flights.length,1);
+  row.snapshot_json='{bad-json';
+  const failed=await s.publicBusinessFlightSyncStableFeed(env,new URL(access.accessURL+'.json'));
+  assert.equal(failed.status,503);
+  assert.equal((await failed.json()).error,'FLIGHT_SYNC_SNAPSHOT_CORRUPT');
+});
+
+test('SwiftUI always re-fetches published flights before sync, and distinguishes UI from exported count',()=>{
+  const swift=fs.readFileSync(path.resolve(import.meta.dirname,'../../../Sources/Views/FlightCurationView.swift'),'utf8');
+  assert.match(swift,/private func freshFlightSyncOffers\(\) async throws/);
+  assert.match(swift,/let offers = try await api.curatedFlights\(\)/);
+  assert.match(swift,/guard !current.isEmpty else \{ throw FlightSyncProtectionError.emptyPublished \}/);
+  assert.match(swift,/api.saveFlightSyncSnapshot\(offers: actualOffers\)/);
+  assert.doesNotMatch(swift,/api.saveFlightSyncSnapshot\(offers: published\)/);
+  assert.match(swift,/flightSyncSavedCount/);
+});
