@@ -2,6 +2,13 @@ import Foundation
 import UIKit
 import UserNotifications
 
+// Shared event names used by APIClient, RootView, and push-notification handling.
+// Keep these in an existing iOS target source file so XcodeGen includes them.
+extension Notification.Name {
+    static let iumrahBusinessSessionInvalidated = Notification.Name("iumrah.business.sessionInvalidated")
+    static let iumrahBusinessSecurityNewSession = Notification.Name("iumrah.business.securityNewSession")
+}
+
 @MainActor
 final class BusinessAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(
