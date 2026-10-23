@@ -1,0 +1,46 @@
+// Run with: python3 Tests/run_umrah_draft_tests.py (macOS with Swift).
+func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+    precondition(condition(), message)
+}
+func date(_ raw: String) -> Date { UmrahPackageDraft.date(raw)! }
+func flight(_ id: String, _ from: String, _ to: String, _ depart: String, _ arrive: String) -> UmrahPackageDraft.Flight {
+    .init(id: id, source: "test", legs: [.init(airline: "Test", flightNumber: id, airlineCode: "HY", origin: from, destination: to, departureAt: depart, arrivalAt: arrive, durationMinutes: 0, stops: 0, cabinClass: "economy")])
+}
+var draft = UmrahPackageDraft()
+expect(draft.total == nil, "Empty proposal must not display a confirmed total")
+expect(draft.issue(at: 0) != nil, "Two flights required")
+draft.outbound = flight("out", "TAS", "JED", "2099-11-20T15:00:00Z", "2099-11-20T19:00:00Z")
+draft.inbound = flight("in", "MED", "TAS", "2099-11-27T20:00:00Z", "2099-11-28T00:00:00Z")
+draft.flightPrice = "500,50"
+expect(draft.issue(at: 0) == nil, "Valid open-jaw route")
+draft.makkah.id = "makkah"; draft.makkah.name = "Makkah Hotel"; draft.makkah.room = "Twin"
+draft.makkah.checkIn = date("2099-11-19T21:00:00Z"); draft.makkah.checkOut = date("2099-11-23T21:00:00Z"); draft.makkah.price = "400"
+draft.medina.id = "medina"; draft.medina.name = "Medina Hotel"; draft.medina.room = "Twin"
+draft.medina.checkIn = draft.makkah.checkOut; draft.medina.checkOut = date("2099-11-26T21:00:00Z"); draft.medina.price = "300"
+expect(draft.issue(at: 1) == nil, "All nights covered in Saudi timezone")
+expect(draft.makkah.nights == 4 && draft.medina.nights == 3, "Local nights")
+expect(draft.total == 2001, "Fare per person, hotels and transfer per group")
+let encoded = try JSONEncoder().encode(draft)
+let decoded = try JSONDecoder().decode(UmrahPackageDraft.self, from: encoded)
+expect(decoded == draft, "Draft round trip")
+draft.medina.checkIn = date("2099-11-24T21:00:00Z")
+expect(draft.issue(at: 1) != nil, "Missing night blocked")
+draft.medina.checkIn = date("2099-11-22T21:00:00Z")
+expect(draft.issue(at: 1) != nil, "Overlapping hotel nights blocked")
+draft.includeMedina = false; draft.makkah.checkOut = draft.medina.checkOut
+expect(draft.issue(at: 1) == nil, "Makkah-only stay")
+expect(draft.total == 1701, "Disabled Medina excluded from total")
+draft.ziyaratMedina = true; draft.ziyaratPrice = "80"
+expect(draft.total == 1701, "Hidden Medina ziyarat excluded")
+draft.ziyaratMakkah = true
+expect(draft.total == 1781, "Ziyarat included once for group")
+draft.travelers = 4; draft.vehicle = "Chevrolet Malibu"; draft.pickup = draft.arrival!
+expect(draft.issue(at: 2) != nil, "Malibu capacity enforced")
+draft.vehicle = "Kia Carnival"
+expect(draft.issue(at: 2) == nil, "Carnival capacity")
+draft.pickup = draft.arrival!.addingTimeInterval(-60)
+expect(draft.issue(at: 2) != nil, "Pickup cannot precede flight arrival")
+for invalid in ["-1", "nan", "inf", "", "oops"] {
+    expect(UmrahPackageDraft.amount(invalid) == nil, "Invalid money blocked: \(invalid)")
+}
+print("Umrah draft behavioral checks passed")

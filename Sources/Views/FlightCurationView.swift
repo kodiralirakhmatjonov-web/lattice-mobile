@@ -303,9 +303,12 @@ struct FlightCurationView: View {
             .padding(.bottom, 36)
         }
         .background(BusinessDesign.background.ignoresSafeArea())
-        .navigationTitle("Авиабилеты")
+        .navigationTitle(tabMode ? "" : "Авиабилеты")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if tabMode {
+                ToolbarItem(placement: .principal) { BusinessBrandLogo(width: 150).frame(height: 36) }
+            }
             ToolbarItem(placement: .topBarLeading) {
                 if tabMode {
                     BusinessSidebarButton()

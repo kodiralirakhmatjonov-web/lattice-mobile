@@ -38,6 +38,7 @@ struct ChatsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
+            ToolbarItem(placement: .principal) { BusinessBrandLogo(width: 150).frame(height: 36) }
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink { NewChatBookingPicker(bookings: bookings) } label: {
                     Image(systemName: "square.and.pencil")

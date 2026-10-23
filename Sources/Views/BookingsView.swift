@@ -56,7 +56,8 @@ struct BookingsView: View {
             }
         }
         .background(BusinessDesign.background)
-        .navigationTitle("Бронирования")
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(item: $selectedBooking) { booking in
             if !layout.supportsTwoPaneWorkspace {
                 BookingDetailView(bookingID: booking.id)
@@ -65,12 +66,7 @@ struct BookingsView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
             ToolbarItem(placement: .principal) {
-                Image("Logo")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(BusinessDesign.ink)
-                    .frame(width: 116, height: 28)
+                BusinessBrandLogo(width: 150).frame(height: 36)
             }
         }
         .overlay {

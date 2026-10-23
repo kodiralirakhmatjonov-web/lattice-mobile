@@ -1,0 +1,85 @@
+{
+  "swift_syntax": [
+    {
+      "file": "Sources/Models/UmrahPackageDraft.swift",
+      "errors": []
+    },
+    {
+      "file": "Sources/Views/BookingsView.swift",
+      "errors": []
+    },
+    {
+      "file": "Sources/Views/ChatsView.swift",
+      "errors": []
+    },
+    {
+      "file": "Sources/Views/FlightCurationView.swift",
+      "errors": []
+    },
+    {
+      "file": "Sources/Views/HotelsView.swift",
+      "errors": []
+    },
+    {
+      "file": "Sources/Views/OverviewView.swift",
+      "errors": []
+    },
+    {
+      "file": "Sources/Views/UmrahBuilderView.swift",
+      "errors": []
+    },
+    {
+      "file": "Tests/UmrahPackageDraftTests.swift",
+      "errors": []
+    }
+  ],
+  "assets": [
+    {
+      "file": "Resources/Assets.xcassets/TransferCarnival.imageset/car.png",
+      "size": [
+        1254,
+        1254
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "Resources/Assets.xcassets/TransferMalibu.imageset/car.png",
+      "size": [
+        1254,
+        1254
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "Resources/Assets.xcassets/TransferYukon.imageset/car.png",
+      "size": [
+        1254,
+        1254
+      ],
+      "mode": "RGBA"
+    }
+  ],
+  "swift_typecheck": "not run: Swift/Xcode unavailable",
+  "behavioral_tests": "prepared, not run: Swift unavailable",
+  "live_api": "not run: authenticated app session unavailable",
+  "modified_original_files": [
+    "Sources/Views/FlightCurationView.swift",
+    "Sources/Views/HotelsView.swift",
+    "Sources/Views/OverviewView.swift",
+    "Sources/Views/BookingsView.swift",
+    "Sources/Views/ChatsView.swift"
+  ],
+  "new_files": [
+    "UMRAH_BUILDER_20261023.md",
+    "Tests/run_umrah_draft_tests.py",
+    "Tests/UmrahPackageDraftTests.swift",
+    "Resources/Assets.xcassets/TransferMalibu.imageset/car.png",
+    "Resources/Assets.xcassets/TransferMalibu.imageset/Contents.json",
+    "Resources/Assets.xcassets/TransferCarnival.imageset/car.png",
+    "Resources/Assets.xcassets/TransferCarnival.imageset/Contents.json",
+    "Resources/Assets.xcassets/TransferYukon.imageset/car.png",
+    "Resources/Assets.xcassets/TransferYukon.imageset/Contents.json",
+    "Sources/Views/UmrahBuilderView.swift",
+    "Sources/Models/UmrahPackageDraft.swift"
+  ]
+}

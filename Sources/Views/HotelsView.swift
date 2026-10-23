@@ -37,7 +37,8 @@ struct HotelsView: View {
         .background(BusinessDesign.background)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() } }
+        .toolbar { ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
+            ToolbarItem(placement: .principal) { BusinessBrandLogo(width: 150).frame(height: 36) } }
         .sheet(isPresented: $showAdd, onDismiss: { Task { await load() } }) {
             AddHotelView()
         }

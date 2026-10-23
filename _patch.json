@@ -1,5 +1,25 @@
 {
-  "name": "iumrah Business Primary Hotel same-price manual override bridge v2",
-  "purpose": "Allow operator-confirmed Primary Hotel prices to be selected and written to hotel_price_overrides even when the supplied price equals the currently displayed effective price.",
-  "files": ["Sources/Networking/APIClient+HotelSync.swift"]
+  "name": "iUmrah Business — manual Umrah configurator and primary-tab branding",
+  "date": "2026-10-23",
+  "files": [
+    "Resources/Assets.xcassets/TransferCarnival.imageset/Contents.json",
+    "Resources/Assets.xcassets/TransferCarnival.imageset/car.png",
+    "Resources/Assets.xcassets/TransferMalibu.imageset/Contents.json",
+    "Resources/Assets.xcassets/TransferMalibu.imageset/car.png",
+    "Resources/Assets.xcassets/TransferYukon.imageset/Contents.json",
+    "Resources/Assets.xcassets/TransferYukon.imageset/car.png",
+    "Sources/Models/UmrahPackageDraft.swift",
+    "Sources/Views/BookingsView.swift",
+    "Sources/Views/ChatsView.swift",
+    "Sources/Views/FlightCurationView.swift",
+    "Sources/Views/HotelsView.swift",
+    "Sources/Views/OverviewView.swift",
+    "Sources/Views/UmrahBuilderView.swift",
+    "Tests/UmrahPackageDraftTests.swift",
+    "Tests/run_umrah_draft_tests.py",
+    "UMRAH_BUILDER_20261023.md"
+  ],
+  "server_changes": false,
+  "notifications_connected": false,
+  "booking_creation_connected": false
 }

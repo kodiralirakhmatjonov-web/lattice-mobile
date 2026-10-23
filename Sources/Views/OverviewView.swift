@@ -25,6 +25,7 @@ struct OverviewView: View {
     @EnvironmentObject private var auth: AuthStore
     @Environment(\.businessAdaptiveLayout) private var layout
     @StateObject private var store = OverviewStore()
+    @State private var showUmrahBuilder = false
 
     var checking: Int { store.bookings.filter { operationalStatus($0) == .availabilityCheck }.count }
     var payment: Int { store.bookings.filter { operationalStatus($0) == .paymentPending }.count }
@@ -46,9 +47,20 @@ struct OverviewView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                BusinessBrandLogo(width: 150)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 4)
+                Button { showUmrahBuilder = true } label: {
+                    HStack(spacing: 16) {
+                        Image(systemName: "plus").font(.title2.weight(.medium))
+                            .frame(width: 56, height: 56)
+                            .businessGlass(in: RoundedRectangle(cornerRadius: 20), interactive: true)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Создать Umrah").font(.title2.bold())
+                            Text("Перелёт, отели и личный трансфер")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.headline)
+                    }.foregroundStyle(BusinessDesign.ink).padding(22).businessCard(radius: 30)
+                }.buttonStyle(.plain)
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text("BOOKING OPERATIONS").font(.caption2.bold()).tracking(2.2).foregroundStyle(.white.opacity(0.52))
@@ -108,8 +120,11 @@ struct OverviewView: View {
         }
         .background(BusinessDesign.background)
         .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showUmrahBuilder) { NavigationStack { UmrahBuilderView(owner: auth.user?.login ?? "") } }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { BusinessSidebarButton() }
+            ToolbarItem(placement: .principal) { BusinessBrandLogo(width: 150).frame(height: 36) }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button("Обновить") { Task { await store.reload() } }
